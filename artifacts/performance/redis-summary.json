@@ -1,0 +1,75 @@
+{
+  "baseline_commit": "a3884c84e1c07f78ddb9259a1787c19cea88cb5e",
+  "candidate_commit": "fa94339bd088a7735876b4c7ce1a5230606de5ec",
+  "harness_commit": "fa94339bd088a7735876b4c7ce1a5230606de5ec",
+  "harness_sha256": {
+    "profile-benchmark.ts": "894044acfa2ea7f8768681da7b90036fd93eca1d76b7923d8306d014d108f672",
+    "profile-metrics.ts": "4d9f587677122dfc854c1592b5989f690df36cf6e6d5006ea5a020bc2d94b9ae"
+  },
+  "repetitions": 3,
+  "environment": {
+    "logicalCpus": 5,
+    "totalMemoryBytes": 18882662400,
+    "node": "v24.22.1",
+    "redisPersistence": {
+      "maxmemory-policy": "noeviction",
+      "appendfsync": "always",
+      "appendonly": "yes"
+    }
+  },
+  "levels": [
+    {
+      "concurrency": 1,
+      "before_http_p95_median_ms": 110.87523300000066,
+      "after_http_p95_median_ms": 34.7244910000004,
+      "before_pg_complete_median_ms": 150.5769739999996,
+      "after_pg_complete_median_ms": 85.08746299999984,
+      "after_redis_finalization_median_ms": 40.21577400000024,
+      "before_request_sql_per_call": 22,
+      "after_request_sql_per_call": 0,
+      "http_improvement_percent": 68.68147190274658
+    },
+    {
+      "concurrency": 10,
+      "before_http_p95_median_ms": 404.56272399999943,
+      "after_http_p95_median_ms": 198.97452399999975,
+      "before_pg_complete_median_ms": 543.9638940000004,
+      "after_pg_complete_median_ms": 767.1650090000003,
+      "after_redis_finalization_median_ms": 238.0748010000002,
+      "before_request_sql_per_call": 22,
+      "after_request_sql_per_call": 0,
+      "http_improvement_percent": 50.817385736210326
+    },
+    {
+      "concurrency": 50,
+      "before_http_p95_median_ms": 1225.884716999999,
+      "after_http_p95_median_ms": 260.91973099999996,
+      "before_pg_complete_median_ms": 1760.3056020000004,
+      "after_pg_complete_median_ms": 5209.420772999999,
+      "after_redis_finalization_median_ms": 314.8784510000005,
+      "before_request_sql_per_call": 22,
+      "after_request_sql_per_call": 0,
+      "http_improvement_percent": 78.71580195252568
+    },
+    {
+      "concurrency": 100,
+      "before_http_p95_median_ms": 1518.1566090000015,
+      "after_http_p95_median_ms": 429.8872990000018,
+      "before_pg_complete_median_ms": 3558.4828160000034,
+      "after_pg_complete_median_ms": 7805.7366420000035,
+      "after_redis_finalization_median_ms": 549.2283190000016,
+      "before_request_sql_per_call": 22,
+      "after_request_sql_per_call": 0,
+      "http_improvement_percent": 71.68359993616433
+    }
+  ],
+  "before_accounting": {
+    "requests": 484,
+    "micros": 9680
+  },
+  "after_accounting": {
+    "requests": 484,
+    "micros": 9680
+  },
+  "scope": "identical harness and AOF always; total HTTP latency; PG completion actively drained after HTTP measurement; no isolated gateway/SSE SLO claim"
+}

@@ -1,0 +1,1761 @@
+{
+  "environment": {
+    "logicalCpus": 5,
+    "totalMemoryBytes": 18882662400,
+    "node": "v24.22.1",
+    "redisPersistence": {
+      "maxmemory-policy": "noeviction",
+      "appendfsync": "always",
+      "appendonly": "yes"
+    }
+  },
+  "mode": "redis-journal-async-pg",
+  "cold": {
+    "statuses": {
+      "200": 1
+    },
+    "elapsedMs": 93.73836299999994,
+    "response": {
+      "count": 1,
+      "p50Ms": 93.53651600000012,
+      "p95Ms": 93.53651600000012,
+      "meanMs": 93.53651600000012
+    },
+    "settlementElapsedMs": 104.21985399999994,
+    "metrics": {
+      "sqlCalls": 6,
+      "sqlCallsPerRequest": 6,
+      "requestSqlCalls": 0,
+      "requestSqlCallsPerRequest": 0,
+      "backgroundSqlCalls": 6,
+      "queries": [
+        {
+          "fingerprint": "[background] /*background:outbox-capacity*/ SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1",
+          "count": 1,
+          "p50Ms": 1.7235740000000987,
+          "p95Ms": 1.7235740000000987,
+          "meanMs": 1.7235740000000987
+        },
+        {
+          "fingerprint": "[background] BEGIN",
+          "count": 1,
+          "p50Ms": 3.901633999999831,
+          "p95Ms": 3.901633999999831,
+          "meanMs": 3.901633999999831
+        },
+        {
+          "fingerprint": "[background] SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+          "count": 1,
+          "p50Ms": 12.914780000000064,
+          "p95Ms": 12.914780000000064,
+          "meanMs": 12.914780000000064
+        },
+        {
+          "fingerprint": "[background] SELECT epoch::text,revision::text FROM hot_projection_state WHERE request_id=$1",
+          "count": 1,
+          "p50Ms": 2.7250450000001365,
+          "p95Ms": 2.7250450000001365,
+          "meanMs": 2.7250450000001365
+        },
+        {
+          "fingerprint": "[background] INSERT INTO requests(request_id,project_id,key_id,period,reserve_micros,route_version,price_snapshot,status,created_at,updated_at) VALUES($1,$2,(SELECT id FROM ",
+          "count": 1,
+          "p50Ms": 3.715197999999873,
+          "p95Ms": 3.715197999999873,
+          "meanMs": 3.715197999999873
+        },
+        {
+          "fingerprint": "[background] SELECT project_id::text,key_id::text,period,reserve_micros::text,actual_micros::text,status FROM requests WHERE request_id=$1 FOR UPDATE",
+          "count": 1,
+          "p50Ms": 1.3576560000001336,
+          "p95Ms": 1.3576560000001336,
+          "meanMs": 1.3576560000001336
+        }
+      ],
+      "redisCommands": {
+        "eval": 1,
+        "evalsha": 5,
+        "hset": 1,
+        "XAUTOCLAIM": 1,
+        "XREADGROUP": 2
+      },
+      "redisCommandsPerRequest": 10,
+      "pool": {
+        "maxWaiting": 0,
+        "acquisition": {
+          "count": 0,
+          "p50Ms": 0,
+          "p95Ms": 0,
+          "meanMs": 0
+        }
+      },
+      "phases": {
+        "admit": {
+          "count": 1,
+          "p50Ms": 8.678593000000092,
+          "p95Ms": 8.678593000000092,
+          "meanMs": 8.678593000000092
+        },
+        "dispatch": {
+          "count": 1,
+          "p50Ms": 3.467489000000114,
+          "p95Ms": 3.467489000000114,
+          "meanMs": 3.467489000000114
+        },
+        "settle": {
+          "count": 1,
+          "p50Ms": 5.930191999999806,
+          "p95Ms": 5.930191999999806,
+          "meanMs": 5.930191999999806
+        }
+      }
+    },
+    "ledgerProjectionElapsedMs": 173.65906200000018
+  },
+  "results": [
+    {
+      "concurrency": 1,
+      "repetition": 1,
+      "baseline": {
+        "statuses": {
+          "200": 1
+        },
+        "elapsedMs": 12.799042999999983,
+        "response": {
+          "count": 1,
+          "p50Ms": 12.764892000000145,
+          "p95Ms": 12.764892000000145,
+          "meanMs": 12.764892000000145
+        }
+      },
+      "gateway": {
+        "statuses": {
+          "200": 1
+        },
+        "elapsedMs": 24.04669399999966,
+        "response": {
+          "count": 1,
+          "p50Ms": 24.02782100000013,
+          "p95Ms": 24.02782100000013,
+          "meanMs": 24.02782100000013
+        }
+      },
+      "settlementElapsedMs": 29.544096999999965,
+      "ledgerProjectionElapsedMs": 85.08746299999984,
+      "metrics": {
+        "sqlCalls": 2,
+        "sqlCallsPerRequest": 2,
+        "requestSqlCalls": 0,
+        "requestSqlCallsPerRequest": 0,
+        "backgroundSqlCalls": 2,
+        "queries": [
+          {
+            "fingerprint": "[background] COMMIT",
+            "count": 1,
+            "p50Ms": 2.847794999999678,
+            "p95Ms": 2.847794999999678,
+            "meanMs": 2.847794999999678
+          },
+          {
+            "fingerprint": "[background] UPDATE outbox SET status='published',published_at=now() WHERE id=ANY($1::uuid[])",
+            "count": 1,
+            "p50Ms": 3.0651370000000497,
+            "p95Ms": 3.0651370000000497,
+            "meanMs": 3.0651370000000497
+          }
+        ],
+        "redisCommands": {
+          "eval": 1,
+          "evalsha": 5,
+          "zrangebyscore": 1
+        },
+        "redisCommandsPerRequest": 7,
+        "pool": {
+          "maxWaiting": 0,
+          "acquisition": {
+            "count": 0,
+            "p50Ms": 0,
+            "p95Ms": 0,
+            "meanMs": 0
+          }
+        },
+        "phases": {
+          "admit": {
+            "count": 1,
+            "p50Ms": 4.082456999999977,
+            "p95Ms": 4.082456999999977,
+            "meanMs": 4.082456999999977
+          },
+          "dispatch": {
+            "count": 1,
+            "p50Ms": 3.784070000000156,
+            "p95Ms": 3.784070000000156,
+            "meanMs": 3.784070000000156
+          },
+          "settle": {
+            "count": 1,
+            "p50Ms": 3.913626999999906,
+            "p95Ms": 3.913626999999906,
+            "meanMs": 3.913626999999906
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 1,
+      "repetition": 2,
+      "baseline": {
+        "statuses": {
+          "200": 1
+        },
+        "elapsedMs": 23.18357700000024,
+        "response": {
+          "count": 1,
+          "p50Ms": 23.159386000000268,
+          "p95Ms": 23.159386000000268,
+          "meanMs": 23.159386000000268
+        }
+      },
+      "gateway": {
+        "statuses": {
+          "200": 1
+        },
+        "elapsedMs": 34.78176499999972,
+        "response": {
+          "count": 1,
+          "p50Ms": 34.7244910000004,
+          "p95Ms": 34.7244910000004,
+          "meanMs": 34.7244910000004
+        }
+      },
+      "settlementElapsedMs": 40.21577400000024,
+      "ledgerProjectionElapsedMs": 96.21263200000021,
+      "metrics": {
+        "sqlCalls": 4,
+        "sqlCallsPerRequest": 4,
+        "requestSqlCalls": 0,
+        "requestSqlCallsPerRequest": 0,
+        "backgroundSqlCalls": 4,
+        "queries": [
+          {
+            "fingerprint": "[background] SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            "count": 1,
+            "p50Ms": 2.8266099999996186,
+            "p95Ms": 2.8266099999996186,
+            "meanMs": 2.8266099999996186
+          },
+          {
+            "fingerprint": "[background] INSERT INTO usage_hourly(project_id,bucket,actual_micros,estimated_micros,input_tokens,output_tokens,event_count) SELECT project_id,date_trunc('hour',first_at),",
+            "count": 1,
+            "p50Ms": 3.33638400000018,
+            "p95Ms": 3.33638400000018,
+            "meanMs": 3.33638400000018
+          },
+          {
+            "fingerprint": "[background] COMMIT",
+            "count": 1,
+            "p50Ms": 3.83744200000001,
+            "p95Ms": 3.83744200000001,
+            "meanMs": 3.83744200000001
+          },
+          {
+            "fingerprint": "[background] UPDATE outbox SET status='published',published_at=now() WHERE id=ANY($1::uuid[])",
+            "count": 1,
+            "p50Ms": 4.556118999999853,
+            "p95Ms": 4.556118999999853,
+            "meanMs": 4.556118999999853
+          }
+        ],
+        "redisCommands": {
+          "eval": 1,
+          "evalsha": 5,
+          "zrangebyscore": 1
+        },
+        "redisCommandsPerRequest": 7,
+        "pool": {
+          "maxWaiting": 0,
+          "acquisition": {
+            "count": 0,
+            "p50Ms": 0,
+            "p95Ms": 0,
+            "meanMs": 0
+          }
+        },
+        "phases": {
+          "admit": {
+            "count": 1,
+            "p50Ms": 7.846012999999857,
+            "p95Ms": 7.846012999999857,
+            "meanMs": 7.846012999999857
+          },
+          "dispatch": {
+            "count": 1,
+            "p50Ms": 6.969872000000123,
+            "p95Ms": 6.969872000000123,
+            "meanMs": 6.969872000000123
+          },
+          "settle": {
+            "count": 1,
+            "p50Ms": 4.096126999999797,
+            "p95Ms": 4.096126999999797,
+            "meanMs": 4.096126999999797
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 1,
+      "repetition": 3,
+      "baseline": {
+        "statuses": {
+          "200": 1
+        },
+        "elapsedMs": 15.943857000000207,
+        "response": {
+          "count": 1,
+          "p50Ms": 14.129022000000077,
+          "p95Ms": 14.129022000000077,
+          "meanMs": 14.129022000000077
+        }
+      },
+      "gateway": {
+        "statuses": {
+          "200": 1
+        },
+        "elapsedMs": 37.80501099999992,
+        "response": {
+          "count": 1,
+          "p50Ms": 37.78323300000011,
+          "p95Ms": 37.78323300000011,
+          "meanMs": 37.78323300000011
+        }
+      },
+      "settlementElapsedMs": 42.90261299999975,
+      "ledgerProjectionElapsedMs": 77.55565100000013,
+      "metrics": {
+        "sqlCalls": 4,
+        "sqlCallsPerRequest": 4,
+        "requestSqlCalls": 0,
+        "requestSqlCallsPerRequest": 0,
+        "backgroundSqlCalls": 4,
+        "queries": [
+          {
+            "fingerprint": "[background] INSERT INTO usage_hourly(project_id,bucket,actual_micros,estimated_micros,input_tokens,output_tokens,event_count) SELECT project_id,date_trunc('hour',first_at),",
+            "count": 1,
+            "p50Ms": 5.057201999999961,
+            "p95Ms": 5.057201999999961,
+            "meanMs": 5.057201999999961
+          },
+          {
+            "fingerprint": "[background] COMMIT",
+            "count": 1,
+            "p50Ms": 4.326966000000084,
+            "p95Ms": 4.326966000000084,
+            "meanMs": 4.326966000000084
+          },
+          {
+            "fingerprint": "[background] UPDATE outbox SET status='published',published_at=now() WHERE id=ANY($1::uuid[])",
+            "count": 1,
+            "p50Ms": 2.314343000000008,
+            "p95Ms": 2.314343000000008,
+            "meanMs": 2.314343000000008
+          },
+          {
+            "fingerprint": "[background] /*background:outbox-capacity*/ SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1",
+            "count": 1,
+            "p50Ms": 1.8595220000001973,
+            "p95Ms": 1.8595220000001973,
+            "meanMs": 1.8595220000001973
+          }
+        ],
+        "redisCommands": {
+          "eval": 1,
+          "evalsha": 5,
+          "zrangebyscore": 1,
+          "hset": 1,
+          "XAUTOCLAIM": 1,
+          "XREADGROUP": 2
+        },
+        "redisCommandsPerRequest": 11,
+        "pool": {
+          "maxWaiting": 0,
+          "acquisition": {
+            "count": 0,
+            "p50Ms": 0,
+            "p95Ms": 0,
+            "meanMs": 0
+          }
+        },
+        "phases": {
+          "admit": {
+            "count": 1,
+            "p50Ms": 6.449258999999984,
+            "p95Ms": 6.449258999999984,
+            "meanMs": 6.449258999999984
+          },
+          "dispatch": {
+            "count": 1,
+            "p50Ms": 3.9675469999997404,
+            "p95Ms": 3.9675469999997404,
+            "meanMs": 3.9675469999997404
+          },
+          "settle": {
+            "count": 1,
+            "p50Ms": 2.5400610000001507,
+            "p95Ms": 2.5400610000001507,
+            "meanMs": 2.5400610000001507
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 10,
+      "repetition": 1,
+      "baseline": {
+        "statuses": {
+          "200": 10
+        },
+        "elapsedMs": 69.34561299999996,
+        "response": {
+          "count": 10,
+          "p50Ms": 45.72831200000019,
+          "p95Ms": 56.17135499999995,
+          "meanMs": 46.87159819999997
+        }
+      },
+      "gateway": {
+        "statuses": {
+          "200": 10
+        },
+        "elapsedMs": 203.7295570000001,
+        "response": {
+          "count": 10,
+          "p50Ms": 164.52790099999993,
+          "p95Ms": 198.97452399999975,
+          "meanMs": 160.2603395999999
+        }
+      },
+      "settlementElapsedMs": 238.0748010000002,
+      "ledgerProjectionElapsedMs": 829.7910410000004,
+      "metrics": {
+        "sqlCalls": 1,
+        "sqlCallsPerRequest": 0.1,
+        "requestSqlCalls": 0,
+        "requestSqlCallsPerRequest": 0,
+        "backgroundSqlCalls": 1,
+        "queries": [
+          {
+            "fingerprint": "[background] /*background:outbox-capacity*/ SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1",
+            "count": 1,
+            "p50Ms": 11.300649000000249,
+            "p95Ms": 11.300649000000249,
+            "meanMs": 11.300649000000249
+          }
+        ],
+        "redisCommands": {
+          "eval": 10,
+          "evalsha": 50,
+          "hset": 1,
+          "XAUTOCLAIM": 1,
+          "XREADGROUP": 2
+        },
+        "redisCommandsPerRequest": 6.4,
+        "pool": {
+          "maxWaiting": 0,
+          "acquisition": {
+            "count": 0,
+            "p50Ms": 0,
+            "p95Ms": 0,
+            "meanMs": 0
+          }
+        },
+        "phases": {
+          "admit": {
+            "count": 10,
+            "p50Ms": 12.946256999999605,
+            "p95Ms": 32.469804000000295,
+            "meanMs": 15.273901099999966
+          },
+          "dispatch": {
+            "count": 10,
+            "p50Ms": 17.766463999999814,
+            "p95Ms": 22.059743999999682,
+            "meanMs": 17.40206059999996
+          },
+          "settle": {
+            "count": 10,
+            "p50Ms": 28.37635999999975,
+            "p95Ms": 78.34215300000005,
+            "meanMs": 34.95225420000001
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 10,
+      "repetition": 2,
+      "baseline": {
+        "statuses": {
+          "200": 10
+        },
+        "elapsedMs": 37.165375999999924,
+        "response": {
+          "count": 10,
+          "p50Ms": 27.697542999999314,
+          "p95Ms": 36.053797999999915,
+          "meanMs": 28.4657127999998
+        }
+      },
+      "gateway": {
+        "statuses": {
+          "200": 10
+        },
+        "elapsedMs": 226.59036800000013,
+        "response": {
+          "count": 10,
+          "p50Ms": 170.01446300000043,
+          "p95Ms": 225.27756399999998,
+          "meanMs": 170.47950990000018
+        }
+      },
+      "settlementElapsedMs": 250.0649830000002,
+      "ledgerProjectionElapsedMs": 767.1650090000003,
+      "metrics": {
+        "sqlCalls": 6,
+        "sqlCallsPerRequest": 0.6,
+        "requestSqlCalls": 0,
+        "requestSqlCallsPerRequest": 0,
+        "backgroundSqlCalls": 6,
+        "queries": [
+          {
+            "fingerprint": "[background] COMMIT",
+            "count": 1,
+            "p50Ms": 21.688654000000497,
+            "p95Ms": 21.688654000000497,
+            "meanMs": 21.688654000000497
+          },
+          {
+            "fingerprint": "[background] UPDATE outbox SET status='published',published_at=now() WHERE id=ANY($1::uuid[])",
+            "count": 1,
+            "p50Ms": 9.581774000000223,
+            "p95Ms": 9.581774000000223,
+            "meanMs": 9.581774000000223
+          },
+          {
+            "fingerprint": "[background] /*background:outbox-capacity*/ SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1",
+            "count": 1,
+            "p50Ms": 13.185334999999213,
+            "p95Ms": 13.185334999999213,
+            "meanMs": 13.185334999999213
+          },
+          {
+            "fingerprint": "[background] BEGIN",
+            "count": 1,
+            "p50Ms": 7.4892509999999675,
+            "p95Ms": 7.4892509999999675,
+            "meanMs": 7.4892509999999675
+          },
+          {
+            "fingerprint": "[background] SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            "count": 1,
+            "p50Ms": 3.8479800000004616,
+            "p95Ms": 3.8479800000004616,
+            "meanMs": 3.8479800000004616
+          },
+          {
+            "fingerprint": "[background] SELECT epoch::text,revision::text FROM hot_projection_state WHERE request_id=$1",
+            "count": 1,
+            "p50Ms": 4.675796000000446,
+            "p95Ms": 4.675796000000446,
+            "meanMs": 4.675796000000446
+          }
+        ],
+        "redisCommands": {
+          "eval": 10,
+          "evalsha": 50,
+          "zrangebyscore": 1,
+          "hset": 1,
+          "XAUTOCLAIM": 1,
+          "XREADGROUP": 2
+        },
+        "redisCommandsPerRequest": 6.5,
+        "pool": {
+          "maxWaiting": 0,
+          "acquisition": {
+            "count": 0,
+            "p50Ms": 0,
+            "p95Ms": 0,
+            "meanMs": 0
+          }
+        },
+        "phases": {
+          "admit": {
+            "count": 10,
+            "p50Ms": 10.962485000000015,
+            "p95Ms": 18.532438999999613,
+            "meanMs": 12.902715499999976
+          },
+          "dispatch": {
+            "count": 10,
+            "p50Ms": 23.471064000000297,
+            "p95Ms": 25.382372000000032,
+            "meanMs": 23.66987829999989
+          },
+          "settle": {
+            "count": 10,
+            "p50Ms": 12.493139999999585,
+            "p95Ms": 17.807745000000068,
+            "meanMs": 14.142156799999976
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 10,
+      "repetition": 3,
+      "baseline": {
+        "statuses": {
+          "200": 10
+        },
+        "elapsedMs": 11.871924000000035,
+        "response": {
+          "count": 10,
+          "p50Ms": 8.567872000000534,
+          "p95Ms": 10.093785999999454,
+          "meanMs": 8.891918500000065
+        }
+      },
+      "gateway": {
+        "statuses": {
+          "200": 10
+        },
+        "elapsedMs": 108.6113290000003,
+        "response": {
+          "count": 10,
+          "p50Ms": 103.0549890000002,
+          "p95Ms": 106.17780500000026,
+          "meanMs": 102.06837260000012
+        }
+      },
+      "settlementElapsedMs": 125.79731600000014,
+      "ledgerProjectionElapsedMs": 523.571156,
+      "metrics": {
+        "sqlCalls": 8,
+        "sqlCallsPerRequest": 0.8,
+        "requestSqlCalls": 0,
+        "requestSqlCallsPerRequest": 0,
+        "backgroundSqlCalls": 8,
+        "queries": [
+          {
+            "fingerprint": "[background] COMMIT",
+            "count": 2,
+            "p50Ms": 4.965135999999802,
+            "p95Ms": 11.735741999999846,
+            "meanMs": 8.350438999999824
+          },
+          {
+            "fingerprint": "[background] BEGIN",
+            "count": 1,
+            "p50Ms": 2.7877920000000813,
+            "p95Ms": 2.7877920000000813,
+            "meanMs": 2.7877920000000813
+          },
+          {
+            "fingerprint": "[background] INSERT INTO consumer_inbox(consumer_name,event_id,project_id) SELECT 'usage-v1',event_id,project_id FROM jsonb_to_recordset($1::jsonb) AS e(event_id text,projec",
+            "count": 1,
+            "p50Ms": 8.03174300000046,
+            "p95Ms": 8.03174300000046,
+            "meanMs": 8.03174300000046
+          },
+          {
+            "fingerprint": "[background] SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            "count": 1,
+            "p50Ms": 4.982267999999749,
+            "p95Ms": 4.982267999999749,
+            "meanMs": 4.982267999999749
+          },
+          {
+            "fingerprint": "[background] INSERT INTO usage_hourly(project_id,bucket,actual_micros,estimated_micros,input_tokens,output_tokens,event_count) SELECT project_id,date_trunc('hour',first_at),",
+            "count": 1,
+            "p50Ms": 6.233258000000205,
+            "p95Ms": 6.233258000000205,
+            "meanMs": 6.233258000000205
+          },
+          {
+            "fingerprint": "[background] UPDATE outbox SET status='published',published_at=now() WHERE id=ANY($1::uuid[])",
+            "count": 1,
+            "p50Ms": 5.7125209999994695,
+            "p95Ms": 5.7125209999994695,
+            "meanMs": 5.7125209999994695
+          },
+          {
+            "fingerprint": "[background] /*background:outbox-capacity*/ SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1",
+            "count": 1,
+            "p50Ms": 2.364270000000033,
+            "p95Ms": 2.364270000000033,
+            "meanMs": 2.364270000000033
+          }
+        ],
+        "redisCommands": {
+          "eval": 10,
+          "evalsha": 50,
+          "zrangebyscore": 1,
+          "hset": 1,
+          "XAUTOCLAIM": 1,
+          "XREADGROUP": 2
+        },
+        "redisCommandsPerRequest": 6.5,
+        "pool": {
+          "maxWaiting": 0,
+          "acquisition": {
+            "count": 0,
+            "p50Ms": 0,
+            "p95Ms": 0,
+            "meanMs": 0
+          }
+        },
+        "phases": {
+          "admit": {
+            "count": 10,
+            "p50Ms": 19.667874999999185,
+            "p95Ms": 24.648932999999488,
+            "meanMs": 20.108096699999987
+          },
+          "dispatch": {
+            "count": 10,
+            "p50Ms": 24.376376999999593,
+            "p95Ms": 29.808844000000136,
+            "meanMs": 24.920897299999886
+          },
+          "settle": {
+            "count": 10,
+            "p50Ms": 9.124088000000484,
+            "p95Ms": 11.837112000000161,
+            "meanMs": 9.341045999999915
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 50,
+      "repetition": 1,
+      "baseline": {
+        "statuses": {
+          "200": 50
+        },
+        "elapsedMs": 109.21748699999989,
+        "response": {
+          "count": 50,
+          "p50Ms": 59.586317000000236,
+          "p95Ms": 98.24397700000009,
+          "meanMs": 65.40695586
+        }
+      },
+      "gateway": {
+        "statuses": {
+          "200": 50
+        },
+        "elapsedMs": 371.3410670000003,
+        "response": {
+          "count": 50,
+          "p50Ms": 268.0301730000001,
+          "p95Ms": 340.67072499999995,
+          "meanMs": 273.88092966
+        }
+      },
+      "settlementElapsedMs": 391.6249199999993,
+      "ledgerProjectionElapsedMs": 5209.420772999999,
+      "metrics": {
+        "sqlCalls": 25,
+        "sqlCallsPerRequest": 0.5,
+        "requestSqlCalls": 0,
+        "requestSqlCallsPerRequest": 0,
+        "backgroundSqlCalls": 25,
+        "queries": [
+          {
+            "fingerprint": "[background] BEGIN",
+            "count": 2,
+            "p50Ms": 1.5391159999999218,
+            "p95Ms": 6.060481999999865,
+            "meanMs": 3.7997989999998936
+          },
+          {
+            "fingerprint": "[background] SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            "count": 2,
+            "p50Ms": 1.4876169999997728,
+            "p95Ms": 2.384360999999444,
+            "meanMs": 1.9359889999996085
+          },
+          {
+            "fingerprint": "[background] SELECT epoch::text,revision::text FROM hot_projection_state WHERE request_id=$1",
+            "count": 2,
+            "p50Ms": 1.3812129999996614,
+            "p95Ms": 6.122779999999693,
+            "meanMs": 3.7519964999996773
+          },
+          {
+            "fingerprint": "[background] INSERT INTO requests(request_id,project_id,key_id,period,reserve_micros,route_version,price_snapshot,status,created_at,updated_at) VALUES($1,$2,(SELECT id FROM ",
+            "count": 2,
+            "p50Ms": 2.3350890000001527,
+            "p95Ms": 7.5764540000000125,
+            "meanMs": 4.955771500000083
+          },
+          {
+            "fingerprint": "[background] SELECT project_id::text,key_id::text,period,reserve_micros::text,actual_micros::text,status FROM requests WHERE request_id=$1 FOR UPDATE",
+            "count": 2,
+            "p50Ms": 2.159483999999793,
+            "p95Ms": 9.397565000000213,
+            "meanMs": 5.778524500000003
+          },
+          {
+            "fingerprint": "[background] SELECT status FROM reservations WHERE request_id=$1",
+            "count": 2,
+            "p50Ms": 2.7375879999999597,
+            "p95Ms": 15.12155199999961,
+            "meanMs": 8.929569999999785
+          },
+          {
+            "fingerprint": "[background] SELECT amount_micros::text,estimated,created_at FROM ledger WHERE event_id=ANY($1::text[]) ORDER BY event_id DESC",
+            "count": 2,
+            "p50Ms": 1.6943389999996725,
+            "p95Ms": 2.3586810000006153,
+            "meanMs": 2.026510000000144
+          },
+          {
+            "fingerprint": "[background] UPDATE requests SET status=$2,actual_micros=$3,input_tokens=$4,output_tokens=$5,alias_name=$6,error_code=$7,updated_at=$8 WHERE request_id=$1",
+            "count": 2,
+            "p50Ms": 1.993927999999869,
+            "p95Ms": 10.270322999999735,
+            "meanMs": 6.132125499999802
+          },
+          {
+            "fingerprint": "[background] INSERT INTO reservations(request_id,project_id,period,reserved_micros,actual_micros,status,lease_expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$",
+            "count": 2,
+            "p50Ms": 2.597302000000127,
+            "p95Ms": 11.494738000000325,
+            "meanMs": 7.046020000000226
+          },
+          {
+            "fingerprint": "[background] UPDATE api_keys SET last_used_at=GREATEST(COALESCE(last_used_at,$2::timestamptz),$2::timestamptz) WHERE id=$1",
+            "count": 2,
+            "p50Ms": 1.8299820000002,
+            "p95Ms": 3.8455320000002757,
+            "meanMs": 2.837757000000238
+          },
+          {
+            "fingerprint": "[background] INSERT INTO hot_projection_state(request_id,epoch,revision) VALUES($1,$2,$3) ON CONFLICT(request_id) DO UPDATE SET revision=excluded.revision,updated_at=now()",
+            "count": 2,
+            "p50Ms": 1.4330380000001242,
+            "p95Ms": 3.481988999999885,
+            "meanMs": 2.4575135000000046
+          },
+          {
+            "fingerprint": "[background] COMMIT",
+            "count": 2,
+            "p50Ms": 2.553744999999253,
+            "p95Ms": 3.298576999999568,
+            "meanMs": 2.9261609999994107
+          },
+          {
+            "fingerprint": "[background] /*background:outbox-capacity*/ SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1",
+            "count": 1,
+            "p50Ms": 8.340191000000232,
+            "p95Ms": 8.340191000000232,
+            "meanMs": 8.340191000000232
+          }
+        ],
+        "redisCommands": {
+          "eval": 50,
+          "evalsha": 250,
+          "hset": 1,
+          "XAUTOCLAIM": 1,
+          "XREADGROUP": 2,
+          "EVAL": 2
+        },
+        "redisCommandsPerRequest": 6.12,
+        "pool": {
+          "maxWaiting": 0,
+          "acquisition": {
+            "count": 0,
+            "p50Ms": 0,
+            "p95Ms": 0,
+            "meanMs": 0
+          }
+        },
+        "phases": {
+          "admit": {
+            "count": 50,
+            "p50Ms": 39.404853,
+            "p95Ms": 66.85285099999965,
+            "meanMs": 37.25203435999998
+          },
+          "dispatch": {
+            "count": 50,
+            "p50Ms": 54.70086100000026,
+            "p95Ms": 93.91731100000015,
+            "meanMs": 55.55921871999992
+          },
+          "settle": {
+            "count": 50,
+            "p50Ms": 38.82148700000016,
+            "p95Ms": 48.4727469999998,
+            "meanMs": 31.87643991999994
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 50,
+      "repetition": 2,
+      "baseline": {
+        "statuses": {
+          "200": 50
+        },
+        "elapsedMs": 143.64079800000036,
+        "response": {
+          "count": 50,
+          "p50Ms": 96.22328600000037,
+          "p95Ms": 106.90240100000119,
+          "meanMs": 96.45721772000023
+        }
+      },
+      "gateway": {
+        "statuses": {
+          "200": 50
+        },
+        "elapsedMs": 266.027333,
+        "response": {
+          "count": 50,
+          "p50Ms": 201.45873200000096,
+          "p95Ms": 260.91973099999996,
+          "meanMs": 216.61489824000003
+        }
+      },
+      "settlementElapsedMs": 314.8784510000005,
+      "ledgerProjectionElapsedMs": 4593.8555639999995,
+      "metrics": {
+        "sqlCalls": 26,
+        "sqlCallsPerRequest": 0.52,
+        "requestSqlCalls": 0,
+        "requestSqlCallsPerRequest": 0,
+        "backgroundSqlCalls": 26,
+        "queries": [
+          {
+            "fingerprint": "[background] BEGIN",
+            "count": 3,
+            "p50Ms": 2.5214319999995496,
+            "p95Ms": 2.8185859999994136,
+            "meanMs": 2.0904619999995098
+          },
+          {
+            "fingerprint": "[background] SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            "count": 2,
+            "p50Ms": 1.1037240000005113,
+            "p95Ms": 4.911970999999539,
+            "meanMs": 3.0078475000000253
+          },
+          {
+            "fingerprint": "[background] SELECT epoch::text,revision::text FROM hot_projection_state WHERE request_id=$1",
+            "count": 2,
+            "p50Ms": 0.6409700000003795,
+            "p95Ms": 2.2261020000005374,
+            "meanMs": 1.4335360000004584
+          },
+          {
+            "fingerprint": "[background] INSERT INTO requests(request_id,project_id,key_id,period,reserve_micros,route_version,price_snapshot,status,created_at,updated_at) VALUES($1,$2,(SELECT id FROM ",
+            "count": 2,
+            "p50Ms": 1.4040729999996984,
+            "p95Ms": 3.6789969999990717,
+            "meanMs": 2.541534999999385
+          },
+          {
+            "fingerprint": "[background] SELECT project_id::text,key_id::text,period,reserve_micros::text,actual_micros::text,status FROM requests WHERE request_id=$1 FOR UPDATE",
+            "count": 2,
+            "p50Ms": 1.4423709999991843,
+            "p95Ms": 1.9796480000004522,
+            "meanMs": 1.7110094999998182
+          },
+          {
+            "fingerprint": "[background] SELECT status FROM reservations WHERE request_id=$1",
+            "count": 2,
+            "p50Ms": 1.0452880000011646,
+            "p95Ms": 2.7605750000002445,
+            "meanMs": 1.9029315000007045
+          },
+          {
+            "fingerprint": "[background] SELECT amount_micros::text,estimated,created_at FROM ledger WHERE event_id=ANY($1::text[]) ORDER BY event_id DESC",
+            "count": 2,
+            "p50Ms": 1.1402360000010958,
+            "p95Ms": 1.2802879999999277,
+            "meanMs": 1.2102620000005118
+          },
+          {
+            "fingerprint": "[background] UPDATE requests SET status=$2,actual_micros=$3,input_tokens=$4,output_tokens=$5,alias_name=$6,error_code=$7,updated_at=$8 WHERE request_id=$1",
+            "count": 2,
+            "p50Ms": 1.3167329999996582,
+            "p95Ms": 2.13904999999977,
+            "meanMs": 1.7278914999997141
+          },
+          {
+            "fingerprint": "[background] INSERT INTO reservations(request_id,project_id,period,reserved_micros,actual_micros,status,lease_expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$",
+            "count": 2,
+            "p50Ms": 1.2664930000009917,
+            "p95Ms": 16.56775000000016,
+            "meanMs": 8.917121500000576
+          },
+          {
+            "fingerprint": "[background] UPDATE api_keys SET last_used_at=GREATEST(COALESCE(last_used_at,$2::timestamptz),$2::timestamptz) WHERE id=$1",
+            "count": 2,
+            "p50Ms": 0.9737519999998767,
+            "p95Ms": 8.806803999999829,
+            "meanMs": 4.890277999999853
+          },
+          {
+            "fingerprint": "[background] INSERT INTO hot_projection_state(request_id,epoch,revision) VALUES($1,$2,$3) ON CONFLICT(request_id) DO UPDATE SET revision=excluded.revision,updated_at=now()",
+            "count": 2,
+            "p50Ms": 1.0073279999996885,
+            "p95Ms": 1.1662510000005568,
+            "meanMs": 1.0867895000001226
+          },
+          {
+            "fingerprint": "[background] COMMIT",
+            "count": 2,
+            "p50Ms": 2.2425189999994473,
+            "p95Ms": 3.1286479999998846,
+            "meanMs": 2.685583499999666
+          },
+          {
+            "fingerprint": "[background] /*background:outbox-capacity*/ SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1",
+            "count": 1,
+            "p50Ms": 6.26035899999988,
+            "p95Ms": 6.26035899999988,
+            "meanMs": 6.26035899999988
+          }
+        ],
+        "redisCommands": {
+          "eval": 50,
+          "evalsha": 250,
+          "hset": 1,
+          "XAUTOCLAIM": 1,
+          "XREADGROUP": 2,
+          "EVAL": 2
+        },
+        "redisCommandsPerRequest": 6.12,
+        "pool": {
+          "maxWaiting": 0,
+          "acquisition": {
+            "count": 0,
+            "p50Ms": 0,
+            "p95Ms": 0,
+            "meanMs": 0
+          }
+        },
+        "phases": {
+          "admit": {
+            "count": 50,
+            "p50Ms": 30.581647999999404,
+            "p95Ms": 54.93456100000003,
+            "meanMs": 30.214665159999896
+          },
+          "dispatch": {
+            "count": 50,
+            "p50Ms": 65.35727399999996,
+            "p95Ms": 82.84830200000033,
+            "meanMs": 67.86002912000022
+          },
+          "settle": {
+            "count": 50,
+            "p50Ms": 33.56821099999979,
+            "p95Ms": 42.292913999999655,
+            "meanMs": 30.167253360000032
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 50,
+      "repetition": 3,
+      "baseline": {
+        "statuses": {
+          "200": 50
+        },
+        "elapsedMs": 97.72171300000082,
+        "response": {
+          "count": 50,
+          "p50Ms": 78.22206600000027,
+          "p95Ms": 81.80280499999935,
+          "meanMs": 74.88833124000011
+        }
+      },
+      "gateway": {
+        "statuses": {
+          "200": 50
+        },
+        "elapsedMs": 266.3028950000007,
+        "response": {
+          "count": 50,
+          "p50Ms": 192.51789700000154,
+          "p95Ms": 254.77484900000127,
+          "meanMs": 209.18142954000004
+        }
+      },
+      "settlementElapsedMs": 298.97611099999995,
+      "ledgerProjectionElapsedMs": 5614.4494589999995,
+      "metrics": {
+        "sqlCalls": 19,
+        "sqlCallsPerRequest": 0.38,
+        "requestSqlCalls": 0,
+        "requestSqlCallsPerRequest": 0,
+        "backgroundSqlCalls": 19,
+        "queries": [
+          {
+            "fingerprint": "[background] BEGIN",
+            "count": 2,
+            "p50Ms": 0.7270050000006449,
+            "p95Ms": 5.33916599999975,
+            "meanMs": 3.0330855000001975
+          },
+          {
+            "fingerprint": "[background] SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            "count": 2,
+            "p50Ms": 0.7631700000001729,
+            "p95Ms": 3.785626000000775,
+            "meanMs": 2.274398000000474
+          },
+          {
+            "fingerprint": "[background] SELECT epoch::text,revision::text FROM hot_projection_state WHERE request_id=$1",
+            "count": 2,
+            "p50Ms": 0.8940380000003643,
+            "p95Ms": 1.0193660000004456,
+            "meanMs": 0.956702000000405
+          },
+          {
+            "fingerprint": "[background] INSERT INTO requests(request_id,project_id,key_id,period,reserve_micros,route_version,price_snapshot,status,created_at,updated_at) VALUES($1,$2,(SELECT id FROM ",
+            "count": 2,
+            "p50Ms": 1.047653999999966,
+            "p95Ms": 2.2627100000008795,
+            "meanMs": 1.6551820000004227
+          },
+          {
+            "fingerprint": "[background] SELECT project_id::text,key_id::text,period,reserve_micros::text,actual_micros::text,status FROM requests WHERE request_id=$1 FOR UPDATE",
+            "count": 2,
+            "p50Ms": 0.8969570000008389,
+            "p95Ms": 1.4319890000006126,
+            "meanMs": 1.1644730000007257
+          },
+          {
+            "fingerprint": "[background] SELECT status FROM reservations WHERE request_id=$1",
+            "count": 2,
+            "p50Ms": 0.628947999999582,
+            "p95Ms": 2.618938999999955,
+            "meanMs": 1.6239434999997684
+          },
+          {
+            "fingerprint": "[background] /*background:outbox-capacity*/ SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1",
+            "count": 1,
+            "p50Ms": 7.810045000000173,
+            "p95Ms": 7.810045000000173,
+            "meanMs": 7.810045000000173
+          },
+          {
+            "fingerprint": "[background] SELECT amount_micros::text,estimated,created_at FROM ledger WHERE event_id=ANY($1::text[]) ORDER BY event_id DESC",
+            "count": 1,
+            "p50Ms": 0.7757799999999406,
+            "p95Ms": 0.7757799999999406,
+            "meanMs": 0.7757799999999406
+          },
+          {
+            "fingerprint": "[background] UPDATE requests SET status=$2,actual_micros=$3,input_tokens=$4,output_tokens=$5,alias_name=$6,error_code=$7,updated_at=$8 WHERE request_id=$1",
+            "count": 1,
+            "p50Ms": 0.6329379999988305,
+            "p95Ms": 0.6329379999988305,
+            "meanMs": 0.6329379999988305
+          },
+          {
+            "fingerprint": "[background] INSERT INTO reservations(request_id,project_id,period,reserved_micros,actual_micros,status,lease_expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$",
+            "count": 1,
+            "p50Ms": 0.6455489999989368,
+            "p95Ms": 0.6455489999989368,
+            "meanMs": 0.6455489999989368
+          },
+          {
+            "fingerprint": "[background] UPDATE api_keys SET last_used_at=GREATEST(COALESCE(last_used_at,$2::timestamptz),$2::timestamptz) WHERE id=$1",
+            "count": 1,
+            "p50Ms": 1.3055339999991702,
+            "p95Ms": 1.3055339999991702,
+            "meanMs": 1.3055339999991702
+          },
+          {
+            "fingerprint": "[background] INSERT INTO hot_projection_state(request_id,epoch,revision) VALUES($1,$2,$3) ON CONFLICT(request_id) DO UPDATE SET revision=excluded.revision,updated_at=now()",
+            "count": 1,
+            "p50Ms": 0.6282250000003842,
+            "p95Ms": 0.6282250000003842,
+            "meanMs": 0.6282250000003842
+          },
+          {
+            "fingerprint": "[background] COMMIT",
+            "count": 1,
+            "p50Ms": 3.8514180000001943,
+            "p95Ms": 3.8514180000001943,
+            "meanMs": 3.8514180000001943
+          }
+        ],
+        "redisCommands": {
+          "eval": 50,
+          "evalsha": 250,
+          "hset": 1,
+          "XAUTOCLAIM": 1,
+          "XREADGROUP": 2,
+          "EVAL": 1
+        },
+        "redisCommandsPerRequest": 6.1,
+        "pool": {
+          "maxWaiting": 0,
+          "acquisition": {
+            "count": 0,
+            "p50Ms": 0,
+            "p95Ms": 0,
+            "meanMs": 0
+          }
+        },
+        "phases": {
+          "admit": {
+            "count": 50,
+            "p50Ms": 23.485775000001013,
+            "p95Ms": 51.823177000000214,
+            "meanMs": 27.794550299999827
+          },
+          "dispatch": {
+            "count": 50,
+            "p50Ms": 58.48281800000041,
+            "p95Ms": 70.16705600000023,
+            "meanMs": 58.715246959999966
+          },
+          "settle": {
+            "count": 50,
+            "p50Ms": 29.84116599999834,
+            "p95Ms": 60.505159999998796,
+            "meanMs": 29.96332515999991
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 100,
+      "repetition": 1,
+      "baseline": {
+        "statuses": {
+          "200": 100
+        },
+        "elapsedMs": 190.40310200000022,
+        "response": {
+          "count": 100,
+          "p50Ms": 106.27674699999989,
+          "p95Ms": 140.85775899999862,
+          "meanMs": 107.03403480999998
+        }
+      },
+      "gateway": {
+        "statuses": {
+          "200": 100
+        },
+        "elapsedMs": 540.7247639999987,
+        "response": {
+          "count": 100,
+          "p50Ms": 408.5425809999979,
+          "p95Ms": 497.5352579999999,
+          "meanMs": 379.29221486
+        }
+      },
+      "settlementElapsedMs": 557.849839999999,
+      "ledgerProjectionElapsedMs": 8487.612474000001,
+      "metrics": {
+        "sqlCalls": 23,
+        "sqlCallsPerRequest": 0.23,
+        "requestSqlCalls": 0,
+        "requestSqlCallsPerRequest": 0,
+        "backgroundSqlCalls": 23,
+        "queries": [
+          {
+            "fingerprint": "[background] BEGIN",
+            "count": 3,
+            "p50Ms": 13.12763100000302,
+            "p95Ms": 26.313022999998793,
+            "meanMs": 15.456707333333421
+          },
+          {
+            "fingerprint": "[background] COMMIT",
+            "count": 2,
+            "p50Ms": 3.0110769999992044,
+            "p95Ms": 3.6362349999981234,
+            "meanMs": 3.323655999998664
+          },
+          {
+            "fingerprint": "[background] SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            "count": 2,
+            "p50Ms": 6.177933999999368,
+            "p95Ms": 11.12608999999793,
+            "meanMs": 8.65201199999865
+          },
+          {
+            "fingerprint": "[background] SELECT epoch::text,revision::text FROM hot_projection_state WHERE request_id=$1",
+            "count": 2,
+            "p50Ms": 3.336263000001054,
+            "p95Ms": 5.737042000000656,
+            "meanMs": 4.536652500000855
+          },
+          {
+            "fingerprint": "[background] INSERT INTO requests(request_id,project_id,key_id,period,reserve_micros,route_version,price_snapshot,status,created_at,updated_at) VALUES($1,$2,(SELECT id FROM ",
+            "count": 2,
+            "p50Ms": 2.3132360000017798,
+            "p95Ms": 2.539050999999745,
+            "meanMs": 2.4261435000007623
+          },
+          {
+            "fingerprint": "[background] SELECT project_id::text,key_id::text,period,reserve_micros::text,actual_micros::text,status FROM requests WHERE request_id=$1 FOR UPDATE",
+            "count": 2,
+            "p50Ms": 1.080627999999706,
+            "p95Ms": 1.9766010000021197,
+            "meanMs": 1.5286145000009128
+          },
+          {
+            "fingerprint": "[background] SELECT status FROM reservations WHERE request_id=$1",
+            "count": 2,
+            "p50Ms": 2.251689000000624,
+            "p95Ms": 2.841301000000385,
+            "meanMs": 2.5464950000005047
+          },
+          {
+            "fingerprint": "[background] SELECT amount_micros::text,estimated,created_at FROM ledger WHERE event_id=ANY($1::text[]) ORDER BY event_id DESC",
+            "count": 2,
+            "p50Ms": 0.9723059999996622,
+            "p95Ms": 1.7292600000000675,
+            "meanMs": 1.3507829999998648
+          },
+          {
+            "fingerprint": "[background] WITH candidate AS (SELECT id FROM outbox WHERE status IN('pending','leased') AND available_at<=now() ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 50) UPDATE",
+            "count": 1,
+            "p50Ms": 5.349480999997468,
+            "p95Ms": 5.349480999997468,
+            "meanMs": 5.349480999997468
+          },
+          {
+            "fingerprint": "[background] /*background:outbox-capacity*/ SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1",
+            "count": 1,
+            "p50Ms": 8.333040999998047,
+            "p95Ms": 8.333040999998047,
+            "meanMs": 8.333040999998047
+          },
+          {
+            "fingerprint": "[background] UPDATE requests SET status=$2,actual_micros=$3,input_tokens=$4,output_tokens=$5,alias_name=$6,error_code=$7,updated_at=$8 WHERE request_id=$1",
+            "count": 1,
+            "p50Ms": 2.391139999999723,
+            "p95Ms": 2.391139999999723,
+            "meanMs": 2.391139999999723
+          },
+          {
+            "fingerprint": "[background] INSERT INTO reservations(request_id,project_id,period,reserved_micros,actual_micros,status,lease_expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$",
+            "count": 1,
+            "p50Ms": 3.4010870000020077,
+            "p95Ms": 3.4010870000020077,
+            "meanMs": 3.4010870000020077
+          },
+          {
+            "fingerprint": "[background] UPDATE api_keys SET last_used_at=GREATEST(COALESCE(last_used_at,$2::timestamptz),$2::timestamptz) WHERE id=$1",
+            "count": 1,
+            "p50Ms": 3.158480000001873,
+            "p95Ms": 3.158480000001873,
+            "meanMs": 3.158480000001873
+          },
+          {
+            "fingerprint": "[background] INSERT INTO hot_projection_state(request_id,epoch,revision) VALUES($1,$2,$3) ON CONFLICT(request_id) DO UPDATE SET revision=excluded.revision,updated_at=now()",
+            "count": 1,
+            "p50Ms": 1.3011469999983092,
+            "p95Ms": 1.3011469999983092,
+            "meanMs": 1.3011469999983092
+          }
+        ],
+        "redisCommands": {
+          "eval": 100,
+          "evalsha": 500,
+          "zrangebyscore": 1,
+          "hset": 1,
+          "XAUTOCLAIM": 1,
+          "XREADGROUP": 2,
+          "EVAL": 1
+        },
+        "redisCommandsPerRequest": 6.06,
+        "pool": {
+          "maxWaiting": 0,
+          "acquisition": {
+            "count": 0,
+            "p50Ms": 0,
+            "p95Ms": 0,
+            "meanMs": 0
+          }
+        },
+        "phases": {
+          "admit": {
+            "count": 100,
+            "p50Ms": 40.33536300000196,
+            "p95Ms": 58.12608900000123,
+            "meanMs": 37.239639109999914
+          },
+          "dispatch": {
+            "count": 100,
+            "p50Ms": 56.62852500000008,
+            "p95Ms": 77.32401200000095,
+            "meanMs": 58.169676749999816
+          },
+          "settle": {
+            "count": 100,
+            "p50Ms": 38.52147900000273,
+            "p95Ms": 77.88952000000063,
+            "meanMs": 44.642286399999975
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 100,
+      "repetition": 2,
+      "baseline": {
+        "statuses": {
+          "200": 100
+        },
+        "elapsedMs": 114.12825200000225,
+        "response": {
+          "count": 100,
+          "p50Ms": 74.51895399999921,
+          "p95Ms": 104.42674099999931,
+          "meanMs": 72.56444386999989
+        }
+      },
+      "gateway": {
+        "statuses": {
+          "200": 100
+        },
+        "elapsedMs": 444.91893100000016,
+        "response": {
+          "count": 100,
+          "p50Ms": 361.54309400000056,
+          "p95Ms": 424.27583700000105,
+          "meanMs": 370.0420193699998
+        }
+      },
+      "settlementElapsedMs": 549.2283190000016,
+      "ledgerProjectionElapsedMs": 7805.7366420000035,
+      "metrics": {
+        "sqlCalls": 16,
+        "sqlCallsPerRequest": 0.16,
+        "requestSqlCalls": 0,
+        "requestSqlCallsPerRequest": 0,
+        "backgroundSqlCalls": 16,
+        "queries": [
+          {
+            "fingerprint": "[background] BEGIN",
+            "count": 2,
+            "p50Ms": 0.5365419999980077,
+            "p95Ms": 1.4116770000000542,
+            "meanMs": 0.974109499999031
+          },
+          {
+            "fingerprint": "[background] SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            "count": 2,
+            "p50Ms": 0.44329300000026706,
+            "p95Ms": 0.8478849999992235,
+            "meanMs": 0.6455889999997453
+          },
+          {
+            "fingerprint": "[background] SELECT epoch::text,revision::text FROM hot_projection_state WHERE request_id=$1",
+            "count": 2,
+            "p50Ms": 0.9116960000028485,
+            "p95Ms": 2.5975370000014664,
+            "meanMs": 1.7546165000021574
+          },
+          {
+            "fingerprint": "[background] /*background:outbox-capacity*/ SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1",
+            "count": 1,
+            "p50Ms": 39.94402500000069,
+            "p95Ms": 39.94402500000069,
+            "meanMs": 39.94402500000069
+          },
+          {
+            "fingerprint": "[background] INSERT INTO requests(request_id,project_id,key_id,period,reserve_micros,route_version,price_snapshot,status,created_at,updated_at) VALUES($1,$2,(SELECT id FROM ",
+            "count": 1,
+            "p50Ms": 3.4752169999992475,
+            "p95Ms": 3.4752169999992475,
+            "meanMs": 3.4752169999992475
+          },
+          {
+            "fingerprint": "[background] SELECT project_id::text,key_id::text,period,reserve_micros::text,actual_micros::text,status FROM requests WHERE request_id=$1 FOR UPDATE",
+            "count": 1,
+            "p50Ms": 4.129634000000806,
+            "p95Ms": 4.129634000000806,
+            "meanMs": 4.129634000000806
+          },
+          {
+            "fingerprint": "[background] SELECT status FROM reservations WHERE request_id=$1",
+            "count": 1,
+            "p50Ms": 1.1042559999987134,
+            "p95Ms": 1.1042559999987134,
+            "meanMs": 1.1042559999987134
+          },
+          {
+            "fingerprint": "[background] SELECT amount_micros::text,estimated,created_at FROM ledger WHERE event_id=ANY($1::text[]) ORDER BY event_id DESC",
+            "count": 1,
+            "p50Ms": 2.1862180000025546,
+            "p95Ms": 2.1862180000025546,
+            "meanMs": 2.1862180000025546
+          },
+          {
+            "fingerprint": "[background] UPDATE requests SET status=$2,actual_micros=$3,input_tokens=$4,output_tokens=$5,alias_name=$6,error_code=$7,updated_at=$8 WHERE request_id=$1",
+            "count": 1,
+            "p50Ms": 1.5606759999973292,
+            "p95Ms": 1.5606759999973292,
+            "meanMs": 1.5606759999973292
+          },
+          {
+            "fingerprint": "[background] INSERT INTO reservations(request_id,project_id,period,reserved_micros,actual_micros,status,lease_expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$",
+            "count": 1,
+            "p50Ms": 0.8339769999984128,
+            "p95Ms": 0.8339769999984128,
+            "meanMs": 0.8339769999984128
+          },
+          {
+            "fingerprint": "[background] UPDATE api_keys SET last_used_at=GREATEST(COALESCE(last_used_at,$2::timestamptz),$2::timestamptz) WHERE id=$1",
+            "count": 1,
+            "p50Ms": 0.7977950000022247,
+            "p95Ms": 0.7977950000022247,
+            "meanMs": 0.7977950000022247
+          },
+          {
+            "fingerprint": "[background] INSERT INTO hot_projection_state(request_id,epoch,revision) VALUES($1,$2,$3) ON CONFLICT(request_id) DO UPDATE SET revision=excluded.revision,updated_at=now()",
+            "count": 1,
+            "p50Ms": 0.4434030000011262,
+            "p95Ms": 0.4434030000011262,
+            "meanMs": 0.4434030000011262
+          },
+          {
+            "fingerprint": "[background] COMMIT",
+            "count": 1,
+            "p50Ms": 1.870403000000806,
+            "p95Ms": 1.870403000000806,
+            "meanMs": 1.870403000000806
+          }
+        ],
+        "redisCommands": {
+          "eval": 100,
+          "evalsha": 500,
+          "hset": 1,
+          "XAUTOCLAIM": 1,
+          "XREADGROUP": 2,
+          "EVAL": 1
+        },
+        "redisCommandsPerRequest": 6.05,
+        "pool": {
+          "maxWaiting": 0,
+          "acquisition": {
+            "count": 0,
+            "p50Ms": 0,
+            "p95Ms": 0,
+            "meanMs": 0
+          }
+        },
+        "phases": {
+          "admit": {
+            "count": 100,
+            "p50Ms": 61.06388699999661,
+            "p95Ms": 94.98353399999905,
+            "meanMs": 61.45292569000005
+          },
+          "dispatch": {
+            "count": 100,
+            "p50Ms": 109.21192799999699,
+            "p95Ms": 138.1378160000022,
+            "meanMs": 112.27304500999973
+          },
+          "settle": {
+            "count": 100,
+            "p50Ms": 62.84954800000196,
+            "p95Ms": 75.9003389999998,
+            "meanMs": 62.17788078999983
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 100,
+      "repetition": 3,
+      "baseline": {
+        "statuses": {
+          "200": 100
+        },
+        "elapsedMs": 108.39072799999849,
+        "response": {
+          "count": 100,
+          "p50Ms": 82.68534100000397,
+          "p95Ms": 99.20870899999863,
+          "meanMs": 80.41048666000025
+        }
+      },
+      "gateway": {
+        "statuses": {
+          "200": 100
+        },
+        "elapsedMs": 443.5775429999994,
+        "response": {
+          "count": 100,
+          "p50Ms": 353.8168150000056,
+          "p95Ms": 429.8872990000018,
+          "meanMs": 365.00793719999996
+        }
+      },
+      "settlementElapsedMs": 480.1109129999968,
+      "ledgerProjectionElapsedMs": 7387.180842000002,
+      "metrics": {
+        "sqlCalls": 26,
+        "sqlCallsPerRequest": 0.26,
+        "requestSqlCalls": 0,
+        "requestSqlCallsPerRequest": 0,
+        "backgroundSqlCalls": 26,
+        "queries": [
+          {
+            "fingerprint": "[background] BEGIN",
+            "count": 3,
+            "p50Ms": 3.318513999998686,
+            "p95Ms": 8.988987999997335,
+            "meanMs": 4.592326000000564
+          },
+          {
+            "fingerprint": "[background] SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            "count": 2,
+            "p50Ms": 1.5381330000018352,
+            "p95Ms": 2.486121000001731,
+            "meanMs": 2.012127000001783
+          },
+          {
+            "fingerprint": "[background] SELECT epoch::text,revision::text FROM hot_projection_state WHERE request_id=$1",
+            "count": 2,
+            "p50Ms": 1.0356940000056056,
+            "p95Ms": 2.1046239999996033,
+            "meanMs": 1.5701590000026044
+          },
+          {
+            "fingerprint": "[background] INSERT INTO requests(request_id,project_id,key_id,period,reserve_micros,route_version,price_snapshot,status,created_at,updated_at) VALUES($1,$2,(SELECT id FROM ",
+            "count": 2,
+            "p50Ms": 2.13737100000435,
+            "p95Ms": 4.053337000004831,
+            "meanMs": 3.0953540000045905
+          },
+          {
+            "fingerprint": "[background] SELECT project_id::text,key_id::text,period,reserve_micros::text,actual_micros::text,status FROM requests WHERE request_id=$1 FOR UPDATE",
+            "count": 2,
+            "p50Ms": 1.2478719999999157,
+            "p95Ms": 1.2979639999975916,
+            "meanMs": 1.2729179999987537
+          },
+          {
+            "fingerprint": "[background] SELECT status FROM reservations WHERE request_id=$1",
+            "count": 2,
+            "p50Ms": 1.172974000000977,
+            "p95Ms": 2.4817299999995157,
+            "meanMs": 1.8273520000002463
+          },
+          {
+            "fingerprint": "[background] SELECT amount_micros::text,estimated,created_at FROM ledger WHERE event_id=ANY($1::text[]) ORDER BY event_id DESC",
+            "count": 2,
+            "p50Ms": 1.3461319999987609,
+            "p95Ms": 8.725359999996726,
+            "meanMs": 5.035745999997744
+          },
+          {
+            "fingerprint": "[background] UPDATE requests SET status=$2,actual_micros=$3,input_tokens=$4,output_tokens=$5,alias_name=$6,error_code=$7,updated_at=$8 WHERE request_id=$1",
+            "count": 2,
+            "p50Ms": 1.9537620000046445,
+            "p95Ms": 2.4687180000037188,
+            "meanMs": 2.2112400000041816
+          },
+          {
+            "fingerprint": "[background] INSERT INTO reservations(request_id,project_id,period,reserved_micros,actual_micros,status,lease_expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$",
+            "count": 2,
+            "p50Ms": 1.689596000003803,
+            "p95Ms": 1.749015999994299,
+            "meanMs": 1.719305999999051
+          },
+          {
+            "fingerprint": "[background] UPDATE api_keys SET last_used_at=GREATEST(COALESCE(last_used_at,$2::timestamptz),$2::timestamptz) WHERE id=$1",
+            "count": 2,
+            "p50Ms": 0.7797879999998258,
+            "p95Ms": 3.662556000002951,
+            "meanMs": 2.2211720000013884
+          },
+          {
+            "fingerprint": "[background] INSERT INTO hot_projection_state(request_id,epoch,revision) VALUES($1,$2,$3) ON CONFLICT(request_id) DO UPDATE SET revision=excluded.revision,updated_at=now()",
+            "count": 2,
+            "p50Ms": 1.6087630000038189,
+            "p95Ms": 3.957177000003867,
+            "meanMs": 2.782970000003843
+          },
+          {
+            "fingerprint": "[background] COMMIT",
+            "count": 2,
+            "p50Ms": 2.4186439999975846,
+            "p95Ms": 3.700019000003522,
+            "meanMs": 3.059331500000553
+          },
+          {
+            "fingerprint": "[background] /*background:outbox-capacity*/ SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1",
+            "count": 1,
+            "p50Ms": 11.90702600000077,
+            "p95Ms": 11.90702600000077,
+            "meanMs": 11.90702600000077
+          }
+        ],
+        "redisCommands": {
+          "eval": 100,
+          "evalsha": 500,
+          "hset": 1,
+          "XAUTOCLAIM": 1,
+          "XREADGROUP": 2,
+          "EVAL": 2
+        },
+        "redisCommandsPerRequest": 6.06,
+        "pool": {
+          "maxWaiting": 0,
+          "acquisition": {
+            "count": 0,
+            "p50Ms": 0,
+            "p95Ms": 0,
+            "meanMs": 0
+          }
+        },
+        "phases": {
+          "admit": {
+            "count": 100,
+            "p50Ms": 39.96533799999452,
+            "p95Ms": 81.4846219999963,
+            "meanMs": 39.87128604000005
+          },
+          "dispatch": {
+            "count": 100,
+            "p50Ms": 102.71253699999943,
+            "p95Ms": 114.18550799999502,
+            "meanMs": 102.60184019999993
+          },
+          "settle": {
+            "count": 100,
+            "p50Ms": 24.42041800000152,
+            "p95Ms": 46.533281000003626,
+            "meanMs": 29.256520090000194
+          }
+        }
+      }
+    }
+  ],
+  "accounting": {
+    "requests": 484,
+    "micros": 9680
+  },
+  "scope": "synthetic local upstream; real PG/Redis; SQL values and credentials excluded; method percentiles overlap and are not additive; Redis finalization and PG projection are measured separately"
+}
