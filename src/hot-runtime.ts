@@ -87,7 +87,11 @@ export class HotRuntime {
       await this.publishInside(c);
       await c.query('COMMIT');
     }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{
-      await c.query('SELECT pg_advisory_unlock(hashtextextended($1,0))',[`gateway:hot-config:${this.namespace}`]).catch(()=>{});c.release();
+      let unlockError:Error|undefined;
+      try{await c.query('SELECT pg_advisory_unlock(hashtextextended($1,0))',[`gateway:hot-config:${this.namespace}`]);}
+      catch(e){unlockError=e instanceof Error?e:new Error('Publisher unlock failed');}
+      // A possibly locked session must never return to the idle pool.
+      c.release(unlockError);
     }
   }
 

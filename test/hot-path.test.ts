@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Redis } from 'ioredis';
+import { Pool } from 'pg';
 import { buildApp } from '../src/app.js';
 import { hasServices,sandbox } from './helpers.js';
 import { mockUpstream } from './mock-upstream.js';
@@ -179,7 +180,10 @@ test('unknown correction is immutable, projection is exact and safe-integer mone
     await f.billing.settle(id,{actualMicros:null,inputTokens:null,outputTokens:null,status:'cancelled',attempts:[]});await f.projector.drain();
     const pending=await f.app.inject({url:`/api/usage?project_id=${f.project}`,headers:f.headers});
     assert.equal(pending.json().unknown_requests,1,'cancelled upstream outcome still has a conservative unknown charge');
+    const otherReservation=randomUUID();await admitRequest(f.billing,otherReservation,p);
     await f.billing.settle(id,{actualMicros:4,inputTokens:2,outputTokens:1,status:'completed',attempts:[]});
+    assert.equal(JSON.parse((await f.redis.get(f.runtime.keys.project(f.project)))!).budgets[p.price.period].reserved,p.price.total_reserved_micros,'correction must not release another request reservation');
+    await f.billing.cancelBeforeDispatch(otherReservation);
     await f.billing.settle(id,{actualMicros:4,inputTokens:2,outputTokens:1,status:'completed',attempts:[]});
     await assert.rejects(()=>f.billing.settle(id,{actualMicros:8,inputTokens:2,outputTokens:1,status:'completed',attempts:[]}),e=>(e as any).code==='settlement_conflict');
     await f.projector.drain();
@@ -193,6 +197,39 @@ test('unknown correction is immutable, projection is exact and safe-integer mone
     await f.projector.drain();assert.equal((await f.db.pool.query('SELECT sum(amount_micros)::text AS n FROM ledger')).rows[0].n,String(Number.MAX_SAFE_INTEGER-1));
     assert.equal(await f.redis.get(f.runtime.keys.slots),'0');
   }finally{await f.close();}
+});
+
+test('unknown-to-actual correction preserves exact money when the intermediate sum would exceed the safe integer bound',{skip:!hasServices,timeout:60000},async()=>{
+  const f=await fixture();try{
+    const p=await prepared(f),id=randomUUID();
+    await f.billing.admit({requestId:id,projectId:f.project,keyId:f.key.id,period:p.price.period,reserveMicros:2,
+      rpm:600,keyRpm:600,concurrency:32,budgetMicros:-1,routeVersion:p.routeVersion,priceSnapshot:p.price});
+    await f.billing.dispatch(id);await f.billing.settle(id,{actualMicros:null,inputTokens:null,outputTokens:null,status:'unknown',attempts:[]});
+    const before=JSON.parse((await f.redis.get(f.runtime.keys.project(f.project)))!).budgets[p.price.period];
+    assert.equal(before.spent,2);assert.equal(before.reserved,0,'first unknown finalization already released its reservation');
+    await f.projector.drain();
+    await f.billing.settle(id,{actualMicros:Number.MAX_SAFE_INTEGER,inputTokens:1,outputTokens:1,status:'completed',attempts:[]});
+    const after=JSON.parse((await f.redis.get(f.runtime.keys.project(f.project)))!).budgets[p.price.period];
+    assert.equal(after.spent,Number.MAX_SAFE_INTEGER);assert.equal(after.reserved,0);
+    await f.projector.drain();assert.equal((await f.db.pool.query('SELECT sum(amount_micros)::text AS n FROM ledger')).rows[0].n,String(Number.MAX_SAFE_INTEGER));
+  }finally{await f.close();}
+});
+
+test('failed publisher unlock destroys the PG session instead of retaining an advisory lock in the pool',{skip:!hasServices,timeout:60000},async()=>{
+  const f=await fixture(),publisherPool=new Pool({connectionString:f.db.config.DATABASE_URL,max:1});let injected=false;
+  publisherPool.on('connect',client=>{const original=client.query;(client as any).query=function(...args:any[]){
+    if(!injected&&String(args[0]).includes('pg_advisory_unlock(')){injected=true;return Promise.reject(Error('injected unlock failure'));}
+    return (original as any).apply(this,args);
+  };});
+  try{
+    const runtime=new HotRuntime(publisherPool,f.redis,f.runtime.keys,f.db.config.DATA_PLANE_NAMESPACE,'memory');
+    await runtime.initialize();await runtime.publish();assert.equal(injected,true);
+    const probe=await f.db.pool.connect();let acquired=false;
+    try{
+      for(let i=0;i<100;i++){acquired=(await probe.query('SELECT pg_try_advisory_lock(hashtextextended($1,0)) AS acquired',[`gateway:hot-config:${f.db.config.DATA_PLANE_NAMESPACE}`])).rows[0].acquired;if(acquired)break;await new Promise(r=>setTimeout(r,10));}
+      assert.equal(acquired,true,'publisher lock must be available to another session');
+    }finally{if(acquired)await probe.query('SELECT pg_advisory_unlock(hashtextextended($1,0))',[`gateway:hot-config:${f.db.config.DATA_PLANE_NAMESPACE}`]);probe.release();}
+  }finally{await publisherPool.end();await f.close();}
 });
 
 test('expired reserved/dispatched leases release or conservatively charge through Redis and the async journal',{skip:!hasServices,timeout:60000},async()=>{

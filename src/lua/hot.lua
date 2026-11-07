@@ -122,8 +122,11 @@ else
       if data.state=='unknown' and actual==cjson.null then return {0} end
       local charge=actual==cjson.null and data.reserveMicros or actual
       local previous=data.state=='unknown' and data.chargedMicros or 0
-      local spent=budget.spent+charge-previous
-      if spent<0 or spent>maxSafe then return {8} end
+      -- Subtract first: spent + charge can exceed 2^53 even when the net
+      -- correction is valid. Bound the final addition before performing it.
+      local adjustment=charge-previous
+      if adjustment>0 and budget.spent>maxSafe-adjustment or adjustment<0 and budget.spent < -adjustment then return {8} end
+      local spent=budget.spent+adjustment
       if data.state~='unknown' then budget.reserved=budget.reserved-data.reserveMicros end
       budget.spent=spent
       data.actualMicros=actual;data.chargedMicros=charge;data.state=actual==cjson.null and 'unknown' or 'settled'
