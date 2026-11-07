@@ -1,0 +1,30 @@
+name: verify
+on: [push, pull_request]
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: gateway
+          POSTGRES_PASSWORD: local-development-only
+          POSTGRES_DB: gateway
+        ports: ['5432:5432']
+        options: --health-cmd 'pg_isready -U gateway' --health-interval 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+    env:
+      DATABASE_URL: postgresql://gateway:local-development-only@localhost:5432/gateway
+      REDIS_URL: redis://localhost:6379
+      ENCRYPTION_KEY: '0000000000000000000000000000000000000000000000000000000000000001'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
