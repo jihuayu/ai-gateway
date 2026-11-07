@@ -1,6 +1,6 @@
 # 开发任务索引
 
-所有任务尚待实现；技术细节见 [实施设计](implementation.md)。
+所有任务已在 [PR #17](https://github.com/jihuayu/ai-gateway/pull/17) 提供实现或指定评估内容；issues 在合并前保持开放。逐项证据与限制见 [验证报告](verification.md)，技术细节见 [实施设计](implementation.md)。
 
 | 任务 | 优先级 | 依赖 |
 | --- | --- | --- |

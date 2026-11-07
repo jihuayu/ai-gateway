@@ -14,4 +14,8 @@
 | 结算连接池死锁 | PG提交后先释放client，再执行缓存结算；100并发100笔账本 |
 | 更正聚合重复/错误分类 | 同一请求的账本补偿先净额化，取最终计量，不重复token |
 
-最终候选关闭review正在针对冻结提交执行，完成后补充确切提交与结论。review未运行测试的部分以主代理附带的真实运行证据为依据。
+最终结论：**ACCEPT（blocker-closure，静态审阅）**。独立 DeepSeek reviewer 对冻结实现提交 `0cbd74bb9cb271219f045e2eb707140b290ce9d6` 确认 B1–B5 全部关闭，未发现变更区域中的其它阻塞缺陷。后续 CI 引用修正与交付记录不改变该实现提交的业务代码。
+
+Reviewer保留的两项确认已由主代理核实：events.ts 对每个请求先净额化账本再取最终计量分类（events.test.ts 覆盖更正不重复）；cancelBeforeDispatch 与 settle 均在请求行锁之前获取相同项目 advisory xact lock。
+
+Reviewer只读、未执行测试；真实运行证据由主代理在验证报告提供。性能目标未达标继续保留为已知限制，不能宣称通过生产SLO。

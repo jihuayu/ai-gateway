@@ -210,7 +210,7 @@ flowchart TB
 
 数据面提供 `GET /v1/models` 与 `POST /v1/chat/completions`。首版支持 `model`、文本 `messages`、`stream`、`temperature`、`max_tokens`；模型不支持的字段返回明确的 400，而非静默忽略。具体消息角色与参数范围由适配器能力表约束。
 
-控制面使用 `/api/projects`、`/api/providers`、`/api/model-aliases`、`/api/keys`、`/api/requests`、`/api/usage` 等资源。写入动作有角色检查和审计；列表采用游标分页，默认 50 条、上限 100 条。路由发布使用版本号防止并发覆盖。
+控制面使用 `/api/projects`、`/api/providers`、`/api/aliases`、`/api/keys`、`/api/requests`、`/api/usage` 等资源。写入动作有角色检查和审计；列表采用游标分页，默认 50 条、上限 100 条。路由发布使用版本号防止并发覆盖。
 
 错误响应形态示例：
 
