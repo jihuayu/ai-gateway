@@ -1,0 +1,43 @@
+{
+  "baseline_commit": "d1f0600646fa5c0625d522375502dd1ac0eec768",
+  "candidate_commit": "994e7d496c6aa2f1d62e3d73e1988a4fd4c90f60",
+  "concurrency": 100,
+  "repetitions": 3,
+  "before": {
+    "http_p95_median_ms": 1222.521435999999,
+    "http_p95_samples_ms": [
+      1280.2381480000004,
+      1222.521435999999,
+      1087.4282270000003
+    ],
+    "settlement_elapsed_median_ms": 1993.1398809999991,
+    "request_sql_per_call": 31,
+    "pool_acquire_p95_median_ms": 164.77248399999917,
+    "accounting": {
+      "requests": 484,
+      "micros": 9680
+    }
+  },
+  "after": {
+    "http_p95_median_ms": 952.2669569999998,
+    "http_p95_samples_ms": [
+      959.1676309999993,
+      952.2669569999998,
+      926.0118039999998
+    ],
+    "settlement_elapsed_median_ms": 1763.4072780000006,
+    "request_sql_per_call": 22,
+    "pool_acquire_p95_median_ms": 148.37661300000036,
+    "accounting": {
+      "requests": 484,
+      "micros": 9680
+    }
+  },
+  "improvement_percent": {
+    "http_p95_median_ms": 22.1063182241002,
+    "settlement_elapsed_median_ms": 11.526165583759079,
+    "request_sql_per_call": 29.03225806451613,
+    "pool_acquire_p95_median_ms": 9.950612263634314
+  },
+  "scope": "same harness, sequential baseline/candidate processes, synthetic upstream and real PG/Redis; total HTTP time, not isolated gateway overhead"
+}

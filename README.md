@@ -44,6 +44,7 @@ npm test
 - [运行、保留和恢复手册](docs/operations.md)
 - [P1 能力评估与契约](docs/p1-roadmap.md)
 - [验证与限制](docs/verification.md)
+- [性能优化计划](docs/performance-plan.md) 与 [首轮结果](docs/performance-results.md)
 
 ## License
 

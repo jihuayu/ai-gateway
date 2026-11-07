@@ -31,6 +31,6 @@
 DATABASE_URL=... REDIS_URL=... PERF_REPORT=artifacts/performance/profile.json node --import tsx scripts/profile-benchmark.ts
 ```
 
-PERF_CONCURRENCY指定并发级别，PERF_REPEATS指定重复次数。只对隔离测试数据库运行。输出包含SQL模板、耗时与计数，不包含参数或凭据。当前基线位于 artifacts/performance/before-profile.json，优化结果与审阅结论会随本轮交付补齐。
+PERF_CONCURRENCY指定并发级别，PERF_REPEATS指定重复次数。只对隔离测试数据库运行。输出包含SQL模板、耗时与计数，不包含参数或凭据。前后报告与解释见 [首轮优化结果](performance-results.md)：100并发三轮总响应P95中位数1222.52→952.27ms，请求SQL31→22；10并发中位数增加约6%，需要后续持续负载验证。
 
-DeepSeek本轮首次调用403；经用户要求重试后已恢复，负责结算队列实现，独立review将使用新只读会话。
+DeepSeek本轮首次调用403；经用户要求重试后已恢复并完成结算队列实现，独立review使用新的只读会话。审阅结论见 [review记录](deepseek-review.md)。#19/#20已有实现与验证证据；#21已完成批次合并的前置工作，独立连接池、增量投影及#22继续按上述顺序实施。

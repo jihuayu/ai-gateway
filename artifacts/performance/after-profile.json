@@ -1,0 +1,3311 @@
+{
+  "environment": {
+    "logicalCpus": 5,
+    "totalMemoryBytes": 18882662400,
+    "node": "v24.22.1"
+  },
+  "cold": {
+    "statuses": {
+      "200": 1
+    },
+    "elapsedMs": 132.6520969999999,
+    "response": {
+      "count": 1,
+      "p50Ms": 130.39849900000013,
+      "p95Ms": 130.39849900000013,
+      "meanMs": 130.39849900000013
+    },
+    "settlementElapsedMs": 147.98366899999996,
+    "metrics": {
+      "sqlCalls": 26,
+      "sqlCallsPerRequest": 26,
+      "requestSqlCalls": 26,
+      "requestSqlCallsPerRequest": 26,
+      "backgroundSqlCalls": 0,
+      "queries": [
+        {
+          "fingerprint": "[request] SELECT generation::text AS generation, paused, dirty, redis_run_id FROM billing_state WHERE project_id = $1",
+          "count": 3,
+          "p50Ms": 1.0929830000000038,
+          "p95Ms": 1.7594770000000608,
+          "meanMs": 1.2968410000000101
+        },
+        {
+          "fingerprint": "[request] SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1",
+          "count": 1,
+          "p50Ms": 3.000487000000021,
+          "p95Ms": 3.000487000000021,
+          "meanMs": 3.000487000000021
+        },
+        {
+          "fingerprint": "[request] /*gw:key*/ SELECT k.id AS key_id, k.prefix, k.allowed_models, k.expires_at, k.revoked_at, k.key_rpm, p.id AS project_id, p.workspace_id, p.rpm AS project_rpm, p",
+          "count": 1,
+          "p50Ms": 2.1235790000000634,
+          "p95Ms": 2.1235790000000634,
+          "meanMs": 2.1235790000000634
+        },
+        {
+          "fingerprint": "[request] /*gw:touch*/ UPDATE api_keys SET last_used_at = now() WHERE id = $1",
+          "count": 1,
+          "p50Ms": 2.8194730000000163,
+          "p95Ms": 2.8194730000000163,
+          "meanMs": 2.8194730000000163
+        },
+        {
+          "fingerprint": "[request] /*gw:route*/ SELECT a.id AS alias_id, a.name AS alias_name, rv.id AS route_version_id, rv.version, rv.targets, rv.capabilities FROM aliases a JOIN route_version",
+          "count": 1,
+          "p50Ms": 8.285401999999976,
+          "p95Ms": 8.285401999999976,
+          "meanMs": 8.285401999999976
+        },
+        {
+          "fingerprint": "[request] /*gw:targets*/ SELECT t.id, t.upstream_model, t.input_price::text AS input_price, t.output_price::text AS output_price, t.capabilities, t.enabled AS target_enab",
+          "count": 1,
+          "p50Ms": 3.333905000000186,
+          "p95Ms": 3.333905000000186,
+          "meanMs": 3.333905000000186
+        },
+        {
+          "fingerprint": "[request] WITH inserted AS ( INSERT INTO requests(request_id,project_id,key_id,period,reserve_micros,route_version,price_snapshot,status) VALUES($1,$2,$3,$4,$5,$6::jsonb,",
+          "count": 1,
+          "p50Ms": 8.135301000000027,
+          "p95Ms": 8.135301000000027,
+          "meanMs": 8.135301000000027
+        },
+        {
+          "fingerprint": "[request] INSERT INTO billing_state(project_id) VALUES($1) ON CONFLICT(project_id) DO NOTHING",
+          "count": 1,
+          "p50Ms": 3.181491000000051,
+          "p95Ms": 3.181491000000051,
+          "meanMs": 3.181491000000051
+        },
+        {
+          "fingerprint": "[request] UPDATE billing_state SET redis_run_id = $2, updated_at = now() WHERE project_id = $1 AND redis_run_id IS NULL",
+          "count": 1,
+          "p50Ms": 2.3900069999999687,
+          "p95Ms": 2.3900069999999687,
+          "meanMs": 2.3900069999999687
+        },
+        {
+          "fingerprint": "[request] SELECT (EXISTS(SELECT 1 FROM ledger WHERE project_id = $1) OR EXISTS(SELECT 1 FROM reservations WHERE project_id = $1 AND request_id <> $2 AND (status IN ('rese",
+          "count": 1,
+          "p50Ms": 2.7451320000000123,
+          "p95Ms": 2.7451320000000123,
+          "meanMs": 2.7451320000000123
+        },
+        {
+          "fingerprint": "[request] WITH r AS ( UPDATE requests SET status = 'reserved', updated_at = now() WHERE request_id = $1 AND status = 'preparing' RETURNING request_id ) UPDATE reservation",
+          "count": 1,
+          "p50Ms": 2.9708369999998467,
+          "p95Ms": 2.9708369999998467,
+          "meanMs": 2.9708369999998467
+        },
+        {
+          "fingerprint": "[request] SELECT project_id::text AS project_id, status, period FROM requests WHERE request_id = $1",
+          "count": 1,
+          "p50Ms": 0.9320270000000619,
+          "p95Ms": 0.9320270000000619,
+          "meanMs": 0.9320270000000619
+        },
+        {
+          "fingerprint": "[request] UPDATE requests SET status = 'dispatch_intent', updated_at = now() WHERE request_id = $1 AND status = 'reserved' RETURNING request_id",
+          "count": 1,
+          "p50Ms": 2.813310999999885,
+          "p95Ms": 2.813310999999885,
+          "meanMs": 2.813310999999885
+        },
+        {
+          "fingerprint": "[request] UPDATE requests SET status = 'dispatched', updated_at = now() WHERE request_id = $1 AND status = 'dispatch_intent'",
+          "count": 1,
+          "p50Ms": 1.9089340000000448,
+          "p95Ms": 1.9089340000000448,
+          "meanMs": 1.9089340000000448
+        },
+        {
+          "fingerprint": "[request] /*gw:request-attempts*/ WITH meta AS ( UPDATE requests SET alias_name=$2,error_code=$3,updated_at=now() WHERE request_id=$1 RETURNING request_id ) INSERT INTO a",
+          "count": 1,
+          "p50Ms": 4.555135000000064,
+          "p95Ms": 4.555135000000064,
+          "meanMs": 4.555135000000064
+        },
+        {
+          "fingerprint": "[request] /*gw:request-meta*/ UPDATE requests SET alias_name = $2, error_code = $3, updated_at = now() WHERE request_id = $1",
+          "count": 1,
+          "p50Ms": 8.95580300000006,
+          "p95Ms": 8.95580300000006,
+          "meanMs": 8.95580300000006
+        },
+        {
+          "fingerprint": "[request] BEGIN",
+          "count": 1,
+          "p50Ms": 0.6106019999999717,
+          "p95Ms": 0.6106019999999717,
+          "meanMs": 0.6106019999999717
+        },
+        {
+          "fingerprint": "[request] SELECT project_id::text FROM requests WHERE request_id=$1",
+          "count": 1,
+          "p50Ms": 0.8319490000001224,
+          "p95Ms": 0.8319490000001224,
+          "meanMs": 0.8319490000001224
+        },
+        {
+          "fingerprint": "[request] SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+          "count": 1,
+          "p50Ms": 0.8068419999999605,
+          "p95Ms": 0.8068419999999605,
+          "meanMs": 0.8068419999999605
+        },
+        {
+          "fingerprint": "[request] SELECT project_id::text AS project_id, period, reserve_micros::text AS reserve_micros, status, actual_micros::text AS actual_micros FROM requests WHERE request_",
+          "count": 1,
+          "p50Ms": 0.5749670000000151,
+          "p95Ms": 0.5749670000000151,
+          "meanMs": 0.5749670000000151
+        },
+        {
+          "fingerprint": "[request] SELECT event_id, amount_micros::text AS amount_micros, estimated FROM ledger WHERE event_id = ANY($1::text[])",
+          "count": 1,
+          "p50Ms": 1.163532000000032,
+          "p95Ms": 1.163532000000032,
+          "meanMs": 1.163532000000032
+        },
+        {
+          "fingerprint": "[request] WITH entry AS ( INSERT INTO ledger(event_id,request_id,project_id,period,amount_micros,kind,input_tokens,output_tokens,estimated) VALUES($10,$1,$2,$3,$4,$15,$6,",
+          "count": 1,
+          "p50Ms": 2.975925999999845,
+          "p95Ms": 2.975925999999845,
+          "meanMs": 2.975925999999845
+        },
+        {
+          "fingerprint": "[request] COMMIT",
+          "count": 1,
+          "p50Ms": 2.9218060000000605,
+          "p95Ms": 2.9218060000000605,
+          "meanMs": 2.9218060000000605
+        },
+        {
+          "fingerprint": "[request] SELECT generation::text AS generation FROM billing_state WHERE project_id = $1",
+          "count": 1,
+          "p50Ms": 1.164122000000134,
+          "p95Ms": 1.164122000000134,
+          "meanMs": 1.164122000000134
+        }
+      ],
+      "redisCommands": {
+        "get": 2,
+        "set": 1,
+        "evalsha": 3
+      },
+      "redisCommandsPerRequest": 6,
+      "pool": {
+        "maxWaiting": 0,
+        "acquisition": {
+          "count": 20,
+          "p50Ms": 0.05426599999987047,
+          "p95Ms": 1.8156349999999293,
+          "meanMs": 1.2447638500000267
+        }
+      },
+      "phases": {
+        "admit": {
+          "count": 1,
+          "p50Ms": 28.81522999999993,
+          "p95Ms": 28.81522999999993,
+          "meanMs": 28.81522999999993
+        },
+        "dispatch": {
+          "count": 1,
+          "p50Ms": 8.601349000000027,
+          "p95Ms": 8.601349000000027,
+          "meanMs": 8.601349000000027
+        },
+        "settle": {
+          "count": 1,
+          "p50Ms": 14.027630999999928,
+          "p95Ms": 14.027630999999928,
+          "meanMs": 14.027630999999928
+        }
+      }
+    }
+  },
+  "results": [
+    {
+      "concurrency": 1,
+      "repetition": 1,
+      "baseline": {
+        "statuses": {
+          "200": 1
+        },
+        "elapsedMs": 4.1163749999998345,
+        "response": {
+          "count": 1,
+          "p50Ms": 4.069995999999946,
+          "p95Ms": 4.069995999999946,
+          "meanMs": 4.069995999999946
+        }
+      },
+      "gateway": {
+        "statuses": {
+          "200": 1
+        },
+        "elapsedMs": 46.15182499999992,
+        "response": {
+          "count": 1,
+          "p50Ms": 46.097271999999975,
+          "p95Ms": 46.097271999999975,
+          "meanMs": 46.097271999999975
+        }
+      },
+      "settlementElapsedMs": 62.02988299999993,
+      "metrics": {
+        "sqlCalls": 31,
+        "sqlCallsPerRequest": 31,
+        "requestSqlCalls": 22,
+        "requestSqlCallsPerRequest": 22,
+        "backgroundSqlCalls": 9,
+        "queries": [
+          {
+            "fingerprint": "[background] BEGIN",
+            "count": 2,
+            "p50Ms": 0.753407000000152,
+            "p95Ms": 0.7744310000000496,
+            "meanMs": 0.7639190000001008
+          },
+          {
+            "fingerprint": "[request] SELECT generation::text AS generation, paused, dirty, redis_run_id FROM billing_state WHERE project_id = $1",
+            "count": 2,
+            "p50Ms": 0.9529999999999745,
+            "p95Ms": 1.1511229999998704,
+            "meanMs": 1.0520614999999225
+          },
+          {
+            "fingerprint": "[background] COMMIT",
+            "count": 2,
+            "p50Ms": 1.9583430000000135,
+            "p95Ms": 2.5185039999998935,
+            "meanMs": 2.2384234999999535
+          },
+          {
+            "fingerprint": "[request] SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1",
+            "count": 1,
+            "p50Ms": 1.0204120000000785,
+            "p95Ms": 1.0204120000000785,
+            "meanMs": 1.0204120000000785
+          },
+          {
+            "fingerprint": "[request] /*gw:key*/ SELECT k.id AS key_id, k.prefix, k.allowed_models, k.expires_at, k.revoked_at, k.key_rpm, p.id AS project_id, p.workspace_id, p.rpm AS project_rpm, p",
+            "count": 1,
+            "p50Ms": 2.19963000000007,
+            "p95Ms": 2.19963000000007,
+            "meanMs": 2.19963000000007
+          },
+          {
+            "fingerprint": "[request] /*gw:touch*/ UPDATE api_keys SET last_used_at = now() WHERE id = $1",
+            "count": 1,
+            "p50Ms": 2.9349240000001373,
+            "p95Ms": 2.9349240000001373,
+            "meanMs": 2.9349240000001373
+          },
+          {
+            "fingerprint": "[request] /*gw:route*/ SELECT a.id AS alias_id, a.name AS alias_name, rv.id AS route_version_id, rv.version, rv.targets, rv.capabilities FROM aliases a JOIN route_version",
+            "count": 1,
+            "p50Ms": 2.940889999999854,
+            "p95Ms": 2.940889999999854,
+            "meanMs": 2.940889999999854
+          },
+          {
+            "fingerprint": "[request] /*gw:targets*/ SELECT t.id, t.upstream_model, t.input_price::text AS input_price, t.output_price::text AS output_price, t.capabilities, t.enabled AS target_enab",
+            "count": 1,
+            "p50Ms": 2.335878999999977,
+            "p95Ms": 2.335878999999977,
+            "meanMs": 2.335878999999977
+          },
+          {
+            "fingerprint": "[request] WITH inserted AS ( INSERT INTO requests(request_id,project_id,key_id,period,reserve_micros,route_version,price_snapshot,status) VALUES($1,$2,$3,$4,$5,$6::jsonb,",
+            "count": 1,
+            "p50Ms": 5.0026940000000195,
+            "p95Ms": 5.0026940000000195,
+            "meanMs": 5.0026940000000195
+          },
+          {
+            "fingerprint": "[background] WITH candidate AS (SELECT id FROM outbox WHERE status IN('pending','leased') AND available_at<=now() ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 50) UPDATE",
+            "count": 1,
+            "p50Ms": 3.149261999999908,
+            "p95Ms": 3.149261999999908,
+            "meanMs": 3.149261999999908
+          },
+          {
+            "fingerprint": "[request] WITH r AS ( UPDATE requests SET status = 'reserved', updated_at = now() WHERE request_id = $1 AND status = 'preparing' RETURNING request_id ) UPDATE reservation",
+            "count": 1,
+            "p50Ms": 3.088019999999915,
+            "p95Ms": 3.088019999999915,
+            "meanMs": 3.088019999999915
+          },
+          {
+            "fingerprint": "[background] INSERT INTO consumer_inbox(consumer_name,event_id,project_id) SELECT 'usage-v1',event_id,project_id FROM jsonb_to_recordset($1::jsonb) AS e(event_id text,projec",
+            "count": 1,
+            "p50Ms": 3.20608100000004,
+            "p95Ms": 3.20608100000004,
+            "meanMs": 3.20608100000004
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text AS project_id, status, period FROM requests WHERE request_id = $1",
+            "count": 1,
+            "p50Ms": 1.3927009999999882,
+            "p95Ms": 1.3927009999999882,
+            "meanMs": 1.3927009999999882
+          },
+          {
+            "fingerprint": "[background] SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            "count": 1,
+            "p50Ms": 2.2309009999999034,
+            "p95Ms": 2.2309009999999034,
+            "meanMs": 2.2309009999999034
+          },
+          {
+            "fingerprint": "[request] UPDATE requests SET status = 'dispatch_intent', updated_at = now() WHERE request_id = $1 AND status = 'reserved' RETURNING request_id",
+            "count": 1,
+            "p50Ms": 2.988361000000168,
+            "p95Ms": 2.988361000000168,
+            "meanMs": 2.988361000000168
+          },
+          {
+            "fingerprint": "[background] INSERT INTO usage_hourly(project_id,bucket,actual_micros,estimated_micros,input_tokens,output_tokens,event_count) SELECT project_id,date_trunc('hour',first_at),",
+            "count": 1,
+            "p50Ms": 5.014002000000119,
+            "p95Ms": 5.014002000000119,
+            "meanMs": 5.014002000000119
+          },
+          {
+            "fingerprint": "[request] UPDATE requests SET status = 'dispatched', updated_at = now() WHERE request_id = $1 AND status = 'dispatch_intent'",
+            "count": 1,
+            "p50Ms": 3.855233999999882,
+            "p95Ms": 3.855233999999882,
+            "meanMs": 3.855233999999882
+          },
+          {
+            "fingerprint": "[background] UPDATE outbox SET status='published',published_at=now() WHERE id=ANY($1::uuid[])",
+            "count": 1,
+            "p50Ms": 2.9566729999999097,
+            "p95Ms": 2.9566729999999097,
+            "meanMs": 2.9566729999999097
+          },
+          {
+            "fingerprint": "[request] /*gw:request-attempts*/ WITH meta AS ( UPDATE requests SET alias_name=$2,error_code=$3,updated_at=now() WHERE request_id=$1 RETURNING request_id ) INSERT INTO a",
+            "count": 1,
+            "p50Ms": 2.6365310000001045,
+            "p95Ms": 2.6365310000001045,
+            "meanMs": 2.6365310000001045
+          },
+          {
+            "fingerprint": "[request] /*gw:request-meta*/ UPDATE requests SET alias_name = $2, error_code = $3, updated_at = now() WHERE request_id = $1",
+            "count": 1,
+            "p50Ms": 2.5263890000001084,
+            "p95Ms": 2.5263890000001084,
+            "meanMs": 2.5263890000001084
+          },
+          {
+            "fingerprint": "[request] BEGIN",
+            "count": 1,
+            "p50Ms": 0.5251100000000406,
+            "p95Ms": 0.5251100000000406,
+            "meanMs": 0.5251100000000406
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text FROM requests WHERE request_id=$1",
+            "count": 1,
+            "p50Ms": 1.4526639999999134,
+            "p95Ms": 1.4526639999999134,
+            "meanMs": 1.4526639999999134
+          },
+          {
+            "fingerprint": "[request] SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            "count": 1,
+            "p50Ms": 1.3580739999999878,
+            "p95Ms": 1.3580739999999878,
+            "meanMs": 1.3580739999999878
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text AS project_id, period, reserve_micros::text AS reserve_micros, status, actual_micros::text AS actual_micros FROM requests WHERE request_",
+            "count": 1,
+            "p50Ms": 0.999025999999958,
+            "p95Ms": 0.999025999999958,
+            "meanMs": 0.999025999999958
+          },
+          {
+            "fingerprint": "[request] SELECT event_id, amount_micros::text AS amount_micros, estimated FROM ledger WHERE event_id = ANY($1::text[])",
+            "count": 1,
+            "p50Ms": 0.9936270000000604,
+            "p95Ms": 0.9936270000000604,
+            "meanMs": 0.9936270000000604
+          },
+          {
+            "fingerprint": "[request] WITH entry AS ( INSERT INTO ledger(event_id,request_id,project_id,period,amount_micros,kind,input_tokens,output_tokens,estimated) VALUES($10,$1,$2,$3,$4,$15,$6,",
+            "count": 1,
+            "p50Ms": 2.145494000000099,
+            "p95Ms": 2.145494000000099,
+            "meanMs": 2.145494000000099
+          },
+          {
+            "fingerprint": "[request] COMMIT",
+            "count": 1,
+            "p50Ms": 3.539696000000049,
+            "p95Ms": 3.539696000000049,
+            "meanMs": 3.539696000000049
+          },
+          {
+            "fingerprint": "[request] SELECT generation::text AS generation FROM billing_state WHERE project_id = $1",
+            "count": 1,
+            "p50Ms": 0.9479729999998199,
+            "p95Ms": 0.9479729999998199,
+            "meanMs": 0.9479729999998199
+          }
+        ],
+        "redisCommands": {
+          "get": 2,
+          "evalsha": 3
+        },
+        "redisCommandsPerRequest": 5,
+        "pool": {
+          "maxWaiting": 0,
+          "acquisition": {
+            "count": 19,
+            "p50Ms": 0.05226500000003398,
+            "p95Ms": 0.25226800000018557,
+            "meanMs": 0.08482626315789706
+          }
+        },
+        "phases": {
+          "admit": {
+            "count": 1,
+            "p50Ms": 13.585105999999996,
+            "p95Ms": 13.585105999999996,
+            "meanMs": 13.585105999999996
+          },
+          "dispatch": {
+            "count": 1,
+            "p50Ms": 10.956372999999985,
+            "p95Ms": 10.956372999999985,
+            "meanMs": 10.956372999999985
+          },
+          "settle": {
+            "count": 1,
+            "p50Ms": 13.299381999999923,
+            "p95Ms": 13.299381999999923,
+            "meanMs": 13.299381999999923
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 1,
+      "repetition": 2,
+      "baseline": {
+        "statuses": {
+          "200": 1
+        },
+        "elapsedMs": 3.3805580000000646,
+        "response": {
+          "count": 1,
+          "p50Ms": 3.3490120000001298,
+          "p95Ms": 3.3490120000001298,
+          "meanMs": 3.3490120000001298
+        }
+      },
+      "gateway": {
+        "statuses": {
+          "200": 1
+        },
+        "elapsedMs": 39.27727399999981,
+        "response": {
+          "count": 1,
+          "p50Ms": 39.24664099999973,
+          "p95Ms": 39.24664099999973,
+          "meanMs": 39.24664099999973
+        }
+      },
+      "settlementElapsedMs": 59.85942400000022,
+      "metrics": {
+        "sqlCalls": 22,
+        "sqlCallsPerRequest": 22,
+        "requestSqlCalls": 22,
+        "requestSqlCallsPerRequest": 22,
+        "backgroundSqlCalls": 0,
+        "queries": [
+          {
+            "fingerprint": "[request] SELECT generation::text AS generation, paused, dirty, redis_run_id FROM billing_state WHERE project_id = $1",
+            "count": 2,
+            "p50Ms": 0.6606830000000627,
+            "p95Ms": 0.913338000000067,
+            "meanMs": 0.7870105000000649
+          },
+          {
+            "fingerprint": "[request] SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1",
+            "count": 1,
+            "p50Ms": 0.6279250000000047,
+            "p95Ms": 0.6279250000000047,
+            "meanMs": 0.6279250000000047
+          },
+          {
+            "fingerprint": "[request] /*gw:key*/ SELECT k.id AS key_id, k.prefix, k.allowed_models, k.expires_at, k.revoked_at, k.key_rpm, p.id AS project_id, p.workspace_id, p.rpm AS project_rpm, p",
+            "count": 1,
+            "p50Ms": 1.014697999999953,
+            "p95Ms": 1.014697999999953,
+            "meanMs": 1.014697999999953
+          },
+          {
+            "fingerprint": "[request] /*gw:route*/ SELECT a.id AS alias_id, a.name AS alias_name, rv.id AS route_version_id, rv.version, rv.targets, rv.capabilities FROM aliases a JOIN route_version",
+            "count": 1,
+            "p50Ms": 1.0028919999999744,
+            "p95Ms": 1.0028919999999744,
+            "meanMs": 1.0028919999999744
+          },
+          {
+            "fingerprint": "[request] /*gw:touch*/ UPDATE api_keys SET last_used_at = now() WHERE id = $1",
+            "count": 1,
+            "p50Ms": 2.3719710000000305,
+            "p95Ms": 2.3719710000000305,
+            "meanMs": 2.3719710000000305
+          },
+          {
+            "fingerprint": "[request] /*gw:targets*/ SELECT t.id, t.upstream_model, t.input_price::text AS input_price, t.output_price::text AS output_price, t.capabilities, t.enabled AS target_enab",
+            "count": 1,
+            "p50Ms": 1.4260490000001482,
+            "p95Ms": 1.4260490000001482,
+            "meanMs": 1.4260490000001482
+          },
+          {
+            "fingerprint": "[request] WITH inserted AS ( INSERT INTO requests(request_id,project_id,key_id,period,reserve_micros,route_version,price_snapshot,status) VALUES($1,$2,$3,$4,$5,$6::jsonb,",
+            "count": 1,
+            "p50Ms": 3.603354999999965,
+            "p95Ms": 3.603354999999965,
+            "meanMs": 3.603354999999965
+          },
+          {
+            "fingerprint": "[request] WITH r AS ( UPDATE requests SET status = 'reserved', updated_at = now() WHERE request_id = $1 AND status = 'preparing' RETURNING request_id ) UPDATE reservation",
+            "count": 1,
+            "p50Ms": 2.278684000000112,
+            "p95Ms": 2.278684000000112,
+            "meanMs": 2.278684000000112
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text AS project_id, status, period FROM requests WHERE request_id = $1",
+            "count": 1,
+            "p50Ms": 0.6781389999998737,
+            "p95Ms": 0.6781389999998737,
+            "meanMs": 0.6781389999998737
+          },
+          {
+            "fingerprint": "[request] UPDATE requests SET status = 'dispatch_intent', updated_at = now() WHERE request_id = $1 AND status = 'reserved' RETURNING request_id",
+            "count": 1,
+            "p50Ms": 1.7586109999999735,
+            "p95Ms": 1.7586109999999735,
+            "meanMs": 1.7586109999999735
+          },
+          {
+            "fingerprint": "[request] UPDATE requests SET status = 'dispatched', updated_at = now() WHERE request_id = $1 AND status = 'dispatch_intent'",
+            "count": 1,
+            "p50Ms": 2.260176999999885,
+            "p95Ms": 2.260176999999885,
+            "meanMs": 2.260176999999885
+          },
+          {
+            "fingerprint": "[request] /*gw:request-attempts*/ WITH meta AS ( UPDATE requests SET alias_name=$2,error_code=$3,updated_at=now() WHERE request_id=$1 RETURNING request_id ) INSERT INTO a",
+            "count": 1,
+            "p50Ms": 6.143151000000216,
+            "p95Ms": 6.143151000000216,
+            "meanMs": 6.143151000000216
+          },
+          {
+            "fingerprint": "[request] /*gw:request-meta*/ UPDATE requests SET alias_name = $2, error_code = $3, updated_at = now() WHERE request_id = $1",
+            "count": 1,
+            "p50Ms": 9.485776999999871,
+            "p95Ms": 9.485776999999871,
+            "meanMs": 9.485776999999871
+          },
+          {
+            "fingerprint": "[request] BEGIN",
+            "count": 1,
+            "p50Ms": 1.054327000000285,
+            "p95Ms": 1.054327000000285,
+            "meanMs": 1.054327000000285
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text FROM requests WHERE request_id=$1",
+            "count": 1,
+            "p50Ms": 2.4702440000000934,
+            "p95Ms": 2.4702440000000934,
+            "meanMs": 2.4702440000000934
+          },
+          {
+            "fingerprint": "[request] SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            "count": 1,
+            "p50Ms": 1.125945000000229,
+            "p95Ms": 1.125945000000229,
+            "meanMs": 1.125945000000229
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text AS project_id, period, reserve_micros::text AS reserve_micros, status, actual_micros::text AS actual_micros FROM requests WHERE request_",
+            "count": 1,
+            "p50Ms": 1.8681070000002364,
+            "p95Ms": 1.8681070000002364,
+            "meanMs": 1.8681070000002364
+          },
+          {
+            "fingerprint": "[request] SELECT event_id, amount_micros::text AS amount_micros, estimated FROM ledger WHERE event_id = ANY($1::text[])",
+            "count": 1,
+            "p50Ms": 1.3023620000003575,
+            "p95Ms": 1.3023620000003575,
+            "meanMs": 1.3023620000003575
+          },
+          {
+            "fingerprint": "[request] WITH entry AS ( INSERT INTO ledger(event_id,request_id,project_id,period,amount_micros,kind,input_tokens,output_tokens,estimated) VALUES($10,$1,$2,$3,$4,$15,$6,",
+            "count": 1,
+            "p50Ms": 2.7141050000000178,
+            "p95Ms": 2.7141050000000178,
+            "meanMs": 2.7141050000000178
+          },
+          {
+            "fingerprint": "[request] COMMIT",
+            "count": 1,
+            "p50Ms": 2.0127299999999195,
+            "p95Ms": 2.0127299999999195,
+            "meanMs": 2.0127299999999195
+          },
+          {
+            "fingerprint": "[request] SELECT generation::text AS generation FROM billing_state WHERE project_id = $1",
+            "count": 1,
+            "p50Ms": 0.8292039999996632,
+            "p95Ms": 0.8292039999996632,
+            "meanMs": 0.8292039999996632
+          }
+        ],
+        "redisCommands": {
+          "get": 2,
+          "evalsha": 3
+        },
+        "redisCommandsPerRequest": 5,
+        "pool": {
+          "maxWaiting": 0,
+          "acquisition": {
+            "count": 16,
+            "p50Ms": 0.0318569999999454,
+            "p95Ms": 0.24146399999995083,
+            "meanMs": 0.059319750000000226
+          }
+        },
+        "phases": {
+          "admit": {
+            "count": 1,
+            "p50Ms": 9.406416000000036,
+            "p95Ms": 9.406416000000036,
+            "meanMs": 9.406416000000036
+          },
+          "dispatch": {
+            "count": 1,
+            "p50Ms": 6.492469999999912,
+            "p95Ms": 6.492469999999912,
+            "meanMs": 6.492469999999912
+          },
+          "settle": {
+            "count": 1,
+            "p50Ms": 15.592604999999821,
+            "p95Ms": 15.592604999999821,
+            "meanMs": 15.592604999999821
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 1,
+      "repetition": 3,
+      "baseline": {
+        "statuses": {
+          "200": 1
+        },
+        "elapsedMs": 2.4407890000002226,
+        "response": {
+          "count": 1,
+          "p50Ms": 2.4203339999999116,
+          "p95Ms": 2.4203339999999116,
+          "meanMs": 2.4203339999999116
+        }
+      },
+      "gateway": {
+        "statuses": {
+          "200": 1
+        },
+        "elapsedMs": 51.757074999999986,
+        "response": {
+          "count": 1,
+          "p50Ms": 51.72442500000034,
+          "p95Ms": 51.72442500000034,
+          "meanMs": 51.72442500000034
+        }
+      },
+      "settlementElapsedMs": 73.55639000000019,
+      "metrics": {
+        "sqlCalls": 22,
+        "sqlCallsPerRequest": 22,
+        "requestSqlCalls": 22,
+        "requestSqlCallsPerRequest": 22,
+        "backgroundSqlCalls": 0,
+        "queries": [
+          {
+            "fingerprint": "[request] SELECT generation::text AS generation, paused, dirty, redis_run_id FROM billing_state WHERE project_id = $1",
+            "count": 2,
+            "p50Ms": 1.2451340000002347,
+            "p95Ms": 1.5745879999999488,
+            "meanMs": 1.4098610000000917
+          },
+          {
+            "fingerprint": "[request] SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1",
+            "count": 1,
+            "p50Ms": 1.0541659999998956,
+            "p95Ms": 1.0541659999998956,
+            "meanMs": 1.0541659999998956
+          },
+          {
+            "fingerprint": "[request] /*gw:key*/ SELECT k.id AS key_id, k.prefix, k.allowed_models, k.expires_at, k.revoked_at, k.key_rpm, p.id AS project_id, p.workspace_id, p.rpm AS project_rpm, p",
+            "count": 1,
+            "p50Ms": 2.8392149999999674,
+            "p95Ms": 2.8392149999999674,
+            "meanMs": 2.8392149999999674
+          },
+          {
+            "fingerprint": "[request] /*gw:touch*/ UPDATE api_keys SET last_used_at = now() WHERE id = $1",
+            "count": 1,
+            "p50Ms": 4.117215000000215,
+            "p95Ms": 4.117215000000215,
+            "meanMs": 4.117215000000215
+          },
+          {
+            "fingerprint": "[request] /*gw:route*/ SELECT a.id AS alias_id, a.name AS alias_name, rv.id AS route_version_id, rv.version, rv.targets, rv.capabilities FROM aliases a JOIN route_version",
+            "count": 1,
+            "p50Ms": 3.4350720000002184,
+            "p95Ms": 3.4350720000002184,
+            "meanMs": 3.4350720000002184
+          },
+          {
+            "fingerprint": "[request] /*gw:targets*/ SELECT t.id, t.upstream_model, t.input_price::text AS input_price, t.output_price::text AS output_price, t.capabilities, t.enabled AS target_enab",
+            "count": 1,
+            "p50Ms": 1.9061980000001313,
+            "p95Ms": 1.9061980000001313,
+            "meanMs": 1.9061980000001313
+          },
+          {
+            "fingerprint": "[request] WITH inserted AS ( INSERT INTO requests(request_id,project_id,key_id,period,reserve_micros,route_version,price_snapshot,status) VALUES($1,$2,$3,$4,$5,$6::jsonb,",
+            "count": 1,
+            "p50Ms": 5.061608999999862,
+            "p95Ms": 5.061608999999862,
+            "meanMs": 5.061608999999862
+          },
+          {
+            "fingerprint": "[request] WITH r AS ( UPDATE requests SET status = 'reserved', updated_at = now() WHERE request_id = $1 AND status = 'preparing' RETURNING request_id ) UPDATE reservation",
+            "count": 1,
+            "p50Ms": 4.191193000000112,
+            "p95Ms": 4.191193000000112,
+            "meanMs": 4.191193000000112
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text AS project_id, status, period FROM requests WHERE request_id = $1",
+            "count": 1,
+            "p50Ms": 1.0397740000003068,
+            "p95Ms": 1.0397740000003068,
+            "meanMs": 1.0397740000003068
+          },
+          {
+            "fingerprint": "[request] UPDATE requests SET status = 'dispatch_intent', updated_at = now() WHERE request_id = $1 AND status = 'reserved' RETURNING request_id",
+            "count": 1,
+            "p50Ms": 4.338047000000188,
+            "p95Ms": 4.338047000000188,
+            "meanMs": 4.338047000000188
+          },
+          {
+            "fingerprint": "[request] UPDATE requests SET status = 'dispatched', updated_at = now() WHERE request_id = $1 AND status = 'dispatch_intent'",
+            "count": 1,
+            "p50Ms": 2.372226999999839,
+            "p95Ms": 2.372226999999839,
+            "meanMs": 2.372226999999839
+          },
+          {
+            "fingerprint": "[request] /*gw:request-attempts*/ WITH meta AS ( UPDATE requests SET alias_name=$2,error_code=$3,updated_at=now() WHERE request_id=$1 RETURNING request_id ) INSERT INTO a",
+            "count": 1,
+            "p50Ms": 3.145484000000124,
+            "p95Ms": 3.145484000000124,
+            "meanMs": 3.145484000000124
+          },
+          {
+            "fingerprint": "[request] /*gw:request-meta*/ UPDATE requests SET alias_name = $2, error_code = $3, updated_at = now() WHERE request_id = $1",
+            "count": 1,
+            "p50Ms": 6.575579000000289,
+            "p95Ms": 6.575579000000289,
+            "meanMs": 6.575579000000289
+          },
+          {
+            "fingerprint": "[request] BEGIN",
+            "count": 1,
+            "p50Ms": 2.8659710000001724,
+            "p95Ms": 2.8659710000001724,
+            "meanMs": 2.8659710000001724
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text FROM requests WHERE request_id=$1",
+            "count": 1,
+            "p50Ms": 2.389820000000327,
+            "p95Ms": 2.389820000000327,
+            "meanMs": 2.389820000000327
+          },
+          {
+            "fingerprint": "[request] SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            "count": 1,
+            "p50Ms": 2.5738910000000033,
+            "p95Ms": 2.5738910000000033,
+            "meanMs": 2.5738910000000033
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text AS project_id, period, reserve_micros::text AS reserve_micros, status, actual_micros::text AS actual_micros FROM requests WHERE request_",
+            "count": 1,
+            "p50Ms": 1.0160099999998238,
+            "p95Ms": 1.0160099999998238,
+            "meanMs": 1.0160099999998238
+          },
+          {
+            "fingerprint": "[request] SELECT event_id, amount_micros::text AS amount_micros, estimated FROM ledger WHERE event_id = ANY($1::text[])",
+            "count": 1,
+            "p50Ms": 1.196639000000232,
+            "p95Ms": 1.196639000000232,
+            "meanMs": 1.196639000000232
+          },
+          {
+            "fingerprint": "[request] WITH entry AS ( INSERT INTO ledger(event_id,request_id,project_id,period,amount_micros,kind,input_tokens,output_tokens,estimated) VALUES($10,$1,$2,$3,$4,$15,$6,",
+            "count": 1,
+            "p50Ms": 1.4610539999998764,
+            "p95Ms": 1.4610539999998764,
+            "meanMs": 1.4610539999998764
+          },
+          {
+            "fingerprint": "[request] COMMIT",
+            "count": 1,
+            "p50Ms": 1.805674000000181,
+            "p95Ms": 1.805674000000181,
+            "meanMs": 1.805674000000181
+          },
+          {
+            "fingerprint": "[request] SELECT generation::text AS generation FROM billing_state WHERE project_id = $1",
+            "count": 1,
+            "p50Ms": 1.0259339999997792,
+            "p95Ms": 1.0259339999997792,
+            "meanMs": 1.0259339999997792
+          }
+        ],
+        "redisCommands": {
+          "get": 2,
+          "evalsha": 3
+        },
+        "redisCommandsPerRequest": 5,
+        "pool": {
+          "maxWaiting": 0,
+          "acquisition": {
+            "count": 16,
+            "p50Ms": 0.031200999999782653,
+            "p95Ms": 1.7589399999997113,
+            "meanMs": 0.15847456249991865
+          }
+        },
+        "phases": {
+          "admit": {
+            "count": 1,
+            "p50Ms": 15.07962499999985,
+            "p95Ms": 15.07962499999985,
+            "meanMs": 15.07962499999985
+          },
+          "dispatch": {
+            "count": 1,
+            "p50Ms": 10.588085999999748,
+            "p95Ms": 10.588085999999748,
+            "meanMs": 10.588085999999748
+          },
+          "settle": {
+            "count": 1,
+            "p50Ms": 15.672636000000239,
+            "p95Ms": 15.672636000000239,
+            "meanMs": 15.672636000000239
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 10,
+      "repetition": 1,
+      "baseline": {
+        "statuses": {
+          "200": 10
+        },
+        "elapsedMs": 37.8816539999998,
+        "response": {
+          "count": 10,
+          "p50Ms": 17.56714699999975,
+          "p95Ms": 28.485159999999723,
+          "meanMs": 22.193745399999898
+        }
+      },
+      "gateway": {
+        "statuses": {
+          "200": 10
+        },
+        "elapsedMs": 256.92999499999996,
+        "response": {
+          "count": 10,
+          "p50Ms": 234.37757499999998,
+          "p95Ms": 254.88816499999984,
+          "meanMs": 232.0379712
+        }
+      },
+      "settlementElapsedMs": 334.67181200000005,
+      "metrics": {
+        "sqlCalls": 229,
+        "sqlCallsPerRequest": 22.9,
+        "requestSqlCalls": 220,
+        "requestSqlCallsPerRequest": 22,
+        "backgroundSqlCalls": 9,
+        "queries": [
+          {
+            "fingerprint": "[request] SELECT generation::text AS generation, paused, dirty, redis_run_id FROM billing_state WHERE project_id = $1",
+            "count": 20,
+            "p50Ms": 3.825913000000128,
+            "p95Ms": 8.561403000000155,
+            "meanMs": 4.628923549999945
+          },
+          {
+            "fingerprint": "[request] SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1",
+            "count": 10,
+            "p50Ms": 7.059840999999778,
+            "p95Ms": 18.20576099999971,
+            "meanMs": 8.383792800000037
+          },
+          {
+            "fingerprint": "[request] /*gw:key*/ SELECT k.id AS key_id, k.prefix, k.allowed_models, k.expires_at, k.revoked_at, k.key_rpm, p.id AS project_id, p.workspace_id, p.rpm AS project_rpm, p",
+            "count": 10,
+            "p50Ms": 9.02894699999979,
+            "p95Ms": 22.76448399999981,
+            "meanMs": 10.85739139999996
+          },
+          {
+            "fingerprint": "[request] /*gw:touch*/ UPDATE api_keys SET last_used_at = now() WHERE id = $1",
+            "count": 10,
+            "p50Ms": 12.980831000000308,
+            "p95Ms": 28.825224000000162,
+            "meanMs": 16.053331600000046
+          },
+          {
+            "fingerprint": "[request] /*gw:route*/ SELECT a.id AS alias_id, a.name AS alias_name, rv.id AS route_version_id, rv.version, rv.targets, rv.capabilities FROM aliases a JOIN route_version",
+            "count": 10,
+            "p50Ms": 9.39001700000017,
+            "p95Ms": 22.67407400000002,
+            "meanMs": 12.760067900000013
+          },
+          {
+            "fingerprint": "[request] /*gw:targets*/ SELECT t.id, t.upstream_model, t.input_price::text AS input_price, t.output_price::text AS output_price, t.capabilities, t.enabled AS target_enab",
+            "count": 10,
+            "p50Ms": 9.492494999999963,
+            "p95Ms": 15.69339200000013,
+            "meanMs": 10.897216700000081
+          },
+          {
+            "fingerprint": "[request] WITH inserted AS ( INSERT INTO requests(request_id,project_id,key_id,period,reserve_micros,route_version,price_snapshot,status) VALUES($1,$2,$3,$4,$5,$6::jsonb,",
+            "count": 10,
+            "p50Ms": 21.650998999999956,
+            "p95Ms": 34.239462,
+            "meanMs": 21.372269600000074
+          },
+          {
+            "fingerprint": "[request] WITH r AS ( UPDATE requests SET status = 'reserved', updated_at = now() WHERE request_id = $1 AND status = 'preparing' RETURNING request_id ) UPDATE reservation",
+            "count": 10,
+            "p50Ms": 10.431555000000117,
+            "p95Ms": 20.864571999999953,
+            "meanMs": 12.493743500000027
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text AS project_id, status, period FROM requests WHERE request_id = $1",
+            "count": 10,
+            "p50Ms": 3.920408999999836,
+            "p95Ms": 6.372408000000178,
+            "meanMs": 3.72409219999995
+          },
+          {
+            "fingerprint": "[request] UPDATE requests SET status = 'dispatch_intent', updated_at = now() WHERE request_id = $1 AND status = 'reserved' RETURNING request_id",
+            "count": 10,
+            "p50Ms": 11.41895599999998,
+            "p95Ms": 13.419398000000001,
+            "meanMs": 10.824239400000033
+          },
+          {
+            "fingerprint": "[request] UPDATE requests SET status = 'dispatched', updated_at = now() WHERE request_id = $1 AND status = 'dispatch_intent'",
+            "count": 10,
+            "p50Ms": 8.42176500000005,
+            "p95Ms": 20.019576000000143,
+            "meanMs": 9.904228699999976
+          },
+          {
+            "fingerprint": "[request] /*gw:request-attempts*/ WITH meta AS ( UPDATE requests SET alias_name=$2,error_code=$3,updated_at=now() WHERE request_id=$1 RETURNING request_id ) INSERT INTO a",
+            "count": 10,
+            "p50Ms": 8.066685000000234,
+            "p95Ms": 19.129198000000088,
+            "meanMs": 9.736881000000086
+          },
+          {
+            "fingerprint": "[request] /*gw:request-meta*/ UPDATE requests SET alias_name = $2, error_code = $3, updated_at = now() WHERE request_id = $1",
+            "count": 10,
+            "p50Ms": 4.818055000000186,
+            "p95Ms": 8.870080000000144,
+            "meanMs": 5.11320209999999
+          },
+          {
+            "fingerprint": "[request] BEGIN",
+            "count": 10,
+            "p50Ms": 0.515650999999707,
+            "p95Ms": 18.722229000000425,
+            "meanMs": 2.6465366000000814
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text FROM requests WHERE request_id=$1",
+            "count": 10,
+            "p50Ms": 0.8622560000003432,
+            "p95Ms": 4.15011800000002,
+            "meanMs": 1.4115472999999839
+          },
+          {
+            "fingerprint": "[request] SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            "count": 10,
+            "p50Ms": 0.745155000000068,
+            "p95Ms": 1.6712869999996656,
+            "meanMs": 0.8989534000000277
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text AS project_id, period, reserve_micros::text AS reserve_micros, status, actual_micros::text AS actual_micros FROM requests WHERE request_",
+            "count": 10,
+            "p50Ms": 0.7403840000001765,
+            "p95Ms": 2.37896099999989,
+            "meanMs": 1.0165480000000116
+          },
+          {
+            "fingerprint": "[request] SELECT event_id, amount_micros::text AS amount_micros, estimated FROM ledger WHERE event_id = ANY($1::text[])",
+            "count": 10,
+            "p50Ms": 0.7923579999996946,
+            "p95Ms": 5.975955999999769,
+            "meanMs": 1.8708731000000172
+          },
+          {
+            "fingerprint": "[request] WITH entry AS ( INSERT INTO ledger(event_id,request_id,project_id,period,amount_micros,kind,input_tokens,output_tokens,estimated) VALUES($10,$1,$2,$3,$4,$15,$6,",
+            "count": 10,
+            "p50Ms": 1.788155999999617,
+            "p95Ms": 4.795571000000109,
+            "meanMs": 2.0880249999999707
+          },
+          {
+            "fingerprint": "[request] COMMIT",
+            "count": 10,
+            "p50Ms": 2.3260510000000068,
+            "p95Ms": 11.124127999999928,
+            "meanMs": 3.5682770999999773
+          },
+          {
+            "fingerprint": "[request] SELECT generation::text AS generation FROM billing_state WHERE project_id = $1",
+            "count": 10,
+            "p50Ms": 0.9049340000001393,
+            "p95Ms": 3.619036999999935,
+            "meanMs": 1.1996382000000267
+          },
+          {
+            "fingerprint": "[background] BEGIN",
+            "count": 2,
+            "p50Ms": 0.43852400000014313,
+            "p95Ms": 0.8996769999998833,
+            "meanMs": 0.6691005000000132
+          },
+          {
+            "fingerprint": "[background] COMMIT",
+            "count": 2,
+            "p50Ms": 2.311692000000221,
+            "p95Ms": 3.471259999999802,
+            "meanMs": 2.8914760000000115
+          },
+          {
+            "fingerprint": "[background] WITH candidate AS (SELECT id FROM outbox WHERE status IN('pending','leased') AND available_at<=now() ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 50) UPDATE",
+            "count": 1,
+            "p50Ms": 4.628382000000329,
+            "p95Ms": 4.628382000000329,
+            "meanMs": 4.628382000000329
+          },
+          {
+            "fingerprint": "[background] INSERT INTO consumer_inbox(consumer_name,event_id,project_id) SELECT 'usage-v1',event_id,project_id FROM jsonb_to_recordset($1::jsonb) AS e(event_id text,projec",
+            "count": 1,
+            "p50Ms": 2.386580999999751,
+            "p95Ms": 2.386580999999751,
+            "meanMs": 2.386580999999751
+          },
+          {
+            "fingerprint": "[background] SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            "count": 1,
+            "p50Ms": 0.9359089999998105,
+            "p95Ms": 0.9359089999998105,
+            "meanMs": 0.9359089999998105
+          },
+          {
+            "fingerprint": "[background] INSERT INTO usage_hourly(project_id,bucket,actual_micros,estimated_micros,input_tokens,output_tokens,event_count) SELECT project_id,date_trunc('hour',first_at),",
+            "count": 1,
+            "p50Ms": 3.863525000000209,
+            "p95Ms": 3.863525000000209,
+            "meanMs": 3.863525000000209
+          },
+          {
+            "fingerprint": "[background] UPDATE outbox SET status='published',published_at=now() WHERE id=ANY($1::uuid[])",
+            "count": 1,
+            "p50Ms": 1.8614430000002358,
+            "p95Ms": 1.8614430000002358,
+            "meanMs": 1.8614430000002358
+          }
+        ],
+        "redisCommands": {
+          "get": 20,
+          "evalsha": 30
+        },
+        "redisCommandsPerRequest": 5,
+        "pool": {
+          "maxWaiting": 1,
+          "acquisition": {
+            "count": 163,
+            "p50Ms": 0.05150400000002264,
+            "p95Ms": 31.998887000000195,
+            "meanMs": 3.0329262883435506
+          }
+        },
+        "phases": {
+          "admit": {
+            "count": 10,
+            "p50Ms": 50.0637999999999,
+            "p95Ms": 65.54576600000019,
+            "meanMs": 51.63987159999997
+          },
+          "dispatch": {
+            "count": 10,
+            "p50Ms": 31.632020999999895,
+            "p95Ms": 48.31522499999983,
+            "meanMs": 33.35851739999998
+          },
+          "settle": {
+            "count": 10,
+            "p50Ms": 54.05781199999956,
+            "p95Ms": 73.99432400000023,
+            "meanMs": 55.587355200000005
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 10,
+      "repetition": 2,
+      "baseline": {
+        "statuses": {
+          "200": 10
+        },
+        "elapsedMs": 9.986791999999696,
+        "response": {
+          "count": 10,
+          "p50Ms": 6.405410999999731,
+          "p95Ms": 8.073837999999796,
+          "meanMs": 6.780168799999956
+        }
+      },
+      "gateway": {
+        "statuses": {
+          "200": 10
+        },
+        "elapsedMs": 171.02696400000013,
+        "response": {
+          "count": 10,
+          "p50Ms": 159.92667600000004,
+          "p95Ms": 168.87235799999962,
+          "meanMs": 155.80368019999997
+        }
+      },
+      "settlementElapsedMs": 263.7586329999999,
+      "metrics": {
+        "sqlCalls": 220,
+        "sqlCallsPerRequest": 22,
+        "requestSqlCalls": 220,
+        "requestSqlCallsPerRequest": 22,
+        "backgroundSqlCalls": 0,
+        "queries": [
+          {
+            "fingerprint": "[request] SELECT generation::text AS generation, paused, dirty, redis_run_id FROM billing_state WHERE project_id = $1",
+            "count": 20,
+            "p50Ms": 2.381032000000232,
+            "p95Ms": 5.644647999999961,
+            "meanMs": 3.1293560999999954
+          },
+          {
+            "fingerprint": "[request] SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1",
+            "count": 10,
+            "p50Ms": 4.3155940000001465,
+            "p95Ms": 6.836351999999806,
+            "meanMs": 4.754448499999944
+          },
+          {
+            "fingerprint": "[request] /*gw:key*/ SELECT k.id AS key_id, k.prefix, k.allowed_models, k.expires_at, k.revoked_at, k.key_rpm, p.id AS project_id, p.workspace_id, p.rpm AS project_rpm, p",
+            "count": 10,
+            "p50Ms": 4.865612000000056,
+            "p95Ms": 8.487085000000206,
+            "meanMs": 5.868670399999973
+          },
+          {
+            "fingerprint": "[request] /*gw:route*/ SELECT a.id AS alias_id, a.name AS alias_name, rv.id AS route_version_id, rv.version, rv.targets, rv.capabilities FROM aliases a JOIN route_version",
+            "count": 10,
+            "p50Ms": 2.169136999999864,
+            "p95Ms": 7.32135500000004,
+            "meanMs": 3.2207205999999586
+          },
+          {
+            "fingerprint": "[request] /*gw:targets*/ SELECT t.id, t.upstream_model, t.input_price::text AS input_price, t.output_price::text AS output_price, t.capabilities, t.enabled AS target_enab",
+            "count": 10,
+            "p50Ms": 2.0193960000001425,
+            "p95Ms": 6.442881999999827,
+            "meanMs": 3.0472810999999638
+          },
+          {
+            "fingerprint": "[request] /*gw:touch*/ UPDATE api_keys SET last_used_at = now() WHERE id = $1",
+            "count": 10,
+            "p50Ms": 18.854243000000224,
+            "p95Ms": 33.44127500000013,
+            "meanMs": 19.155573900000036
+          },
+          {
+            "fingerprint": "[request] WITH inserted AS ( INSERT INTO requests(request_id,project_id,key_id,period,reserve_micros,route_version,price_snapshot,status) VALUES($1,$2,$3,$4,$5,$6::jsonb,",
+            "count": 10,
+            "p50Ms": 7.213438000000224,
+            "p95Ms": 12.030209999999897,
+            "meanMs": 7.988071300000001
+          },
+          {
+            "fingerprint": "[request] WITH r AS ( UPDATE requests SET status = 'reserved', updated_at = now() WHERE request_id = $1 AND status = 'preparing' RETURNING request_id ) UPDATE reservation",
+            "count": 10,
+            "p50Ms": 10.616365999999744,
+            "p95Ms": 17.592321000000084,
+            "meanMs": 10.12329109999996
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text AS project_id, status, period FROM requests WHERE request_id = $1",
+            "count": 10,
+            "p50Ms": 4.39331699999957,
+            "p95Ms": 7.929300000000239,
+            "meanMs": 4.472218599999996
+          },
+          {
+            "fingerprint": "[request] UPDATE requests SET status = 'dispatch_intent', updated_at = now() WHERE request_id = $1 AND status = 'reserved' RETURNING request_id",
+            "count": 10,
+            "p50Ms": 5.2684619999999995,
+            "p95Ms": 14.447785999999724,
+            "meanMs": 6.591451499999994
+          },
+          {
+            "fingerprint": "[request] UPDATE requests SET status = 'dispatched', updated_at = now() WHERE request_id = $1 AND status = 'dispatch_intent'",
+            "count": 10,
+            "p50Ms": 9.036591000000044,
+            "p95Ms": 24.803397000000132,
+            "meanMs": 9.876885599999877
+          },
+          {
+            "fingerprint": "[request] /*gw:request-attempts*/ WITH meta AS ( UPDATE requests SET alias_name=$2,error_code=$3,updated_at=now() WHERE request_id=$1 RETURNING request_id ) INSERT INTO a",
+            "count": 10,
+            "p50Ms": 15.86913800000002,
+            "p95Ms": 31.776646000000255,
+            "meanMs": 17.329720000000044
+          },
+          {
+            "fingerprint": "[request] /*gw:request-meta*/ UPDATE requests SET alias_name = $2, error_code = $3, updated_at = now() WHERE request_id = $1",
+            "count": 10,
+            "p50Ms": 10.177474000000075,
+            "p95Ms": 17.1266270000001,
+            "meanMs": 9.938905900000055
+          },
+          {
+            "fingerprint": "[request] BEGIN",
+            "count": 10,
+            "p50Ms": 0.6696929999998247,
+            "p95Ms": 1.710356000000047,
+            "meanMs": 0.9145669000000908
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text FROM requests WHERE request_id=$1",
+            "count": 10,
+            "p50Ms": 0.7746619999998074,
+            "p95Ms": 8.158718000000135,
+            "meanMs": 2.2681614999999056
+          },
+          {
+            "fingerprint": "[request] SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            "count": 10,
+            "p50Ms": 0.5802060000000893,
+            "p95Ms": 3.496943999999985,
+            "meanMs": 1.1098637000000053
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text AS project_id, period, reserve_micros::text AS reserve_micros, status, actual_micros::text AS actual_micros FROM requests WHERE request_",
+            "count": 10,
+            "p50Ms": 0.5945839999999407,
+            "p95Ms": 7.411409999999705,
+            "meanMs": 1.6005513999999494
+          },
+          {
+            "fingerprint": "[request] SELECT event_id, amount_micros::text AS amount_micros, estimated FROM ledger WHERE event_id = ANY($1::text[])",
+            "count": 10,
+            "p50Ms": 0.636967999999797,
+            "p95Ms": 11.235251000000062,
+            "meanMs": 2.083063299999958
+          },
+          {
+            "fingerprint": "[request] WITH entry AS ( INSERT INTO ledger(event_id,request_id,project_id,period,amount_micros,kind,input_tokens,output_tokens,estimated) VALUES($10,$1,$2,$3,$4,$15,$6,",
+            "count": 10,
+            "p50Ms": 1.3713620000003175,
+            "p95Ms": 8.836849999999686,
+            "meanMs": 2.3955651999999645
+          },
+          {
+            "fingerprint": "[request] COMMIT",
+            "count": 10,
+            "p50Ms": 1.7410049999998591,
+            "p95Ms": 3.4133990000000267,
+            "meanMs": 2.3775431000000027
+          },
+          {
+            "fingerprint": "[request] SELECT generation::text AS generation FROM billing_state WHERE project_id = $1",
+            "count": 10,
+            "p50Ms": 1.0739760000001297,
+            "p95Ms": 3.1887830000000577,
+            "meanMs": 1.4150801000000228
+          }
+        ],
+        "redisCommands": {
+          "get": 20,
+          "evalsha": 30
+        },
+        "redisCommandsPerRequest": 5,
+        "pool": {
+          "maxWaiting": 8,
+          "acquisition": {
+            "count": 160,
+            "p50Ms": 0.0654580000000351,
+            "p95Ms": 4.500446000000011,
+            "meanMs": 0.7983508937500062
+          }
+        },
+        "phases": {
+          "admit": {
+            "count": 10,
+            "p50Ms": 34.315665999999965,
+            "p95Ms": 44.08918999999969,
+            "meanMs": 34.45203970000002
+          },
+          "dispatch": {
+            "count": 10,
+            "p50Ms": 24.49393000000009,
+            "p95Ms": 44.61572500000011,
+            "meanMs": 27.879993700000114
+          },
+          "settle": {
+            "count": 10,
+            "p50Ms": 54.20342299999993,
+            "p95Ms": 88.15053200000011,
+            "meanMs": 59.50563480000005
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 10,
+      "repetition": 3,
+      "baseline": {
+        "statuses": {
+          "200": 10
+        },
+        "elapsedMs": 8.841453000000001,
+        "response": {
+          "count": 10,
+          "p50Ms": 6.554757000000336,
+          "p95Ms": 7.191372000000229,
+          "meanMs": 6.495835999999917
+        }
+      },
+      "gateway": {
+        "statuses": {
+          "200": 10
+        },
+        "elapsedMs": 127.93589699999984,
+        "response": {
+          "count": 10,
+          "p50Ms": 121.2634250000001,
+          "p95Ms": 126.1890370000001,
+          "meanMs": 116.08529730000005
+        }
+      },
+      "settlementElapsedMs": 240.3800299999998,
+      "metrics": {
+        "sqlCalls": 229,
+        "sqlCallsPerRequest": 22.9,
+        "requestSqlCalls": 220,
+        "requestSqlCallsPerRequest": 22,
+        "backgroundSqlCalls": 9,
+        "queries": [
+          {
+            "fingerprint": "[request] SELECT generation::text AS generation, paused, dirty, redis_run_id FROM billing_state WHERE project_id = $1",
+            "count": 20,
+            "p50Ms": 2.9844929999999295,
+            "p95Ms": 5.218542999999954,
+            "meanMs": 3.0529503999999634
+          },
+          {
+            "fingerprint": "[request] SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1",
+            "count": 10,
+            "p50Ms": 2.7808359999999084,
+            "p95Ms": 5.927302999999938,
+            "meanMs": 3.506121100000064
+          },
+          {
+            "fingerprint": "[request] /*gw:key*/ SELECT k.id AS key_id, k.prefix, k.allowed_models, k.expires_at, k.revoked_at, k.key_rpm, p.id AS project_id, p.workspace_id, p.rpm AS project_rpm, p",
+            "count": 10,
+            "p50Ms": 4.307510999999977,
+            "p95Ms": 5.465980999999829,
+            "meanMs": 4.450027999999975
+          },
+          {
+            "fingerprint": "[request] /*gw:route*/ SELECT a.id AS alias_id, a.name AS alias_name, rv.id AS route_version_id, rv.version, rv.targets, rv.capabilities FROM aliases a JOIN route_version",
+            "count": 10,
+            "p50Ms": 3.3839570000000094,
+            "p95Ms": 7.183864000000085,
+            "meanMs": 3.886075199999914
+          },
+          {
+            "fingerprint": "[request] /*gw:touch*/ UPDATE api_keys SET last_used_at = now() WHERE id = $1",
+            "count": 10,
+            "p50Ms": 17.133773999999903,
+            "p95Ms": 32.20613299999968,
+            "meanMs": 17.83427829999996
+          },
+          {
+            "fingerprint": "[request] /*gw:targets*/ SELECT t.id, t.upstream_model, t.input_price::text AS input_price, t.output_price::text AS output_price, t.capabilities, t.enabled AS target_enab",
+            "count": 10,
+            "p50Ms": 5.342011000000184,
+            "p95Ms": 9.884898999999677,
+            "meanMs": 6.102397900000005
+          },
+          {
+            "fingerprint": "[request] WITH inserted AS ( INSERT INTO requests(request_id,project_id,key_id,period,reserve_micros,route_version,price_snapshot,status) VALUES($1,$2,$3,$4,$5,$6::jsonb,",
+            "count": 10,
+            "p50Ms": 11.523118000000068,
+            "p95Ms": 29.432201000000077,
+            "meanMs": 14.67011389999998
+          },
+          {
+            "fingerprint": "[request] WITH r AS ( UPDATE requests SET status = 'reserved', updated_at = now() WHERE request_id = $1 AND status = 'preparing' RETURNING request_id ) UPDATE reservation",
+            "count": 10,
+            "p50Ms": 5.907318000000032,
+            "p95Ms": 10.505501000000095,
+            "meanMs": 6.807779900000014
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text AS project_id, status, period FROM requests WHERE request_id = $1",
+            "count": 10,
+            "p50Ms": 1.544419000000289,
+            "p95Ms": 2.669926999999916,
+            "meanMs": 1.7637187000001178
+          },
+          {
+            "fingerprint": "[request] UPDATE requests SET status = 'dispatch_intent', updated_at = now() WHERE request_id = $1 AND status = 'reserved' RETURNING request_id",
+            "count": 10,
+            "p50Ms": 5.7661339999999655,
+            "p95Ms": 10.323084999999992,
+            "meanMs": 6.6716719000000015
+          },
+          {
+            "fingerprint": "[request] UPDATE requests SET status = 'dispatched', updated_at = now() WHERE request_id = $1 AND status = 'dispatch_intent'",
+            "count": 10,
+            "p50Ms": 6.341396000000259,
+            "p95Ms": 14.890801999999894,
+            "meanMs": 7.396711499999947
+          },
+          {
+            "fingerprint": "[request] /*gw:request-attempts*/ WITH meta AS ( UPDATE requests SET alias_name=$2,error_code=$3,updated_at=now() WHERE request_id=$1 RETURNING request_id ) INSERT INTO a",
+            "count": 10,
+            "p50Ms": 18.25980699999991,
+            "p95Ms": 26.780783000000156,
+            "meanMs": 18.331645600000048
+          },
+          {
+            "fingerprint": "[request] /*gw:request-meta*/ UPDATE requests SET alias_name = $2, error_code = $3, updated_at = now() WHERE request_id = $1",
+            "count": 10,
+            "p50Ms": 28.790485999999873,
+            "p95Ms": 35.028452000000016,
+            "meanMs": 29.004462400000012
+          },
+          {
+            "fingerprint": "[request] BEGIN",
+            "count": 10,
+            "p50Ms": 0.5637700000002042,
+            "p95Ms": 5.64469599999984,
+            "meanMs": 1.1619063000000096
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text FROM requests WHERE request_id=$1",
+            "count": 10,
+            "p50Ms": 0.7998359999996865,
+            "p95Ms": 3.144546999999875,
+            "meanMs": 1.3040949000000182
+          },
+          {
+            "fingerprint": "[request] SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            "count": 10,
+            "p50Ms": 0.579682000000048,
+            "p95Ms": 1.6972559999999248,
+            "meanMs": 0.7190299999999297
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text AS project_id, period, reserve_micros::text AS reserve_micros, status, actual_micros::text AS actual_micros FROM requests WHERE request_",
+            "count": 10,
+            "p50Ms": 0.6460339999998723,
+            "p95Ms": 2.1290509999998903,
+            "meanMs": 0.9866429999999582
+          },
+          {
+            "fingerprint": "[request] SELECT event_id, amount_micros::text AS amount_micros, estimated FROM ledger WHERE event_id = ANY($1::text[])",
+            "count": 10,
+            "p50Ms": 0.6193680000001223,
+            "p95Ms": 10.295470999999907,
+            "meanMs": 1.6754939999999805
+          },
+          {
+            "fingerprint": "[request] WITH entry AS ( INSERT INTO ledger(event_id,request_id,project_id,period,amount_micros,kind,input_tokens,output_tokens,estimated) VALUES($10,$1,$2,$3,$4,$15,$6,",
+            "count": 10,
+            "p50Ms": 1.3265900000001238,
+            "p95Ms": 15.019800999999916,
+            "meanMs": 2.688884600000074
+          },
+          {
+            "fingerprint": "[request] COMMIT",
+            "count": 10,
+            "p50Ms": 2.099427999999989,
+            "p95Ms": 4.74623900000006,
+            "meanMs": 2.482371300000068
+          },
+          {
+            "fingerprint": "[request] SELECT generation::text AS generation FROM billing_state WHERE project_id = $1",
+            "count": 10,
+            "p50Ms": 0.8300039999999171,
+            "p95Ms": 1.709208000000217,
+            "meanMs": 0.9035380999999234
+          },
+          {
+            "fingerprint": "[background] BEGIN",
+            "count": 2,
+            "p50Ms": 0.2793509999996786,
+            "p95Ms": 0.42494299999998475,
+            "meanMs": 0.3521469999998317
+          },
+          {
+            "fingerprint": "[background] COMMIT",
+            "count": 2,
+            "p50Ms": 2.3249229999996714,
+            "p95Ms": 5.254536000000371,
+            "meanMs": 3.7897295000000213
+          },
+          {
+            "fingerprint": "[background] WITH candidate AS (SELECT id FROM outbox WHERE status IN('pending','leased') AND available_at<=now() ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 50) UPDATE",
+            "count": 1,
+            "p50Ms": 2.672783999999865,
+            "p95Ms": 2.672783999999865,
+            "meanMs": 2.672783999999865
+          },
+          {
+            "fingerprint": "[background] INSERT INTO consumer_inbox(consumer_name,event_id,project_id) SELECT 'usage-v1',event_id,project_id FROM jsonb_to_recordset($1::jsonb) AS e(event_id text,projec",
+            "count": 1,
+            "p50Ms": 1.848283000000265,
+            "p95Ms": 1.848283000000265,
+            "meanMs": 1.848283000000265
+          },
+          {
+            "fingerprint": "[background] SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            "count": 1,
+            "p50Ms": 0.5155130000002828,
+            "p95Ms": 0.5155130000002828,
+            "meanMs": 0.5155130000002828
+          },
+          {
+            "fingerprint": "[background] INSERT INTO usage_hourly(project_id,bucket,actual_micros,estimated_micros,input_tokens,output_tokens,event_count) SELECT project_id,date_trunc('hour',first_at),",
+            "count": 1,
+            "p50Ms": 1.4296899999999368,
+            "p95Ms": 1.4296899999999368,
+            "meanMs": 1.4296899999999368
+          },
+          {
+            "fingerprint": "[background] UPDATE outbox SET status='published',published_at=now() WHERE id=ANY($1::uuid[])",
+            "count": 1,
+            "p50Ms": 7.151076000000103,
+            "p95Ms": 7.151076000000103,
+            "meanMs": 7.151076000000103
+          }
+        ],
+        "redisCommands": {
+          "get": 20,
+          "evalsha": 30
+        },
+        "redisCommandsPerRequest": 5,
+        "pool": {
+          "maxWaiting": 6,
+          "acquisition": {
+            "count": 163,
+            "p50Ms": 0.03579799999988609,
+            "p95Ms": 5.039073000000371,
+            "meanMs": 0.7341348036809882
+          }
+        },
+        "phases": {
+          "admit": {
+            "count": 10,
+            "p50Ms": 32.79277000000002,
+            "p95Ms": 48.01013000000012,
+            "meanMs": 36.28445649999999
+          },
+          "dispatch": {
+            "count": 10,
+            "p50Ms": 19.142193000000134,
+            "p95Ms": 31.813466000000062,
+            "meanMs": 20.10498769999999
+          },
+          "settle": {
+            "count": 10,
+            "p50Ms": 56.88558000000012,
+            "p95Ms": 80.41933900000004,
+            "meanMs": 58.2480477000001
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 50,
+      "repetition": 1,
+      "baseline": {
+        "statuses": {
+          "200": 50
+        },
+        "elapsedMs": 84.53384400000004,
+        "response": {
+          "count": 50,
+          "p50Ms": 54.4915289999999,
+          "p95Ms": 76.62806099999989,
+          "meanMs": 51.551925539999964
+        }
+      },
+      "gateway": {
+        "statuses": {
+          "200": 50
+        },
+        "elapsedMs": 617.0931339999997,
+        "response": {
+          "count": 50,
+          "p50Ms": 522.802334,
+          "p95Ms": 606.625681,
+          "meanMs": 508.4737553399999
+        }
+      },
+      "settlementElapsedMs": 1125.3624470000004,
+      "metrics": {
+        "sqlCalls": 1118,
+        "sqlCallsPerRequest": 22.36,
+        "requestSqlCalls": 1100,
+        "requestSqlCallsPerRequest": 22,
+        "backgroundSqlCalls": 18,
+        "queries": [
+          {
+            "fingerprint": "[request] SELECT generation::text AS generation, paused, dirty, redis_run_id FROM billing_state WHERE project_id = $1",
+            "count": 100,
+            "p50Ms": 4.741003000000092,
+            "p95Ms": 14.64040900000009,
+            "meanMs": 6.251712309999993
+          },
+          {
+            "fingerprint": "[request] SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1",
+            "count": 50,
+            "p50Ms": 5.598844999999983,
+            "p95Ms": 11.871161999999913,
+            "meanMs": 6.4038840799999885
+          },
+          {
+            "fingerprint": "[request] /*gw:key*/ SELECT k.id AS key_id, k.prefix, k.allowed_models, k.expires_at, k.revoked_at, k.key_rpm, p.id AS project_id, p.workspace_id, p.rpm AS project_rpm, p",
+            "count": 50,
+            "p50Ms": 6.0988320000001295,
+            "p95Ms": 11.499190999999882,
+            "meanMs": 6.433792339999991
+          },
+          {
+            "fingerprint": "[request] /*gw:touch*/ UPDATE api_keys SET last_used_at = now() WHERE id = $1",
+            "count": 50,
+            "p50Ms": 12.732946999999967,
+            "p95Ms": 31.218365000000176,
+            "meanMs": 14.80007093999996
+          },
+          {
+            "fingerprint": "[request] /*gw:route*/ SELECT a.id AS alias_id, a.name AS alias_name, rv.id AS route_version_id, rv.version, rv.targets, rv.capabilities FROM aliases a JOIN route_version",
+            "count": 50,
+            "p50Ms": 5.484021000000212,
+            "p95Ms": 13.825407999999697,
+            "meanMs": 6.641777459999966
+          },
+          {
+            "fingerprint": "[request] /*gw:targets*/ SELECT t.id, t.upstream_model, t.input_price::text AS input_price, t.output_price::text AS output_price, t.capabilities, t.enabled AS target_enab",
+            "count": 50,
+            "p50Ms": 5.180349000000206,
+            "p95Ms": 10.749259000000166,
+            "meanMs": 6.383706959999991
+          },
+          {
+            "fingerprint": "[request] WITH inserted AS ( INSERT INTO requests(request_id,project_id,key_id,period,reserve_micros,route_version,price_snapshot,status) VALUES($1,$2,$3,$4,$5,$6::jsonb,",
+            "count": 50,
+            "p50Ms": 12.747895999999855,
+            "p95Ms": 24.148772999999892,
+            "meanMs": 14.134968420000005
+          },
+          {
+            "fingerprint": "[request] WITH r AS ( UPDATE requests SET status = 'reserved', updated_at = now() WHERE request_id = $1 AND status = 'preparing' RETURNING request_id ) UPDATE reservation",
+            "count": 50,
+            "p50Ms": 11.285362000000077,
+            "p95Ms": 30.470553999999993,
+            "meanMs": 13.842989000000015
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text AS project_id, status, period FROM requests WHERE request_id = $1",
+            "count": 50,
+            "p50Ms": 4.202518999999938,
+            "p95Ms": 12.206232999999884,
+            "meanMs": 5.4391887400000085
+          },
+          {
+            "fingerprint": "[request] UPDATE requests SET status = 'dispatch_intent', updated_at = now() WHERE request_id = $1 AND status = 'reserved' RETURNING request_id",
+            "count": 50,
+            "p50Ms": 11.405772999999954,
+            "p95Ms": 21.19855400000006,
+            "meanMs": 12.27463122000002
+          },
+          {
+            "fingerprint": "[request] UPDATE requests SET status = 'dispatched', updated_at = now() WHERE request_id = $1 AND status = 'dispatch_intent'",
+            "count": 50,
+            "p50Ms": 9.578976000000239,
+            "p95Ms": 22.657032000000072,
+            "meanMs": 11.392757499999998
+          },
+          {
+            "fingerprint": "[request] /*gw:request-attempts*/ WITH meta AS ( UPDATE requests SET alias_name=$2,error_code=$3,updated_at=now() WHERE request_id=$1 RETURNING request_id ) INSERT INTO a",
+            "count": 50,
+            "p50Ms": 9.078075999999783,
+            "p95Ms": 34.70476899999994,
+            "meanMs": 12.425355560000007
+          },
+          {
+            "fingerprint": "[request] /*gw:request-meta*/ UPDATE requests SET alias_name = $2, error_code = $3, updated_at = now() WHERE request_id = $1",
+            "count": 50,
+            "p50Ms": 7.755636000000322,
+            "p95Ms": 15.853316000000177,
+            "meanMs": 8.365263180000047
+          },
+          {
+            "fingerprint": "[request] BEGIN",
+            "count": 50,
+            "p50Ms": 0.582053999999971,
+            "p95Ms": 6.632094000000052,
+            "meanMs": 1.330426300000072
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text FROM requests WHERE request_id=$1",
+            "count": 50,
+            "p50Ms": 0.7680759999998372,
+            "p95Ms": 4.981333999999606,
+            "meanMs": 1.448113099999955
+          },
+          {
+            "fingerprint": "[request] SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            "count": 50,
+            "p50Ms": 0.7033500000002277,
+            "p95Ms": 5.772341000000324,
+            "meanMs": 2.0804592999999842
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text AS project_id, period, reserve_micros::text AS reserve_micros, status, actual_micros::text AS actual_micros FROM requests WHERE request_",
+            "count": 50,
+            "p50Ms": 0.82998600000019,
+            "p95Ms": 3.577885000000151,
+            "meanMs": 1.3782634199999666
+          },
+          {
+            "fingerprint": "[request] SELECT event_id, amount_micros::text AS amount_micros, estimated FROM ledger WHERE event_id = ANY($1::text[])",
+            "count": 50,
+            "p50Ms": 0.6458990000000995,
+            "p95Ms": 2.479117999999744,
+            "meanMs": 0.9890666999999667
+          },
+          {
+            "fingerprint": "[request] WITH entry AS ( INSERT INTO ledger(event_id,request_id,project_id,period,amount_micros,kind,input_tokens,output_tokens,estimated) VALUES($10,$1,$2,$3,$4,$15,$6,",
+            "count": 50,
+            "p50Ms": 1.5371430000000146,
+            "p95Ms": 6.408836999999949,
+            "meanMs": 2.2726302400000167
+          },
+          {
+            "fingerprint": "[request] COMMIT",
+            "count": 50,
+            "p50Ms": 1.9528439999999136,
+            "p95Ms": 7.087412000000313,
+            "meanMs": 3.5534255800000394
+          },
+          {
+            "fingerprint": "[request] SELECT generation::text AS generation FROM billing_state WHERE project_id = $1",
+            "count": 50,
+            "p50Ms": 1.0688029999996616,
+            "p95Ms": 6.646807000000081,
+            "meanMs": 1.8723915599999692
+          },
+          {
+            "fingerprint": "[background] BEGIN",
+            "count": 4,
+            "p50Ms": 1.9620700000000397,
+            "p95Ms": 5.1182550000003175,
+            "meanMs": 3.014680500000054
+          },
+          {
+            "fingerprint": "[background] COMMIT",
+            "count": 4,
+            "p50Ms": 4.476264999999785,
+            "p95Ms": 7.431236000000354,
+            "meanMs": 5.249717500000088
+          },
+          {
+            "fingerprint": "[background] WITH candidate AS (SELECT id FROM outbox WHERE status IN('pending','leased') AND available_at<=now() ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 50) UPDATE",
+            "count": 2,
+            "p50Ms": 10.100158000000192,
+            "p95Ms": 33.26273399999991,
+            "meanMs": 21.68144600000005
+          },
+          {
+            "fingerprint": "[background] INSERT INTO consumer_inbox(consumer_name,event_id,project_id) SELECT 'usage-v1',event_id,project_id FROM jsonb_to_recordset($1::jsonb) AS e(event_id text,projec",
+            "count": 2,
+            "p50Ms": 3.8142729999999574,
+            "p95Ms": 7.957421000000068,
+            "meanMs": 5.8858470000000125
+          },
+          {
+            "fingerprint": "[background] SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            "count": 2,
+            "p50Ms": 0.6074670000002698,
+            "p95Ms": 6.110001999999895,
+            "meanMs": 3.3587345000000823
+          },
+          {
+            "fingerprint": "[background] INSERT INTO usage_hourly(project_id,bucket,actual_micros,estimated_micros,input_tokens,output_tokens,event_count) SELECT project_id,date_trunc('hour',first_at),",
+            "count": 2,
+            "p50Ms": 3.500238999999965,
+            "p95Ms": 6.822791999999936,
+            "meanMs": 5.16151549999995
+          },
+          {
+            "fingerprint": "[background] UPDATE outbox SET status='published',published_at=now() WHERE id=ANY($1::uuid[])",
+            "count": 2,
+            "p50Ms": 3.6468840000002274,
+            "p95Ms": 8.013768000000255,
+            "meanMs": 5.830326000000241
+          }
+        ],
+        "redisCommands": {
+          "get": 100,
+          "evalsha": 150,
+          "info": 1
+        },
+        "redisCommandsPerRequest": 5.02,
+        "pool": {
+          "maxWaiting": 46,
+          "acquisition": {
+            "count": 806,
+            "p50Ms": 18.63174600000002,
+            "p95Ms": 43.369880000000194,
+            "meanMs": 18.69980030769232
+          }
+        },
+        "phases": {
+          "admit": {
+            "count": 50,
+            "p50Ms": 134.40891499999998,
+            "p95Ms": 163.88878000000022,
+            "meanMs": 127.69614420000002
+          },
+          "dispatch": {
+            "count": 50,
+            "p50Ms": 151.4011230000001,
+            "p95Ms": 180.1031350000003,
+            "meanMs": 142.76977308000005
+          },
+          "settle": {
+            "count": 50,
+            "p50Ms": 234.27592699999968,
+            "p95Ms": 485.31265699999994,
+            "meanMs": 306.82586752000014
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 50,
+      "repetition": 2,
+      "baseline": {
+        "statuses": {
+          "200": 50
+        },
+        "elapsedMs": 53.82370699999956,
+        "response": {
+          "count": 50,
+          "p50Ms": 37.524663000000146,
+          "p95Ms": 38.75933499999974,
+          "meanMs": 37.60262600000006
+        }
+      },
+      "gateway": {
+        "statuses": {
+          "200": 50
+        },
+        "elapsedMs": 541.2383239999999,
+        "response": {
+          "count": 50,
+          "p50Ms": 466.86586199999965,
+          "p95Ms": 529.1818519999997,
+          "meanMs": 463.59857652000005
+        }
+      },
+      "settlementElapsedMs": 921.2499439999992,
+      "metrics": {
+        "sqlCalls": 1118,
+        "sqlCallsPerRequest": 22.36,
+        "requestSqlCalls": 1100,
+        "requestSqlCallsPerRequest": 22,
+        "backgroundSqlCalls": 18,
+        "queries": [
+          {
+            "fingerprint": "[request] SELECT generation::text AS generation, paused, dirty, redis_run_id FROM billing_state WHERE project_id = $1",
+            "count": 100,
+            "p50Ms": 4.019282999999632,
+            "p95Ms": 11.154438999999911,
+            "meanMs": 5.117576589999945
+          },
+          {
+            "fingerprint": "[request] SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1",
+            "count": 50,
+            "p50Ms": 4.517859999999928,
+            "p95Ms": 11.266435000000456,
+            "meanMs": 5.9132584400000265
+          },
+          {
+            "fingerprint": "[request] /*gw:key*/ SELECT k.id AS key_id, k.prefix, k.allowed_models, k.expires_at, k.revoked_at, k.key_rpm, p.id AS project_id, p.workspace_id, p.rpm AS project_rpm, p",
+            "count": 50,
+            "p50Ms": 5.839625000000524,
+            "p95Ms": 16.428751999999804,
+            "meanMs": 7.304763600000006
+          },
+          {
+            "fingerprint": "[request] /*gw:touch*/ UPDATE api_keys SET last_used_at = now() WHERE id = $1",
+            "count": 50,
+            "p50Ms": 11.219226000000162,
+            "p95Ms": 50.57352600000013,
+            "meanMs": 15.995439920000045
+          },
+          {
+            "fingerprint": "[request] /*gw:route*/ SELECT a.id AS alias_id, a.name AS alias_name, rv.id AS route_version_id, rv.version, rv.targets, rv.capabilities FROM aliases a JOIN route_version",
+            "count": 50,
+            "p50Ms": 1.5557309999994686,
+            "p95Ms": 12.564582999999402,
+            "meanMs": 2.5745500399999766
+          },
+          {
+            "fingerprint": "[request] /*gw:targets*/ SELECT t.id, t.upstream_model, t.input_price::text AS input_price, t.output_price::text AS output_price, t.capabilities, t.enabled AS target_enab",
+            "count": 50,
+            "p50Ms": 3.445694000000003,
+            "p95Ms": 6.963526000000456,
+            "meanMs": 3.6283121600000414
+          },
+          {
+            "fingerprint": "[request] WITH inserted AS ( INSERT INTO requests(request_id,project_id,key_id,period,reserve_micros,route_version,price_snapshot,status) VALUES($1,$2,$3,$4,$5,$6::jsonb,",
+            "count": 50,
+            "p50Ms": 10.30100399999992,
+            "p95Ms": 16.466139000000112,
+            "meanMs": 10.566161520000005
+          },
+          {
+            "fingerprint": "[request] WITH r AS ( UPDATE requests SET status = 'reserved', updated_at = now() WHERE request_id = $1 AND status = 'preparing' RETURNING request_id ) UPDATE reservation",
+            "count": 50,
+            "p50Ms": 8.377591999999822,
+            "p95Ms": 12.756792000000132,
+            "meanMs": 8.696350340000008
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text AS project_id, status, period FROM requests WHERE request_id = $1",
+            "count": 50,
+            "p50Ms": 2.59663399999954,
+            "p95Ms": 5.356504000000314,
+            "meanMs": 2.925205780000033
+          },
+          {
+            "fingerprint": "[request] UPDATE requests SET status = 'dispatch_intent', updated_at = now() WHERE request_id = $1 AND status = 'reserved' RETURNING request_id",
+            "count": 50,
+            "p50Ms": 6.264356000000589,
+            "p95Ms": 10.914518000000498,
+            "meanMs": 7.2214316799999505
+          },
+          {
+            "fingerprint": "[request] UPDATE requests SET status = 'dispatched', updated_at = now() WHERE request_id = $1 AND status = 'dispatch_intent'",
+            "count": 50,
+            "p50Ms": 11.951218999999583,
+            "p95Ms": 25.768396000000394,
+            "meanMs": 14.319961919999896
+          },
+          {
+            "fingerprint": "[request] /*gw:request-attempts*/ WITH meta AS ( UPDATE requests SET alias_name=$2,error_code=$3,updated_at=now() WHERE request_id=$1 RETURNING request_id ) INSERT INTO a",
+            "count": 50,
+            "p50Ms": 8.123398000000634,
+            "p95Ms": 22.485944000000018,
+            "meanMs": 10.350761959999964
+          },
+          {
+            "fingerprint": "[request] /*gw:request-meta*/ UPDATE requests SET alias_name = $2, error_code = $3, updated_at = now() WHERE request_id = $1",
+            "count": 50,
+            "p50Ms": 7.668599999999969,
+            "p95Ms": 16.23377900000014,
+            "meanMs": 8.770927899999933
+          },
+          {
+            "fingerprint": "[request] BEGIN",
+            "count": 50,
+            "p50Ms": 0.48619200000030105,
+            "p95Ms": 2.503378999999768,
+            "meanMs": 1.0269724199999473
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text FROM requests WHERE request_id=$1",
+            "count": 50,
+            "p50Ms": 0.7103329999999914,
+            "p95Ms": 3.083534000000327,
+            "meanMs": 1.0961061199999493
+          },
+          {
+            "fingerprint": "[request] SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            "count": 50,
+            "p50Ms": 0.5766519999997399,
+            "p95Ms": 3.5058439999993425,
+            "meanMs": 0.8580011200000809
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text AS project_id, period, reserve_micros::text AS reserve_micros, status, actual_micros::text AS actual_micros FROM requests WHERE request_",
+            "count": 50,
+            "p50Ms": 0.6850779999995211,
+            "p95Ms": 3.3244009999998525,
+            "meanMs": 1.0197995399999673
+          },
+          {
+            "fingerprint": "[request] SELECT event_id, amount_micros::text AS amount_micros, estimated FROM ledger WHERE event_id = ANY($1::text[])",
+            "count": 50,
+            "p50Ms": 0.5305500000004031,
+            "p95Ms": 2.6304819999995743,
+            "meanMs": 0.8588024999999471
+          },
+          {
+            "fingerprint": "[request] WITH entry AS ( INSERT INTO ledger(event_id,request_id,project_id,period,amount_micros,kind,input_tokens,output_tokens,estimated) VALUES($10,$1,$2,$3,$4,$15,$6,",
+            "count": 50,
+            "p50Ms": 1.2879380000003948,
+            "p95Ms": 4.902655999999297,
+            "meanMs": 1.9613225400000374
+          },
+          {
+            "fingerprint": "[request] COMMIT",
+            "count": 50,
+            "p50Ms": 1.7263779999993858,
+            "p95Ms": 6.103881000000001,
+            "meanMs": 2.8302244399999834
+          },
+          {
+            "fingerprint": "[request] SELECT generation::text AS generation FROM billing_state WHERE project_id = $1",
+            "count": 50,
+            "p50Ms": 0.9488870000004681,
+            "p95Ms": 2.31388700000025,
+            "meanMs": 1.1907469399999535
+          },
+          {
+            "fingerprint": "[background] BEGIN",
+            "count": 4,
+            "p50Ms": 1.1266109999996843,
+            "p95Ms": 8.590353999999934,
+            "meanMs": 3.158307749999949
+          },
+          {
+            "fingerprint": "[background] COMMIT",
+            "count": 4,
+            "p50Ms": 3.1003639999998995,
+            "p95Ms": 6.685182999999597,
+            "meanMs": 4.531970999999885
+          },
+          {
+            "fingerprint": "[background] WITH candidate AS (SELECT id FROM outbox WHERE status IN('pending','leased') AND available_at<=now() ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 50) UPDATE",
+            "count": 2,
+            "p50Ms": 5.406428999999662,
+            "p95Ms": 12.070099000000482,
+            "meanMs": 8.738264000000072
+          },
+          {
+            "fingerprint": "[background] INSERT INTO consumer_inbox(consumer_name,event_id,project_id) SELECT 'usage-v1',event_id,project_id FROM jsonb_to_recordset($1::jsonb) AS e(event_id text,projec",
+            "count": 2,
+            "p50Ms": 2.4890049999994517,
+            "p95Ms": 16.608438000000206,
+            "meanMs": 9.548721499999829
+          },
+          {
+            "fingerprint": "[background] SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            "count": 2,
+            "p50Ms": 1.3753960000003644,
+            "p95Ms": 1.9677349999992657,
+            "meanMs": 1.671565499999815
+          },
+          {
+            "fingerprint": "[background] INSERT INTO usage_hourly(project_id,bucket,actual_micros,estimated_micros,input_tokens,output_tokens,event_count) SELECT project_id,date_trunc('hour',first_at),",
+            "count": 2,
+            "p50Ms": 3.1356800000003204,
+            "p95Ms": 14.040125999999873,
+            "meanMs": 8.587903000000097
+          },
+          {
+            "fingerprint": "[background] UPDATE outbox SET status='published',published_at=now() WHERE id=ANY($1::uuid[])",
+            "count": 2,
+            "p50Ms": 3.062573999999586,
+            "p95Ms": 10.732989999999518,
+            "meanMs": 6.897781999999552
+          }
+        ],
+        "redisCommands": {
+          "get": 100,
+          "evalsha": 150
+        },
+        "redisCommandsPerRequest": 5,
+        "pool": {
+          "maxWaiting": 84,
+          "acquisition": {
+            "count": 806,
+            "p50Ms": 17.875183999999535,
+            "p95Ms": 54.947323000000324,
+            "meanMs": 19.580741451612877
+          }
+        },
+        "phases": {
+          "admit": {
+            "count": 50,
+            "p50Ms": 110.02195099999972,
+            "p95Ms": 128.87407199999961,
+            "meanMs": 111.57556991999992
+          },
+          "dispatch": {
+            "count": 50,
+            "p50Ms": 114.7390660000001,
+            "p95Ms": 143.71194400000059,
+            "meanMs": 113.5746372200001
+          },
+          "settle": {
+            "count": 50,
+            "p50Ms": 259.9676100000006,
+            "p95Ms": 362.23202200000014,
+            "meanMs": 245.97581174000007
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 50,
+      "repetition": 3,
+      "baseline": {
+        "statuses": {
+          "200": 50
+        },
+        "elapsedMs": 33.39580500000011,
+        "response": {
+          "count": 50,
+          "p50Ms": 18.6910969999999,
+          "p95Ms": 27.945074000000204,
+          "meanMs": 22.334222080000018
+        }
+      },
+      "gateway": {
+        "statuses": {
+          "200": 50
+        },
+        "elapsedMs": 512.0522979999996,
+        "response": {
+          "count": 50,
+          "p50Ms": 455.38035200000013,
+          "p95Ms": 506.2046529999998,
+          "meanMs": 455.20660176000007
+        }
+      },
+      "settlementElapsedMs": 901.817986,
+      "metrics": {
+        "sqlCalls": 1118,
+        "sqlCallsPerRequest": 22.36,
+        "requestSqlCalls": 1100,
+        "requestSqlCallsPerRequest": 22,
+        "backgroundSqlCalls": 18,
+        "queries": [
+          {
+            "fingerprint": "[request] SELECT generation::text AS generation, paused, dirty, redis_run_id FROM billing_state WHERE project_id = $1",
+            "count": 100,
+            "p50Ms": 5.009739000000081,
+            "p95Ms": 10.649679999999535,
+            "meanMs": 5.469079530000027
+          },
+          {
+            "fingerprint": "[request] SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1",
+            "count": 50,
+            "p50Ms": 4.579805000000306,
+            "p95Ms": 7.514554000000317,
+            "meanMs": 4.849948139999997
+          },
+          {
+            "fingerprint": "[request] /*gw:key*/ SELECT k.id AS key_id, k.prefix, k.allowed_models, k.expires_at, k.revoked_at, k.key_rpm, p.id AS project_id, p.workspace_id, p.rpm AS project_rpm, p",
+            "count": 50,
+            "p50Ms": 5.156933999999637,
+            "p95Ms": 9.635033999999905,
+            "meanMs": 5.66583247999999
+          },
+          {
+            "fingerprint": "[request] /*gw:route*/ SELECT a.id AS alias_id, a.name AS alias_name, rv.id AS route_version_id, rv.version, rv.targets, rv.capabilities FROM aliases a JOIN route_version",
+            "count": 50,
+            "p50Ms": 1.7585229999995136,
+            "p95Ms": 5.604639000000134,
+            "meanMs": 2.067373279999938
+          },
+          {
+            "fingerprint": "[request] /*gw:touch*/ UPDATE api_keys SET last_used_at = now() WHERE id = $1",
+            "count": 50,
+            "p50Ms": 16.462413999999626,
+            "p95Ms": 50.058711000000585,
+            "meanMs": 19.98581103999999
+          },
+          {
+            "fingerprint": "[request] /*gw:targets*/ SELECT t.id, t.upstream_model, t.input_price::text AS input_price, t.output_price::text AS output_price, t.capabilities, t.enabled AS target_enab",
+            "count": 50,
+            "p50Ms": 3.7289590000000317,
+            "p95Ms": 24.902484000000186,
+            "meanMs": 7.016851399999996
+          },
+          {
+            "fingerprint": "[request] WITH inserted AS ( INSERT INTO requests(request_id,project_id,key_id,period,reserve_micros,route_version,price_snapshot,status) VALUES($1,$2,$3,$4,$5,$6::jsonb,",
+            "count": 50,
+            "p50Ms": 8.664719000000332,
+            "p95Ms": 14.225374000000556,
+            "meanMs": 9.18952853999992
+          },
+          {
+            "fingerprint": "[request] WITH r AS ( UPDATE requests SET status = 'reserved', updated_at = now() WHERE request_id = $1 AND status = 'preparing' RETURNING request_id ) UPDATE reservation",
+            "count": 50,
+            "p50Ms": 6.566515000000436,
+            "p95Ms": 11.92866100000083,
+            "meanMs": 6.8620455400000715
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text AS project_id, status, period FROM requests WHERE request_id = $1",
+            "count": 50,
+            "p50Ms": 2.9900619999998526,
+            "p95Ms": 5.623987000000852,
+            "meanMs": 3.1750265000000035
+          },
+          {
+            "fingerprint": "[request] UPDATE requests SET status = 'dispatch_intent', updated_at = now() WHERE request_id = $1 AND status = 'reserved' RETURNING request_id",
+            "count": 50,
+            "p50Ms": 5.7292450000004465,
+            "p95Ms": 13.042617000000064,
+            "meanMs": 6.656707199999928
+          },
+          {
+            "fingerprint": "[request] UPDATE requests SET status = 'dispatched', updated_at = now() WHERE request_id = $1 AND status = 'dispatch_intent'",
+            "count": 50,
+            "p50Ms": 10.667688999999882,
+            "p95Ms": 27.293037999999797,
+            "meanMs": 13.187518659999895
+          },
+          {
+            "fingerprint": "[request] /*gw:request-attempts*/ WITH meta AS ( UPDATE requests SET alias_name=$2,error_code=$3,updated_at=now() WHERE request_id=$1 RETURNING request_id ) INSERT INTO a",
+            "count": 50,
+            "p50Ms": 8.661904000000504,
+            "p95Ms": 18.087806000000455,
+            "meanMs": 9.981516400000055
+          },
+          {
+            "fingerprint": "[request] /*gw:request-meta*/ UPDATE requests SET alias_name = $2, error_code = $3, updated_at = now() WHERE request_id = $1",
+            "count": 50,
+            "p50Ms": 8.399037999999564,
+            "p95Ms": 14.957706999999573,
+            "meanMs": 8.76746086000001
+          },
+          {
+            "fingerprint": "[request] BEGIN",
+            "count": 50,
+            "p50Ms": 0.5546929999991335,
+            "p95Ms": 2.9715610000002926,
+            "meanMs": 1.1102523199999814
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text FROM requests WHERE request_id=$1",
+            "count": 50,
+            "p50Ms": 0.7088009999997666,
+            "p95Ms": 3.0961680000000342,
+            "meanMs": 1.0209627799999725
+          },
+          {
+            "fingerprint": "[request] SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            "count": 50,
+            "p50Ms": 0.5886830000008558,
+            "p95Ms": 2.060534000000189,
+            "meanMs": 0.9159569199999714
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text AS project_id, period, reserve_micros::text AS reserve_micros, status, actual_micros::text AS actual_micros FROM requests WHERE request_",
+            "count": 50,
+            "p50Ms": 0.8298190000004979,
+            "p95Ms": 3.105538999999226,
+            "meanMs": 1.0813173799999458
+          },
+          {
+            "fingerprint": "[request] SELECT event_id, amount_micros::text AS amount_micros, estimated FROM ledger WHERE event_id = ANY($1::text[])",
+            "count": 50,
+            "p50Ms": 0.5995050000001356,
+            "p95Ms": 6.696640000000116,
+            "meanMs": 1.2511439400000381
+          },
+          {
+            "fingerprint": "[request] WITH entry AS ( INSERT INTO ledger(event_id,request_id,project_id,period,amount_micros,kind,input_tokens,output_tokens,estimated) VALUES($10,$1,$2,$3,$4,$15,$6,",
+            "count": 50,
+            "p50Ms": 1.2860110000001441,
+            "p95Ms": 5.565835999999763,
+            "meanMs": 1.9374268400000982
+          },
+          {
+            "fingerprint": "[request] COMMIT",
+            "count": 50,
+            "p50Ms": 1.8217020000001867,
+            "p95Ms": 5.6729740000000675,
+            "meanMs": 2.3077731799999492
+          },
+          {
+            "fingerprint": "[request] SELECT generation::text AS generation FROM billing_state WHERE project_id = $1",
+            "count": 50,
+            "p50Ms": 0.817164000000048,
+            "p95Ms": 3.204612999999881,
+            "meanMs": 1.3735761199999978
+          },
+          {
+            "fingerprint": "[background] BEGIN",
+            "count": 4,
+            "p50Ms": 2.8222249999998894,
+            "p95Ms": 5.736759000000347,
+            "meanMs": 3.096170999999913
+          },
+          {
+            "fingerprint": "[background] COMMIT",
+            "count": 4,
+            "p50Ms": 4.130891000000702,
+            "p95Ms": 7.06314200000088,
+            "meanMs": 5.008118250000507
+          },
+          {
+            "fingerprint": "[background] WITH candidate AS (SELECT id FROM outbox WHERE status IN('pending','leased') AND available_at<=now() ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 50) UPDATE",
+            "count": 2,
+            "p50Ms": 6.341292000000067,
+            "p95Ms": 8.156291000000238,
+            "meanMs": 7.248791500000152
+          },
+          {
+            "fingerprint": "[background] INSERT INTO consumer_inbox(consumer_name,event_id,project_id) SELECT 'usage-v1',event_id,project_id FROM jsonb_to_recordset($1::jsonb) AS e(event_id text,projec",
+            "count": 2,
+            "p50Ms": 3.6699799999996685,
+            "p95Ms": 5.099895999999717,
+            "meanMs": 4.384937999999693
+          },
+          {
+            "fingerprint": "[background] SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            "count": 2,
+            "p50Ms": 1.28550499999983,
+            "p95Ms": 1.3520210000006045,
+            "meanMs": 1.3187630000002173
+          },
+          {
+            "fingerprint": "[background] INSERT INTO usage_hourly(project_id,bucket,actual_micros,estimated_micros,input_tokens,output_tokens,event_count) SELECT project_id,date_trunc('hour',first_at),",
+            "count": 2,
+            "p50Ms": 2.9693539999998393,
+            "p95Ms": 8.4638130000003,
+            "meanMs": 5.71658350000007
+          },
+          {
+            "fingerprint": "[background] UPDATE outbox SET status='published',published_at=now() WHERE id=ANY($1::uuid[])",
+            "count": 2,
+            "p50Ms": 2.620864999999867,
+            "p95Ms": 5.135108999999829,
+            "meanMs": 3.877986999999848
+          }
+        ],
+        "redisCommands": {
+          "info": 1,
+          "get": 100,
+          "evalsha": 150
+        },
+        "redisCommandsPerRequest": 5.02,
+        "pool": {
+          "maxWaiting": 87,
+          "acquisition": {
+            "count": 806,
+            "p50Ms": 15.4979229999999,
+            "p95Ms": 58.084100000000035,
+            "meanMs": 19.17109517990078
+          }
+        },
+        "phases": {
+          "admit": {
+            "count": 50,
+            "p50Ms": 108.36840500000017,
+            "p95Ms": 121.96972899999946,
+            "meanMs": 108.31047140000003
+          },
+          "dispatch": {
+            "count": 50,
+            "p50Ms": 109.58744399999978,
+            "p95Ms": 125.77250900000035,
+            "meanMs": 104.19479642
+          },
+          "settle": {
+            "count": 50,
+            "p50Ms": 221.16349499999978,
+            "p95Ms": 372.16737399999965,
+            "meanMs": 230.30284353999997
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 100,
+      "repetition": 1,
+      "baseline": {
+        "statuses": {
+          "200": 100
+        },
+        "elapsedMs": 63.904113999999936,
+        "response": {
+          "count": 100,
+          "p50Ms": 32.51900800000021,
+          "p95Ms": 44.20522600000004,
+          "meanMs": 34.47975032000006
+        }
+      },
+      "gateway": {
+        "statuses": {
+          "200": 100
+        },
+        "elapsedMs": 994.9813530000001,
+        "response": {
+          "count": 100,
+          "p50Ms": 831.5095339999998,
+          "p95Ms": 959.1676309999993,
+          "meanMs": 828.1420541299998
+        }
+      },
+      "settlementElapsedMs": 1968.8767290000005,
+      "metrics": {
+        "sqlCalls": 2230,
+        "sqlCallsPerRequest": 22.3,
+        "requestSqlCalls": 2200,
+        "requestSqlCallsPerRequest": 22,
+        "backgroundSqlCalls": 30,
+        "queries": [
+          {
+            "fingerprint": "[request] SELECT generation::text AS generation, paused, dirty, redis_run_id FROM billing_state WHERE project_id = $1",
+            "count": 200,
+            "p50Ms": 2.915274999999383,
+            "p95Ms": 9.916376000000128,
+            "meanMs": 3.8068058549999844
+          },
+          {
+            "fingerprint": "[request] SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1",
+            "count": 100,
+            "p50Ms": 2.6079759999993257,
+            "p95Ms": 13.74134900000081,
+            "meanMs": 3.9255779299999993
+          },
+          {
+            "fingerprint": "[request] /*gw:key*/ SELECT k.id AS key_id, k.prefix, k.allowed_models, k.expires_at, k.revoked_at, k.key_rpm, p.id AS project_id, p.workspace_id, p.rpm AS project_rpm, p",
+            "count": 100,
+            "p50Ms": 3.9213079999999536,
+            "p95Ms": 8.137072999999873,
+            "meanMs": 4.278451069999973
+          },
+          {
+            "fingerprint": "[request] /*gw:route*/ SELECT a.id AS alias_id, a.name AS alias_name, rv.id AS route_version_id, rv.version, rv.targets, rv.capabilities FROM aliases a JOIN route_version",
+            "count": 100,
+            "p50Ms": 2.2117499999994834,
+            "p95Ms": 6.132889999999861,
+            "meanMs": 2.8946881199999552
+          },
+          {
+            "fingerprint": "[request] /*gw:touch*/ UPDATE api_keys SET last_used_at = now() WHERE id = $1",
+            "count": 100,
+            "p50Ms": 13.062417000000096,
+            "p95Ms": 55.698191999999835,
+            "meanMs": 18.363933469999964
+          },
+          {
+            "fingerprint": "[request] /*gw:targets*/ SELECT t.id, t.upstream_model, t.input_price::text AS input_price, t.output_price::text AS output_price, t.capabilities, t.enabled AS target_enab",
+            "count": 100,
+            "p50Ms": 3.8063460000003033,
+            "p95Ms": 9.49503199999981,
+            "meanMs": 4.679277899999988
+          },
+          {
+            "fingerprint": "[request] WITH inserted AS ( INSERT INTO requests(request_id,project_id,key_id,period,reserve_micros,route_version,price_snapshot,status) VALUES($1,$2,$3,$4,$5,$6::jsonb,",
+            "count": 100,
+            "p50Ms": 9.133851000000504,
+            "p95Ms": 30.509698999999273,
+            "meanMs": 10.521419419999965
+          },
+          {
+            "fingerprint": "[request] WITH r AS ( UPDATE requests SET status = 'reserved', updated_at = now() WHERE request_id = $1 AND status = 'preparing' RETURNING request_id ) UPDATE reservation",
+            "count": 100,
+            "p50Ms": 7.512714999999844,
+            "p95Ms": 12.412304999999833,
+            "meanMs": 7.937296949999991
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text AS project_id, status, period FROM requests WHERE request_id = $1",
+            "count": 100,
+            "p50Ms": 2.704432000000452,
+            "p95Ms": 7.480407000000014,
+            "meanMs": 3.3129441099999806
+          },
+          {
+            "fingerprint": "[request] UPDATE requests SET status = 'dispatch_intent', updated_at = now() WHERE request_id = $1 AND status = 'reserved' RETURNING request_id",
+            "count": 100,
+            "p50Ms": 7.712665000000015,
+            "p95Ms": 13.934580000000096,
+            "meanMs": 8.405629020000024
+          },
+          {
+            "fingerprint": "[request] UPDATE requests SET status = 'dispatched', updated_at = now() WHERE request_id = $1 AND status = 'dispatch_intent'",
+            "count": 100,
+            "p50Ms": 9.507217999999739,
+            "p95Ms": 20.15304599999945,
+            "meanMs": 10.585753450000011
+          },
+          {
+            "fingerprint": "[request] /*gw:request-attempts*/ WITH meta AS ( UPDATE requests SET alias_name=$2,error_code=$3,updated_at=now() WHERE request_id=$1 RETURNING request_id ) INSERT INTO a",
+            "count": 100,
+            "p50Ms": 9.575754000000416,
+            "p95Ms": 18.43618499999957,
+            "meanMs": 10.237024950000032
+          },
+          {
+            "fingerprint": "[request] /*gw:request-meta*/ UPDATE requests SET alias_name = $2, error_code = $3, updated_at = now() WHERE request_id = $1",
+            "count": 100,
+            "p50Ms": 7.988890999999967,
+            "p95Ms": 14.91375700000026,
+            "meanMs": 8.658894049999999
+          },
+          {
+            "fingerprint": "[request] BEGIN",
+            "count": 100,
+            "p50Ms": 0.5670410000002448,
+            "p95Ms": 5.3254479999995965,
+            "meanMs": 1.1561344599999848
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text FROM requests WHERE request_id=$1",
+            "count": 100,
+            "p50Ms": 0.9618850000006205,
+            "p95Ms": 4.296417000000474,
+            "meanMs": 1.4737192300000423
+          },
+          {
+            "fingerprint": "[request] SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            "count": 100,
+            "p50Ms": 0.738774999999805,
+            "p95Ms": 3.448722999999518,
+            "meanMs": 1.250030910000014
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text AS project_id, period, reserve_micros::text AS reserve_micros, status, actual_micros::text AS actual_micros FROM requests WHERE request_",
+            "count": 100,
+            "p50Ms": 0.802810999999565,
+            "p95Ms": 3.638625999999931,
+            "meanMs": 1.2483295200000066
+          },
+          {
+            "fingerprint": "[request] SELECT event_id, amount_micros::text AS amount_micros, estimated FROM ledger WHERE event_id = ANY($1::text[])",
+            "count": 100,
+            "p50Ms": 0.752968000000692,
+            "p95Ms": 4.2295640000002095,
+            "meanMs": 1.284554959999996
+          },
+          {
+            "fingerprint": "[request] WITH entry AS ( INSERT INTO ledger(event_id,request_id,project_id,period,amount_micros,kind,input_tokens,output_tokens,estimated) VALUES($10,$1,$2,$3,$4,$15,$6,",
+            "count": 100,
+            "p50Ms": 1.7181369999998424,
+            "p95Ms": 4.9486849999993865,
+            "meanMs": 2.290581029999976
+          },
+          {
+            "fingerprint": "[request] COMMIT",
+            "count": 100,
+            "p50Ms": 2.1722350000000006,
+            "p95Ms": 7.777082999999948,
+            "meanMs": 2.997631119999978
+          },
+          {
+            "fingerprint": "[request] SELECT generation::text AS generation FROM billing_state WHERE project_id = $1",
+            "count": 100,
+            "p50Ms": 1.007235999999466,
+            "p95Ms": 5.231211000000258,
+            "meanMs": 1.5686960400000134
+          },
+          {
+            "fingerprint": "[background] BEGIN",
+            "count": 7,
+            "p50Ms": 1.1479170000002341,
+            "p95Ms": 5.9285820000004605,
+            "meanMs": 2.173725000000039
+          },
+          {
+            "fingerprint": "[background] COMMIT",
+            "count": 7,
+            "p50Ms": 3.265668000000005,
+            "p95Ms": 8.073495999999977,
+            "meanMs": 4.130719999999981
+          },
+          {
+            "fingerprint": "[background] WITH candidate AS (SELECT id FROM outbox WHERE status IN('pending','leased') AND available_at<=now() ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 50) UPDATE",
+            "count": 4,
+            "p50Ms": 4.43117600000005,
+            "p95Ms": 5.870456000000559,
+            "meanMs": 4.686837500000138
+          },
+          {
+            "fingerprint": "[background] INSERT INTO consumer_inbox(consumer_name,event_id,project_id) SELECT 'usage-v1',event_id,project_id FROM jsonb_to_recordset($1::jsonb) AS e(event_id text,projec",
+            "count": 3,
+            "p50Ms": 3.189690999999584,
+            "p95Ms": 5.884766000000127,
+            "meanMs": 3.871291333333223
+          },
+          {
+            "fingerprint": "[background] SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            "count": 3,
+            "p50Ms": 1.6556060000002617,
+            "p95Ms": 4.51832099999956,
+            "meanMs": 2.307494666666571
+          },
+          {
+            "fingerprint": "[background] INSERT INTO usage_hourly(project_id,bucket,actual_micros,estimated_micros,input_tokens,output_tokens,event_count) SELECT project_id,date_trunc('hour',first_at),",
+            "count": 3,
+            "p50Ms": 6.279241000000184,
+            "p95Ms": 7.741861000000426,
+            "meanMs": 5.542822000000342
+          },
+          {
+            "fingerprint": "[background] UPDATE outbox SET status='published',published_at=now() WHERE id=ANY($1::uuid[])",
+            "count": 3,
+            "p50Ms": 3.601318999999421,
+            "p95Ms": 11.103033999999752,
+            "meanMs": 5.973125666666419
+          }
+        ],
+        "redisCommands": {
+          "get": 200,
+          "evalsha": 300
+        },
+        "redisCommandsPerRequest": 5,
+        "pool": {
+          "maxWaiting": 131,
+          "acquisition": {
+            "count": 1610,
+            "p50Ms": 39.70147300000008,
+            "p95Ms": 84.63097500000003,
+            "meanMs": 39.466147720496934
+          }
+        },
+        "phases": {
+          "admit": {
+            "count": 100,
+            "p50Ms": 227.1928600000001,
+            "p95Ms": 251.60504899999978,
+            "meanMs": 203.18453742999975
+          },
+          "dispatch": {
+            "count": 100,
+            "p50Ms": 202.14708599999994,
+            "p95Ms": 224.53052500000013,
+            "meanMs": 200.45513417
+          },
+          "settle": {
+            "count": 100,
+            "p50Ms": 577.8427460000003,
+            "p95Ms": 932.0205999999998,
+            "meanMs": 580.1271572300001
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 100,
+      "repetition": 2,
+      "baseline": {
+        "statuses": {
+          "200": 100
+        },
+        "elapsedMs": 72.38644399999976,
+        "response": {
+          "count": 100,
+          "p50Ms": 45.371141000001444,
+          "p95Ms": 53.05282299999999,
+          "meanMs": 46.182899869999964
+        }
+      },
+      "gateway": {
+        "statuses": {
+          "200": 100
+        },
+        "elapsedMs": 961.6618319999998,
+        "response": {
+          "count": 100,
+          "p50Ms": 899.1904030000005,
+          "p95Ms": 952.2669569999998,
+          "meanMs": 881.9898303
+        }
+      },
+      "settlementElapsedMs": 1763.4072780000006,
+      "metrics": {
+        "sqlCalls": 2230,
+        "sqlCallsPerRequest": 22.3,
+        "requestSqlCalls": 2200,
+        "requestSqlCallsPerRequest": 22,
+        "backgroundSqlCalls": 30,
+        "queries": [
+          {
+            "fingerprint": "[request] SELECT generation::text AS generation, paused, dirty, redis_run_id FROM billing_state WHERE project_id = $1",
+            "count": 200,
+            "p50Ms": 2.5223649999988993,
+            "p95Ms": 7.915575999999419,
+            "meanMs": 3.2363517699999194
+          },
+          {
+            "fingerprint": "[request] SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1",
+            "count": 100,
+            "p50Ms": 4.7824820000005275,
+            "p95Ms": 19.22424200000023,
+            "meanMs": 6.7652548200000275
+          },
+          {
+            "fingerprint": "[request] /*gw:key*/ SELECT k.id AS key_id, k.prefix, k.allowed_models, k.expires_at, k.revoked_at, k.key_rpm, p.id AS project_id, p.workspace_id, p.rpm AS project_rpm, p",
+            "count": 100,
+            "p50Ms": 6.8511839999991935,
+            "p95Ms": 18.967603000000963,
+            "meanMs": 7.371290619999981
+          },
+          {
+            "fingerprint": "[request] /*gw:route*/ SELECT a.id AS alias_id, a.name AS alias_name, rv.id AS route_version_id, rv.version, rv.targets, rv.capabilities FROM aliases a JOIN route_version",
+            "count": 100,
+            "p50Ms": 1.6575039999988803,
+            "p95Ms": 4.517619000000195,
+            "meanMs": 2.063783990000029
+          },
+          {
+            "fingerprint": "[request] /*gw:touch*/ UPDATE api_keys SET last_used_at = now() WHERE id = $1",
+            "count": 100,
+            "p50Ms": 15.235920000000988,
+            "p95Ms": 55.53850000000057,
+            "meanMs": 21.46925190000007
+          },
+          {
+            "fingerprint": "[request] /*gw:targets*/ SELECT t.id, t.upstream_model, t.input_price::text AS input_price, t.output_price::text AS output_price, t.capabilities, t.enabled AS target_enab",
+            "count": 100,
+            "p50Ms": 6.354150000001027,
+            "p95Ms": 11.454563999999664,
+            "meanMs": 6.386082839999999
+          },
+          {
+            "fingerprint": "[request] WITH inserted AS ( INSERT INTO requests(request_id,project_id,key_id,period,reserve_micros,route_version,price_snapshot,status) VALUES($1,$2,$3,$4,$5,$6::jsonb,",
+            "count": 100,
+            "p50Ms": 11.3060430000005,
+            "p95Ms": 23.20576699999947,
+            "meanMs": 12.935541460000003
+          },
+          {
+            "fingerprint": "[request] WITH r AS ( UPDATE requests SET status = 'reserved', updated_at = now() WHERE request_id = $1 AND status = 'preparing' RETURNING request_id ) UPDATE reservation",
+            "count": 100,
+            "p50Ms": 7.680174999999508,
+            "p95Ms": 16.192989999999554,
+            "meanMs": 8.79827824999993
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text AS project_id, status, period FROM requests WHERE request_id = $1",
+            "count": 100,
+            "p50Ms": 2.622653000000355,
+            "p95Ms": 4.951438000000053,
+            "meanMs": 2.8739281099999605
+          },
+          {
+            "fingerprint": "[request] UPDATE requests SET status = 'dispatch_intent', updated_at = now() WHERE request_id = $1 AND status = 'reserved' RETURNING request_id",
+            "count": 100,
+            "p50Ms": 7.525927999999112,
+            "p95Ms": 23.262300000000323,
+            "meanMs": 9.201085319999965
+          },
+          {
+            "fingerprint": "[request] UPDATE requests SET status = 'dispatched', updated_at = now() WHERE request_id = $1 AND status = 'dispatch_intent'",
+            "count": 100,
+            "p50Ms": 9.636898999999175,
+            "p95Ms": 15.48165599999993,
+            "meanMs": 10.21216862999996
+          },
+          {
+            "fingerprint": "[request] /*gw:request-attempts*/ WITH meta AS ( UPDATE requests SET alias_name=$2,error_code=$3,updated_at=now() WHERE request_id=$1 RETURNING request_id ) INSERT INTO a",
+            "count": 100,
+            "p50Ms": 8.93790799999988,
+            "p95Ms": 16.73156299999937,
+            "meanMs": 10.147668820000053
+          },
+          {
+            "fingerprint": "[request] /*gw:request-meta*/ UPDATE requests SET alias_name = $2, error_code = $3, updated_at = now() WHERE request_id = $1",
+            "count": 100,
+            "p50Ms": 7.441783999998734,
+            "p95Ms": 15.858000000000175,
+            "meanMs": 8.238222890000033
+          },
+          {
+            "fingerprint": "[request] BEGIN",
+            "count": 100,
+            "p50Ms": 0.6594879999993282,
+            "p95Ms": 2.0864480000000185,
+            "meanMs": 0.9198609800000486
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text FROM requests WHERE request_id=$1",
+            "count": 100,
+            "p50Ms": 0.6874310000002879,
+            "p95Ms": 2.4847609999997076,
+            "meanMs": 1.004954959999941
+          },
+          {
+            "fingerprint": "[request] SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            "count": 100,
+            "p50Ms": 0.5353240000004007,
+            "p95Ms": 1.8923220000015135,
+            "meanMs": 0.8609715500000311
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text AS project_id, period, reserve_micros::text AS reserve_micros, status, actual_micros::text AS actual_micros FROM requests WHERE request_",
+            "count": 100,
+            "p50Ms": 0.5911070000001928,
+            "p95Ms": 2.194989000001442,
+            "meanMs": 0.854111880000055
+          },
+          {
+            "fingerprint": "[request] SELECT event_id, amount_micros::text AS amount_micros, estimated FROM ledger WHERE event_id = ANY($1::text[])",
+            "count": 100,
+            "p50Ms": 0.5576729999993404,
+            "p95Ms": 2.1648280000008526,
+            "meanMs": 0.7914547000000676
+          },
+          {
+            "fingerprint": "[request] WITH entry AS ( INSERT INTO ledger(event_id,request_id,project_id,period,amount_micros,kind,input_tokens,output_tokens,estimated) VALUES($10,$1,$2,$3,$4,$15,$6,",
+            "count": 100,
+            "p50Ms": 1.412690000001021,
+            "p95Ms": 2.5424960000000283,
+            "meanMs": 1.7207468100001462
+          },
+          {
+            "fingerprint": "[request] COMMIT",
+            "count": 100,
+            "p50Ms": 1.8318120000003546,
+            "p95Ms": 3.763286999999764,
+            "meanMs": 2.232656029999944
+          },
+          {
+            "fingerprint": "[request] SELECT generation::text AS generation FROM billing_state WHERE project_id = $1",
+            "count": 100,
+            "p50Ms": 0.8448530000005121,
+            "p95Ms": 2.2842409999993833,
+            "meanMs": 1.1280190100000071
+          },
+          {
+            "fingerprint": "[background] BEGIN",
+            "count": 7,
+            "p50Ms": 0.6588979999996809,
+            "p95Ms": 8.785510000001523,
+            "meanMs": 2.567039714285524
+          },
+          {
+            "fingerprint": "[background] COMMIT",
+            "count": 7,
+            "p50Ms": 3.648422999998729,
+            "p95Ms": 11.546699000000444,
+            "meanMs": 4.7847208571427995
+          },
+          {
+            "fingerprint": "[background] WITH candidate AS (SELECT id FROM outbox WHERE status IN('pending','leased') AND available_at<=now() ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 50) UPDATE",
+            "count": 4,
+            "p50Ms": 3.2948510000005626,
+            "p95Ms": 6.086409999999887,
+            "meanMs": 4.239067499999692
+          },
+          {
+            "fingerprint": "[background] INSERT INTO consumer_inbox(consumer_name,event_id,project_id) SELECT 'usage-v1',event_id,project_id FROM jsonb_to_recordset($1::jsonb) AS e(event_id text,projec",
+            "count": 3,
+            "p50Ms": 5.317968999999721,
+            "p95Ms": 5.917892999999822,
+            "meanMs": 4.534978666666575
+          },
+          {
+            "fingerprint": "[background] SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            "count": 3,
+            "p50Ms": 0.6177989999996498,
+            "p95Ms": 4.021985000001223,
+            "meanMs": 1.7431606666668813
+          },
+          {
+            "fingerprint": "[background] INSERT INTO usage_hourly(project_id,bucket,actual_micros,estimated_micros,input_tokens,output_tokens,event_count) SELECT project_id,date_trunc('hour',first_at),",
+            "count": 3,
+            "p50Ms": 4.267337999999654,
+            "p95Ms": 19.02664100000038,
+            "meanMs": 9.018536999999924
+          },
+          {
+            "fingerprint": "[background] UPDATE outbox SET status='published',published_at=now() WHERE id=ANY($1::uuid[])",
+            "count": 3,
+            "p50Ms": 4.544762999999875,
+            "p95Ms": 7.814783000001626,
+            "meanMs": 5.476488000000245
+          }
+        ],
+        "redisCommands": {
+          "info": 1,
+          "get": 200,
+          "evalsha": 300
+        },
+        "redisCommandsPerRequest": 5.01,
+        "pool": {
+          "maxWaiting": 187,
+          "acquisition": {
+            "count": 1610,
+            "p50Ms": 48.61316099999931,
+            "p95Ms": 148.37661300000036,
+            "meanMs": 53.12433366521739
+          }
+        },
+        "phases": {
+          "admit": {
+            "count": 100,
+            "p50Ms": 217.84797199999957,
+            "p95Ms": 241.28473699999995,
+            "meanMs": 217.65053185000005
+          },
+          "dispatch": {
+            "count": 100,
+            "p50Ms": 212.01648399999976,
+            "p95Ms": 233.78373800000008,
+            "meanMs": 206.81637642
+          },
+          "settle": {
+            "count": 100,
+            "p50Ms": 478.42452199999934,
+            "p95Ms": 757.8792360000007,
+            "meanMs": 466.0286716299999
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 100,
+      "repetition": 3,
+      "baseline": {
+        "statuses": {
+          "200": 100
+        },
+        "elapsedMs": 59.114402999999584,
+        "response": {
+          "count": 100,
+          "p50Ms": 49.040156000000934,
+          "p95Ms": 52.701014000000214,
+          "meanMs": 40.91615805000019
+        }
+      },
+      "gateway": {
+        "statuses": {
+          "200": 100
+        },
+        "elapsedMs": 942.7865949999996,
+        "response": {
+          "count": 100,
+          "p50Ms": 840.2823520000002,
+          "p95Ms": 926.0118039999998,
+          "meanMs": 846.5653099100001
+        }
+      },
+      "settlementElapsedMs": 1745.1848410000002,
+      "metrics": {
+        "sqlCalls": 2227,
+        "sqlCallsPerRequest": 22.27,
+        "requestSqlCalls": 2200,
+        "requestSqlCallsPerRequest": 22,
+        "backgroundSqlCalls": 27,
+        "queries": [
+          {
+            "fingerprint": "[request] SELECT generation::text AS generation, paused, dirty, redis_run_id FROM billing_state WHERE project_id = $1",
+            "count": 200,
+            "p50Ms": 3.4506819999987783,
+            "p95Ms": 7.614442000000054,
+            "meanMs": 3.819984575000008
+          },
+          {
+            "fingerprint": "[request] SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1",
+            "count": 100,
+            "p50Ms": 1.487671999999293,
+            "p95Ms": 4.946136000000479,
+            "meanMs": 1.9011138099999698
+          },
+          {
+            "fingerprint": "[request] /*gw:key*/ SELECT k.id AS key_id, k.prefix, k.allowed_models, k.expires_at, k.revoked_at, k.key_rpm, p.id AS project_id, p.workspace_id, p.rpm AS project_rpm, p",
+            "count": 100,
+            "p50Ms": 3.2323729999989155,
+            "p95Ms": 7.814157999999225,
+            "meanMs": 3.8498738199999387
+          },
+          {
+            "fingerprint": "[request] /*gw:touch*/ UPDATE api_keys SET last_used_at = now() WHERE id = $1",
+            "count": 100,
+            "p50Ms": 13.704729999999472,
+            "p95Ms": 58.282521000001,
+            "meanMs": 20.85061048999998
+          },
+          {
+            "fingerprint": "[request] /*gw:route*/ SELECT a.id AS alias_id, a.name AS alias_name, rv.id AS route_version_id, rv.version, rv.targets, rv.capabilities FROM aliases a JOIN route_version",
+            "count": 100,
+            "p50Ms": 1.915828999999576,
+            "p95Ms": 4.762956000000486,
+            "meanMs": 2.282520480000021
+          },
+          {
+            "fingerprint": "[request] /*gw:targets*/ SELECT t.id, t.upstream_model, t.input_price::text AS input_price, t.output_price::text AS output_price, t.capabilities, t.enabled AS target_enab",
+            "count": 100,
+            "p50Ms": 7.629472999999052,
+            "p95Ms": 23.285996000000523,
+            "meanMs": 9.27765947999993
+          },
+          {
+            "fingerprint": "[request] WITH inserted AS ( INSERT INTO requests(request_id,project_id,key_id,period,reserve_micros,route_version,price_snapshot,status) VALUES($1,$2,$3,$4,$5,$6::jsonb,",
+            "count": 100,
+            "p50Ms": 12.073293999999805,
+            "p95Ms": 19.96651799999927,
+            "meanMs": 12.672231250000022
+          },
+          {
+            "fingerprint": "[request] WITH r AS ( UPDATE requests SET status = 'reserved', updated_at = now() WHERE request_id = $1 AND status = 'preparing' RETURNING request_id ) UPDATE reservation",
+            "count": 100,
+            "p50Ms": 6.284029999998893,
+            "p95Ms": 14.530741999999009,
+            "meanMs": 7.76266418999996
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text AS project_id, status, period FROM requests WHERE request_id = $1",
+            "count": 100,
+            "p50Ms": 1.974489000000176,
+            "p95Ms": 4.395424999998795,
+            "meanMs": 2.210492260000119
+          },
+          {
+            "fingerprint": "[request] UPDATE requests SET status = 'dispatch_intent', updated_at = now() WHERE request_id = $1 AND status = 'reserved' RETURNING request_id",
+            "count": 100,
+            "p50Ms": 5.882121000000552,
+            "p95Ms": 9.176033000001553,
+            "meanMs": 6.0625568299999575
+          },
+          {
+            "fingerprint": "[request] UPDATE requests SET status = 'dispatched', updated_at = now() WHERE request_id = $1 AND status = 'dispatch_intent'",
+            "count": 100,
+            "p50Ms": 11.042709999999715,
+            "p95Ms": 22.965040999999474,
+            "meanMs": 12.352939030000051
+          },
+          {
+            "fingerprint": "[request] /*gw:request-attempts*/ WITH meta AS ( UPDATE requests SET alias_name=$2,error_code=$3,updated_at=now() WHERE request_id=$1 RETURNING request_id ) INSERT INTO a",
+            "count": 100,
+            "p50Ms": 7.839608000000226,
+            "p95Ms": 18.47570199999973,
+            "meanMs": 9.035473269999947
+          },
+          {
+            "fingerprint": "[request] /*gw:request-meta*/ UPDATE requests SET alias_name = $2, error_code = $3, updated_at = now() WHERE request_id = $1",
+            "count": 100,
+            "p50Ms": 6.6073379999998,
+            "p95Ms": 11.779543000000558,
+            "meanMs": 6.939616550000083
+          },
+          {
+            "fingerprint": "[request] BEGIN",
+            "count": 100,
+            "p50Ms": 0.6763429999991786,
+            "p95Ms": 2.2238039999992907,
+            "meanMs": 0.9322164299998622
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text FROM requests WHERE request_id=$1",
+            "count": 100,
+            "p50Ms": 0.8121419999988575,
+            "p95Ms": 2.624682000001485,
+            "meanMs": 1.0685922500000016
+          },
+          {
+            "fingerprint": "[request] SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            "count": 100,
+            "p50Ms": 0.6098220000003494,
+            "p95Ms": 2.6114829999987705,
+            "meanMs": 0.9219224500000018
+          },
+          {
+            "fingerprint": "[request] SELECT project_id::text AS project_id, period, reserve_micros::text AS reserve_micros, status, actual_micros::text AS actual_micros FROM requests WHERE request_",
+            "count": 100,
+            "p50Ms": 0.6962720000010449,
+            "p95Ms": 2.5761839999995573,
+            "meanMs": 0.912407459999995
+          },
+          {
+            "fingerprint": "[request] SELECT event_id, amount_micros::text AS amount_micros, estimated FROM ledger WHERE event_id = ANY($1::text[])",
+            "count": 100,
+            "p50Ms": 0.6621410000007018,
+            "p95Ms": 2.991976999999679,
+            "meanMs": 0.9968683199999759
+          },
+          {
+            "fingerprint": "[request] WITH entry AS ( INSERT INTO ledger(event_id,request_id,project_id,period,amount_micros,kind,input_tokens,output_tokens,estimated) VALUES($10,$1,$2,$3,$4,$15,$6,",
+            "count": 100,
+            "p50Ms": 1.5587990000003629,
+            "p95Ms": 4.08153399999901,
+            "meanMs": 1.8369411200000831
+          },
+          {
+            "fingerprint": "[request] COMMIT",
+            "count": 100,
+            "p50Ms": 1.9531589999987773,
+            "p95Ms": 6.075428000000102,
+            "meanMs": 2.5773463900000024
+          },
+          {
+            "fingerprint": "[request] SELECT generation::text AS generation FROM billing_state WHERE project_id = $1",
+            "count": 100,
+            "p50Ms": 0.9516910000002099,
+            "p95Ms": 2.248634999999922,
+            "meanMs": 1.216319290000065
+          },
+          {
+            "fingerprint": "[background] BEGIN",
+            "count": 6,
+            "p50Ms": 2.095141000001604,
+            "p95Ms": 5.9930810000005295,
+            "meanMs": 3.1258938333336723
+          },
+          {
+            "fingerprint": "[background] COMMIT",
+            "count": 6,
+            "p50Ms": 5.036851000000752,
+            "p95Ms": 8.834523999999874,
+            "meanMs": 5.425308666666751
+          },
+          {
+            "fingerprint": "[background] WITH candidate AS (SELECT id FROM outbox WHERE status IN('pending','leased') AND available_at<=now() ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 50) UPDATE",
+            "count": 3,
+            "p50Ms": 9.656785999999556,
+            "p95Ms": 11.388570999999502,
+            "meanMs": 7.731033666666311
+          },
+          {
+            "fingerprint": "[background] INSERT INTO consumer_inbox(consumer_name,event_id,project_id) SELECT 'usage-v1',event_id,project_id FROM jsonb_to_recordset($1::jsonb) AS e(event_id text,projec",
+            "count": 3,
+            "p50Ms": 4.543493999999555,
+            "p95Ms": 7.298654999998689,
+            "meanMs": 5.453805999999531
+          },
+          {
+            "fingerprint": "[background] SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            "count": 3,
+            "p50Ms": 1.642213000000993,
+            "p95Ms": 1.8493469999993977,
+            "meanMs": 1.339051666666516
+          },
+          {
+            "fingerprint": "[background] INSERT INTO usage_hourly(project_id,bucket,actual_micros,estimated_micros,input_tokens,output_tokens,event_count) SELECT project_id,date_trunc('hour',first_at),",
+            "count": 3,
+            "p50Ms": 6.024562999999034,
+            "p95Ms": 14.937561999999161,
+            "meanMs": 8.464581999999305
+          },
+          {
+            "fingerprint": "[background] UPDATE outbox SET status='published',published_at=now() WHERE id=ANY($1::uuid[])",
+            "count": 3,
+            "p50Ms": 6.388784000000669,
+            "p95Ms": 9.189989999998943,
+            "meanMs": 6.468677666666433
+          }
+        ],
+        "redisCommands": {
+          "get": 200,
+          "evalsha": 300
+        },
+        "redisCommandsPerRequest": 5,
+        "pool": {
+          "maxWaiting": 185,
+          "acquisition": {
+            "count": 1609,
+            "p50Ms": 31.51762299999973,
+            "p95Ms": 148.8684030000004,
+            "meanMs": 42.649580137973864
+          }
+        },
+        "phases": {
+          "admit": {
+            "count": 100,
+            "p50Ms": 227.51931700000023,
+            "p95Ms": 242.12360500000068,
+            "meanMs": 225.55954909999997
+          },
+          "dispatch": {
+            "count": 100,
+            "p50Ms": 176.83288300000095,
+            "p95Ms": 215.9222269999991,
+            "meanMs": 177.11048399
+          },
+          "settle": {
+            "count": 100,
+            "p50Ms": 448.0711940000001,
+            "p95Ms": 769.641705,
+            "meanMs": 460.9319304300003
+          }
+        }
+      }
+    }
+  ],
+  "accounting": {
+    "requests": 484,
+    "micros": 9680
+  },
+  "scope": "synthetic local upstream; real PG/Redis; SQL values and credentials excluded; method percentiles overlap and are not additive"
+}
