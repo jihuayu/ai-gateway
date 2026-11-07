@@ -3,3 +3,4 @@ dist/
 .env
 coverage/
 artifacts/private/
+artifacts/browser-failure.png

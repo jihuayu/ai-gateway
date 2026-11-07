@@ -1,0 +1,30 @@
+{
+  "concurrency": 100,
+  "environment": {
+    "logicalCpus": 5,
+    "totalMemoryBytes": 18882662400,
+    "node": "v24.22.1"
+  },
+  "baseline": {
+    "statuses": {
+      "200": 100
+    },
+    "elapsedMs": 211.59522000000015,
+    "p50Ms": 122.53440899999987,
+    "p95Ms": 160.28745400000003
+  },
+  "gateway": {
+    "statuses": {
+      "200": 100
+    },
+    "elapsedMs": 1746.896761,
+    "p50Ms": 1475.764559,
+    "p95Ms": 1731.8933809999999
+  },
+  "p95DifferenceMs": 1571.6059269999998,
+  "ledger": {
+    "requests": 100,
+    "micros": "2000"
+  },
+  "scope": "local mock upstream, real PostgreSQL/Redis; total response latency, not isolated gateway overhead"
+}
