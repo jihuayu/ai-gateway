@@ -11,15 +11,20 @@ export async function setupEvents(pool:Pool) {
 }
 
 export interface Envelope {event_id:string;schema_version:number;occurred_at:string;project_id:string|null;event_type:string;payload:unknown}
-/** Inbox + recomputation in a single transaction makes repeats and out-of-order deliveries harmless. */
-export async function consumeEvent(pool:Pool,event:Envelope) {
-  if(event.schema_version!==1 || typeof event.event_id!=='string') throw Error('Unsupported event schema');
+/** A claimed batch projects each affected project once, in the same inbox transaction. */
+export async function consumeEvents(pool:Pool,events:Envelope[]) {
+  if(!events.length)return;
+  for(const event of events)if(event.schema_version!==1||typeof event.event_id!=='string')throw Error('Unsupported event schema');
+  const entries=[...new Map(events.map(e=>[e.event_id,{event_id:e.event_id,project_id:e.project_id}])).values()].sort((a,b)=>a.event_id.localeCompare(b.event_id));
   const c=await pool.connect();
-  try {
+  try{
     await c.query('BEGIN');
-    const inserted=await c.query(`INSERT INTO consumer_inbox(consumer_name,event_id,project_id) VALUES('usage-v1',$1,$2) ON CONFLICT DO NOTHING RETURNING event_id`,[event.event_id,event.project_id]);
-    if(inserted.rowCount && event.project_id) {
-      await c.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',[event.project_id]);
+    const inserted=await c.query(`INSERT INTO consumer_inbox(consumer_name,event_id,project_id)
+      SELECT 'usage-v1',event_id,project_id FROM jsonb_to_recordset($1::jsonb) AS e(event_id text,project_id uuid)
+      ORDER BY event_id ON CONFLICT DO NOTHING RETURNING project_id`,[JSON.stringify(entries)]);
+    const projects=[...new Set<string>(inserted.rows.map(r=>r.project_id).filter(Boolean))].sort();
+    for(const project of projects){
+      await c.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',[project]);
       await c.query(`INSERT INTO usage_hourly(project_id,bucket,actual_micros,estimated_micros,input_tokens,output_tokens,event_count)
         SELECT project_id,date_trunc('hour',first_at),COALESCE(sum(amount) FILTER(WHERE NOT estimated),0),
         COALESCE(sum(amount) FILTER(WHERE estimated),0),COALESCE(sum(input_tokens),0),COALESCE(sum(output_tokens),0),count(*)
@@ -31,11 +36,12 @@ export async function consumeEvent(pool:Pool,event:Envelope) {
           FROM ledger WHERE project_id=$1 GROUP BY project_id,identity) entries
         GROUP BY project_id,date_trunc('hour',first_at)
         ON CONFLICT(project_id,bucket) DO UPDATE SET actual_micros=excluded.actual_micros,estimated_micros=excluded.estimated_micros,
-        input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,event_count=excluded.event_count,updated_at=now()`,[event.project_id]);
+        input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,event_count=excluded.event_count,updated_at=now()`,[project]);
     }
     await c.query('COMMIT');
   }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
 }
+export async function consumeEvent(pool:Pool,event:Envelope){await consumeEvents(pool,[event]);}
 
 export class EventWorker {
   private producer?:Producer;
@@ -76,6 +82,15 @@ export class EventWorker {
         UPDATE outbox o SET status='leased',available_at=now()+interval '30 seconds' FROM candidate c WHERE o.id=c.id RETURNING o.*`)).rows;
       await c.query('COMMIT');
     }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
+    if(!this.producer&&rows!.length){
+      try{
+        await consumeEvents(this.pool,rows!.map(row=>({event_id:row.event_id,schema_version:1,occurred_at:new Date(row.created_at).toISOString(),project_id:row.project_id,event_type:row.event_type,payload:row.payload})));
+        await this.pool.query("UPDATE outbox SET status='published',published_at=now() WHERE id=ANY($1::uuid[])",[rows!.map(r=>r.id)]);
+        return rows!.length;
+      }catch{
+        // Fall back to individual retry/DLQ handling so one poison event cannot block peers.
+      }
+    }
     for(const row of rows!) {
       const envelope:Envelope={event_id:row.event_id,schema_version:1,occurred_at:new Date(row.created_at).toISOString(),project_id:row.project_id,event_type:row.event_type,payload:row.payload};
       try {

@@ -43,6 +43,7 @@ function poolStub(config: PoolConfig): PoolStub {
     if (sql.includes('/*gw:targets*/')) return { rows: config.targets ?? [], rowCount: (config.targets ?? []).length };
     if (sql.includes('/*gw:models*/')) return { rows: config.models ?? [], rowCount: (config.models ?? []).length };
     if (sql.includes('/*gw:request-meta*/')) return { rows: [], rowCount: 1 };
+    if (sql.includes('/*gw:request-attempts*/')) return { rows: [], rowCount: 1 };
     if (sql.includes('/*gw:attempt*/')) return { rows: [], rowCount: 1 };
     throw new Error(`unexpected query in gateway test: ${sql.slice(0, 80)}`);
   };
@@ -284,17 +285,13 @@ describe('POST /v1/chat/completions', () => {
       const meta = pool.queries.filter(q => q.sql.includes('/*gw:request-meta*/')).at(-1);
       assert.ok(meta);
       assert.deepEqual(meta!.params, [admitted.requestId, 'support-chat', null]);
-      const attemptWrites = pool.queries.filter(q => q.sql.includes('/*gw:attempt*/'));
+      const attemptWrites = pool.queries.filter(q => q.sql.includes('/*gw:request-attempts*/'));
       assert.ok(attemptWrites.length >= 1);
-      const attempt = attemptWrites.at(-1)!.params;
-      assert.equal(attempt[1], admitted.requestId);
-      assert.equal(attempt[2], 1);
-      assert.equal(attempt[3], TARGET_ID);
-      assert.equal(attempt[4], 'ok');
-      assert.equal(attempt[5], null);
-      assert.equal(attempt[8], 10);
-      assert.equal(attempt[9], 5);
-      assert.equal(attempt[10], 20);
+      const write=attemptWrites.at(-1)!;
+      assert.equal(write.params[0],admitted.requestId);
+      const attempt=JSON.parse(String(write.params[3]))[0];
+      assert.equal(attempt.attempt_no,1);assert.equal(attempt.target_id,TARGET_ID);assert.equal(attempt.status,'ok');
+      assert.equal(attempt.error_code,null);assert.equal(attempt.input_tokens,10);assert.equal(attempt.output_tokens,5);assert.equal(attempt.cost_micros,20);
       assert.ok(!JSON.stringify(pool.queries).includes('secret prompt'));
       assert.ok(!JSON.stringify(pool.queries).includes('hello'));
     } finally {
@@ -398,11 +395,12 @@ describe('routing, retries and failures', () => {
       assert.equal(settled.attempts[0].cost_micros, 0);
       assert.equal(settled.attempts[1].cost_micros, 2 + 1);
       assert.equal(settled.actualMicros, 3);
-      const attemptWrites = pool.queries.filter(q => q.sql.includes('/*gw:attempt*/'));
+      const attemptWrites = pool.queries.filter(q => q.sql.includes('/*gw:request-attempts*/'));
       assert.ok(attemptWrites.length >= 2);
-      assert.deepEqual([...new Set(attemptWrites.map(q => q.params[2]))], [1, 2]);
-      assert.equal(attemptWrites.find(q => q.params[2] === 1)!.params[3], TARGET_ID);
-      assert.equal(attemptWrites.find(q => q.params[2] === 2)!.params[3], FALLBACK_ID);
+      const persisted=attemptWrites.flatMap(q=>JSON.parse(String(q.params[3])));
+      assert.deepEqual([...new Set(persisted.map((a:any)=>a.attempt_no))],[1,2]);
+      assert.equal(persisted.find((a:any)=>a.attempt_no===1).target_id,TARGET_ID);
+      assert.equal(persisted.find((a:any)=>a.attempt_no===2).target_id,FALLBACK_ID);
       const meta = pool.queries.filter(q => q.sql.includes('/*gw:request-meta*/')).at(-1)!;
       assert.deepEqual(meta.params.slice(0, 3), [billing.admitted[0].requestId, 'support-chat', null]);
     } finally {

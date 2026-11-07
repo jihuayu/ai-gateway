@@ -42,11 +42,20 @@ test('full gateway: setup, request, SSE, fallback, unknown usage, revocation and
       const body=await r.text();return {statusCode:r.status,body,headers:Object.fromEntries(r.headers),json:()=>JSON.parse(body)};
     };
     assert.equal((await app.inject({url:'/v1/models',headers:dataHeaders})).json().data.length,4);
+    const originalQuery=db.pool.query;let metadataFailureInjected=false;
+    (db.pool as any).query=function(...args:any[]){
+      if(!metadataFailureInjected&&typeof args[0]==='string'&&args[0].includes('/*gw:request-attempts*/')){
+        metadataFailureInjected=true;return Promise.reject(Error('injected metadata write failure'));
+      }
+      return (originalQuery as any).apply(this,args);
+    };
     console.log('integration: buffered');const result=await send('chat');assert.equal(result.statusCode,200,result.body);assert.ok(result.json().choices[0].message.content);
     const id=result.headers['x-request-id'];assert.ok(id);
     let saved:any;
     for(let i=0;i<100;i++){saved=(await db.pool.query('SELECT * FROM requests WHERE request_id=$1',[id])).rows[0];if(saved.actual_micros!==null)break;await new Promise(r=>setTimeout(r,20));}
     assert.equal(saved.actual_micros,'20',JSON.stringify(saved));
+    db.pool.query=originalQuery;assert.equal(metadataFailureInjected,true);
+    assert.equal((await db.pool.query('SELECT * FROM attempts WHERE request_id=$1',[id])).rowCount,1,'finalization retries the failed incremental metadata write');
     console.log('integration: stream');const stream=await send('chat',true);assert.equal(stream.statusCode,200,stream.body);assert.match(stream.body,/data: \[DONE\]/);
     console.log('integration: fallback');const fallback=await send('fallback');assert.equal(fallback.statusCode,200,fallback.body);
     let attemptCount=0;for(let i=0;i<100;i++){attemptCount=(await db.pool.query('SELECT * FROM attempts WHERE request_id=$1',[fallback.headers['x-request-id']])).rowCount||0;if(attemptCount===2)break;await new Promise(r=>setTimeout(r,20));}assert.equal(attemptCount,2);

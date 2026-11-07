@@ -421,3 +421,51 @@ test('per-key rate limit and request-period accounting remain independent',async
   assert.deepEqual((await db().query('SELECT price_snapshot FROM requests WHERE request_id=$1',[november.requestId])).rows[0].price_snapshot,{version:'old'});
   await bill().cancelBeforeDispatch(december.requestId);
 });
+
+test('intent and reservation creation roll back together on a reservation constraint failure',async t=>{
+  if(!guard(t))return;
+  const p=await newProject();const input=params(p,{reserveMicros:1000});
+  await db().query('ALTER TABLE reservations ADD CONSTRAINT injected_reservation_failure CHECK(reserved_micros<500) NOT VALID');
+  try{
+    await assert.rejects(()=>bill().admit(input));
+    assert.equal((await db().query('SELECT 1 FROM requests WHERE request_id=$1',[input.requestId])).rowCount,0);
+    assert.equal((await db().query('SELECT 1 FROM reservations WHERE request_id=$1',[input.requestId])).rowCount,0);
+  }finally{await db().query('ALTER TABLE reservations DROP CONSTRAINT injected_reservation_failure');}
+});
+
+test('close waits for accepted financial work even before its project lookup finishes',async t=>{
+  if(!guard(t))return;
+  const p=await newProject();const input=params(p,{reserveMicros:100});
+  await bill().admit(input);await bill().dispatch(input.requestId);
+  const cold=new Billing(db(),cache());await cold.initialize();
+  const pool=db(),original=pool.query;
+  let release!:()=>void,entered!:()=>void;
+  const gate=new Promise<void>(r=>release=r),started=new Promise<void>(r=>entered=r);
+  (pool as any).query=function(...args:any[]){
+    if(typeof args[0]==='string'&&args[0].startsWith('SELECT project_id::text AS project_id FROM requests')&&args[1]?.[0]===input.requestId){entered();return gate.then(()=>(original as any).apply(pool,args));}
+    return (original as any).apply(pool,args);
+  };
+  try{
+    const settled=cold.settle(input.requestId,{actualMicros:20,inputTokens:10,outputTokens:5,status:'completed',attempts:[]});
+    await started;let closed=false;const closing=cold.close().then(()=>{closed=true;});
+    await new Promise(r=>setImmediate(r));assert.equal(closed,false);
+    release();await Promise.all([settled,closing]);
+    assert.equal((await pool.query('SELECT actual_micros FROM requests WHERE request_id=$1',[input.requestId])).rows[0].actual_micros,'20');
+  }finally{release();pool.query=original;await cold.close();}
+});
+
+test('settlement outbox failure rolls back all durable writes and preserves the Redis reservation',async t=>{
+  if(!guard(t))return;
+  const p=await newProject();const input=params(p,{reserveMicros:100});
+  await bill().admit(input);await bill().dispatch(input.requestId);
+  await db().query(`ALTER TABLE outbox ADD CONSTRAINT injected_settlement_failure CHECK(event_id <> 'request.settled:${input.requestId}') NOT VALID`);
+  const settlement={actualMicros:20,inputTokens:10,outputTokens:5,status:'completed',attempts:[]};
+  try{
+    await assert.rejects(()=>bill().settle(input.requestId,settlement));
+    assert.equal((await db().query('SELECT * FROM ledger WHERE request_id=$1',[input.requestId])).rowCount,0);
+    assert.equal((await db().query('SELECT actual_micros FROM requests WHERE request_id=$1',[input.requestId])).rows[0].actual_micros,null);
+    assert.deepEqual(await cache().hmget(`billing:{${p.id}}:budget:2026-11`,'spent','reserved'),['0','100']);
+  }finally{await db().query('ALTER TABLE outbox DROP CONSTRAINT injected_settlement_failure');}
+  await bill().settle(input.requestId,settlement);
+  assert.equal((await db().query('SELECT actual_micros FROM requests WHERE request_id=$1',[input.requestId])).rows[0].actual_micros,'20');
+});

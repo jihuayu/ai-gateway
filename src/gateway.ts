@@ -1321,14 +1321,29 @@ ON CONFLICT (request_id, attempt_no) DO UPDATE SET
   status = EXCLUDED.status, error_code = EXCLUDED.error_code, finished_at = EXCLUDED.finished_at,
   input_tokens = EXCLUDED.input_tokens, output_tokens = EXCLUDED.output_tokens, cost_micros = EXCLUDED.cost_micros`;
 
+const REQUEST_ATTEMPTS_SQL = `/*gw:request-attempts*/
+WITH meta AS (
+  UPDATE requests SET alias_name=$2,error_code=$3,updated_at=now() WHERE request_id=$1 RETURNING request_id
+)
+INSERT INTO attempts(id,request_id,attempt_no,target_id,status,error_code,started_at,finished_at,input_tokens,output_tokens,cost_micros)
+SELECT a.id,meta.request_id,a.attempt_no,a.target_id,a.status,a.error_code,a.started_at,a.finished_at,a.input_tokens,a.output_tokens,a.cost_micros
+FROM meta CROSS JOIN jsonb_to_recordset($4::jsonb) AS a(
+  id uuid,attempt_no integer,target_id uuid,status text,error_code text,started_at timestamptz,finished_at timestamptz,input_tokens bigint,output_tokens bigint,cost_micros bigint)
+ON CONFLICT(request_id,attempt_no) DO UPDATE SET status=excluded.status,error_code=excluded.error_code,
+  finished_at=excluded.finished_at,input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,cost_micros=excluded.cost_micros`;
+
 /** Persist request outcome metadata and per-attempt rows. Bodies and credentials never reach these tables. */
 export async function persistRequestMetadata(pool: Pool, requestId: string, aliasName: string | null,
   status: SettlementStatus, attempts: AttemptRecord[]): Promise<void> {
   const failure = [...attempts].reverse().find(a => a.status !== 'ok');
   const errorCode = status === 'completed' ? null
     : (failure?.error_code ?? (status === 'cancelled' ? 'client_cancelled' : null));
-  await pool.query(REQUEST_META_SQL, [requestId, aliasName, errorCode]);
-  await persistAttemptRows(pool, requestId, attempts);
+  if(!attempts.length){await pool.query(REQUEST_META_SQL,[requestId,aliasName,errorCode]);return;}
+  const finishedAt=Date.now();
+  const rows=attempts.map(a=>({id:randomUUID(),attempt_no:a.attempt_no,target_id:a.target_id||null,status:a.status,error_code:a.error_code,
+    started_at:new Date(finishedAt-Math.max(0,a.latency_ms)).toISOString(),finished_at:new Date(finishedAt).toISOString(),
+    input_tokens:a.input_tokens,output_tokens:a.output_tokens,cost_micros:a.cost_micros}));
+  await pool.query(REQUEST_ATTEMPTS_SQL,[requestId,aliasName,errorCode,JSON.stringify(rows)]);
 }
 
 export async function persistAttemptRows(pool: Pool, requestId: string, attempts: AttemptRecord[]): Promise<void> {
@@ -1354,6 +1369,7 @@ export async function handleChat(app: FastifyInstance, deps: GatewayDeps, timing
   req: FastifyRequest, reply: FastifyReply, requestId: string): Promise<void> {
   const deadlineAt = Date.now() + timings.totalMs;
   const attempts: AttemptRecord[] = [];
+  const persistedAttempts = new Set<number>();
   let activeAbort: ((code: string) => void) | null = null;
   let clientClosed = false;
   reply.raw.on('close', () => { clientClosed = true; activeAbort?.('client_cancelled'); });
@@ -1372,7 +1388,7 @@ export async function handleChat(app: FastifyInstance, deps: GatewayDeps, timing
       return;
     }
     if (prepared) {
-      await persistRequestMetadata(deps.pool, requestId, prepared.route.aliasName, status, attempts).catch(() => {
+      await persistRequestMetadata(deps.pool, requestId, prepared.route.aliasName, status, attempts.filter(a=>!persistedAttempts.has(a.attempt_no))).catch(() => {
         app.log.error({ request_id: requestId, code: 'request_metadata_failed' }, 'request metadata persistence failed');
       });
     }
@@ -1420,6 +1436,7 @@ export async function handleChat(app: FastifyInstance, deps: GatewayDeps, timing
   const onAttempt: AttemptCallback = async record => {
     try {
       await persistRequestMetadata(deps.pool, requestId, aliasName, record.status === 'ok' ? 'completed' : 'failed', [record]);
+      persistedAttempts.add(record.attempt_no);
     } catch {
       app.log.error({ request_id: requestId, code: 'attempt_metadata_failed' }, 'attempt metadata persistence failed');
     }

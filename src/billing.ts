@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import type { Pool, PoolClient } from 'pg';
 import type { Redis } from 'ioredis';
+import { KeyedQueue } from './keyed-queue.js';
 
 export interface AdmitInput {
   requestId: string;
@@ -24,6 +25,17 @@ export interface SettleInput {
   outputTokens: number | null;
   status: string;
   attempts: unknown[];
+}
+
+/** Validated settle data carried across the in-process settlement queue. */
+interface PreparedSettle {
+  actual: number | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  status: string;
+  attempts: unknown[];
+  attemptsJson: string;
+  usageState: 'actual' | 'unknown';
 }
 
 export class BillingError extends Error {
@@ -125,6 +137,8 @@ export class Billing {
   private runIdCheckedAt = 0;
   private expectedRunId = '';
   private recovering: Promise<void> | null = null;
+  private readonly settlementQueue = new KeyedQueue();
+  private readonly financialOperations = new Set<Promise<void>>();
 
   constructor(pool: Pool, redis: Redis) {
     this.pool = pool;
@@ -230,36 +244,41 @@ export class Billing {
       throw new BillingError(503, 'billing_recovery_required', 'redis identity changed; admission is fenced');
     }
 
-    const prior = await this.pool.query(
-      `SELECT project_id::text AS project_id, period, reserve_micros::text AS reserve_micros, status
-         FROM requests WHERE request_id = $1`, [requestId]);
-    if (prior.rows[0]) {
-      const row = prior.rows[0];
-      if (row.project_id !== projectId || row.period !== period || Number(row.reserve_micros) !== reserve) {
-        throw new BillingError(409, 'request_id_conflict', 'request id already used with different billing parameters');
-      }
-      if (row.status === 'settled' || row.status === 'unknown') return;
-      if (row.status === 'cancelled' || row.status === 'failed') {
-        throw new BillingError(409, 'request_already_final', 'request is already finalized');
-      }
-      if (row.status !== 'preparing') {
-        const exists = await this.redis.exists(keyFor(projectId).request(requestId));
-        if (!exists) {
-          await this.markDirty(projectId);
-          throw new BillingError(503, 'billing_recovery_required', 'billing state must be reconciled');
+    // One committed statement creates both durable intent rows. The conflict
+    // path stays read-only; a concurrent uncommitted winner may require a fresh snapshot.
+    const intent = await this.pool.query(`WITH inserted AS (
+      INSERT INTO requests(request_id,project_id,key_id,period,reserve_micros,route_version,price_snapshot,status)
+      VALUES($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,'preparing') ON CONFLICT(request_id) DO NOTHING
+      RETURNING request_id,project_id,period,reserve_micros,status
+    ), prepared AS (
+      INSERT INTO reservations(request_id,project_id,period,reserved_micros,status,lease_expires_at)
+      SELECT request_id,project_id,period,reserve_micros,'preparing',now()+($8*interval '1 millisecond') FROM inserted
+      RETURNING request_id
+    ) SELECT project_id::text,period,reserve_micros::text,status,true AS created FROM inserted
+      UNION ALL SELECT project_id::text,period,reserve_micros::text,status,false AS created FROM requests
+      WHERE request_id=$1 AND NOT EXISTS(SELECT 1 FROM inserted)`,
+      [requestId,projectId,keyId,period,reserve,routeVersion,priceSnapshot,this.leaseMs]);
+    const row = intent.rows[0] ?? (await this.pool.query(
+      `SELECT project_id::text,period,reserve_micros::text,status,false AS created FROM requests WHERE request_id=$1`,[requestId])).rows[0];
+    if(!row)throw new BillingError(503,'billing_unavailable','request intent could not be read');
+    if(row.project_id!==projectId||row.period!==period||Number(row.reserve_micros)!==reserve){
+      throw new BillingError(409,'request_id_conflict','request id already used with different billing parameters');
+    }
+    if(!row.created){
+      if(row.status==='settled'||row.status==='unknown')return;
+      if(row.status==='cancelled'||row.status==='failed')throw new BillingError(409,'request_already_final','request is already finalized');
+      if(row.status!=='preparing'){
+        if(!await this.redis.exists(keyFor(projectId).request(requestId))){
+          await this.markDirty(projectId);throw new BillingError(503,'billing_recovery_required','billing state must be reconciled');
         }
         return;
       }
-    } else {
-      await this.pool.query(
-        `INSERT INTO requests (request_id, project_id, key_id, period, reserve_micros, route_version, price_snapshot, status)
-         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, 'preparing')`, [requestId, projectId, keyId, period, reserve, routeVersion, priceSnapshot]);
+      // Compatibility with an intent interrupted before its reservation was persisted.
+      await this.pool.query(`INSERT INTO reservations(request_id,project_id,period,reserved_micros,status,lease_expires_at)
+        VALUES($1,$2,$3,$4,'preparing',now()+($5*interval '1 millisecond'))
+        ON CONFLICT(request_id) DO UPDATE SET updated_at=now() WHERE reservations.status='preparing'`,
+        [requestId,projectId,period,reserve,this.leaseMs]);
     }
-    await this.pool.query(
-      `INSERT INTO reservations (request_id, project_id, period, reserved_micros, status, lease_expires_at)
-       VALUES ($1, $2, $3, $4, 'preparing', now() + ($5 * interval '1 millisecond'))
-       ON CONFLICT (request_id) DO UPDATE SET updated_at = now() WHERE reservations.status = 'preparing'`,
-      [requestId, projectId, period, reserve, this.leaseMs]);
 
     const state = await this.generation(projectId);
     if (state.redis_run_id && state.redis_run_id !== runId) {
@@ -375,10 +394,39 @@ export class Billing {
     if (!this.initialized) throw new BillingError(503, 'billing_not_initialized', 'billing is not initialized');
   }
 
+  /**
+   * Queue key for settlement/cancel: the project id when already known locally,
+   * otherwise one indexed lookup by request id (no Redis ownership lookup for
+   * finalized requests). A missing row falls back to a request-scoped key so the
+   * transaction below still reports the authoritative 404/validation error.
+   */
+  private runFinancial(requestId:string, work:()=>Promise<void|(()=>Promise<void>)>):Promise<void> {
+    const operation=this.settlementKey(requestId).then(key=>this.settlementQueue.run(key,work)).then(async afterCommit=>{
+      // The process-local slot protects only the durable transaction. Redis finalization
+      // may overlap the next transaction, as it did under the authoritative PG lock.
+      if(afterCommit)await afterCommit();
+    });
+    this.financialOperations.add(operation);
+    return operation.finally(()=>{this.financialOperations.delete(operation);});
+  }
+
+  private async settlementKey(requestId: string): Promise<string> {
+    const cached = this.requestCache.get(requestId);
+    if (cached) return `project:${cached.projectId}`;
+    const r = await this.pool.query('SELECT project_id::text AS project_id FROM requests WHERE request_id = $1', [requestId]);
+    const projectId = r.rows[0]?.project_id;
+    if (typeof projectId === 'string' && isUuid(projectId)) return `project:${projectId}`;
+    return `request:${requestId}`;
+  }
+
   private async generation(projectId: string): Promise<{ generation: string; paused: boolean; dirty: boolean; redis_run_id: string | null }> {
-    await this.pool.query('INSERT INTO billing_state (project_id) VALUES ($1) ON CONFLICT (project_id) DO NOTHING', [projectId]);
-    const r = await this.pool.query(
-      'SELECT generation::text AS generation, paused, dirty, redis_run_id FROM billing_state WHERE project_id = $1', [projectId]);
+    const read = () => this.pool.query(
+      'SELECT generation::text AS generation, paused, dirty, redis_run_id FROM billing_state WHERE project_id = $1',[projectId]);
+    let r=await read();
+    if(!r.rows[0]){
+      await this.pool.query('INSERT INTO billing_state(project_id) VALUES($1) ON CONFLICT(project_id) DO NOTHING',[projectId]);
+      r=await read();
+    }
     if (!r.rows[0]) throw new BillingError(503, 'billing_unavailable', 'billing state missing');
     const state = r.rows[0];
     if (state.paused || state.dirty) throw new BillingError(503, 'billing_recovering', 'billing is reconciling');
@@ -429,7 +477,18 @@ export class Billing {
     const attemptsJson = requireJson(input.attempts, 'attempts');
     const status = input.status;
     const usageState: 'actual' | 'unknown' = actual === null ? 'unknown' : 'actual';
+    // Serialize finalization for the same project in-process BEFORE taking a pool
+    // connection: same-project transactions used to queue up inside PostgreSQL
+    // holding a client each, starving the pool. The PG advisory xact lock is
+    // still taken below and remains the cross-process authority.
+    await this.runFinancial(requestId, () => this.performSettle(requestId, {
+      actual, inputTokens, outputTokens, status, attempts: input.attempts, attemptsJson, usageState,
+    }));
+  }
 
+  private async performSettle(requestId: string, prepared: PreparedSettle): Promise<void|(()=>Promise<void>)> {
+    const { actual, inputTokens, outputTokens, status, attemptsJson, usageState } = prepared;
+    const input = { attempts: prepared.attempts };
     const client = await this.pool.connect();
     let committed = false;
     let released = false;
@@ -481,39 +540,37 @@ export class Billing {
           await client.query('COMMIT');
           committed = true;
           releaseClient();
-          await this.markDirty(projectId);
-          return;
+          return () => this.markDirty(projectId);
         }
         if (actual === null || prior === charge) {
           await client.query('COMMIT');
           committed = true;
           releaseClient();
-          if (actual !== null) await this.applySettlement(projectId, period, requestId, charge, 'actual');
+          if (actual !== null) return () => this.applySettlement(projectId, period, requestId, charge, 'actual');
           return;
         }
         throw new BillingError(409, 'settlement_conflict', 'request was already settled with a different amount');
       }
       const estimated = actual === null;
-      await client.query(
-        `INSERT INTO ledger (event_id, request_id, project_id, period, amount_micros, kind, input_tokens, output_tokens, estimated)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (event_id) DO NOTHING`,
-        [`settle:${requestId}`, requestId, projectId, period, charge, estimated ? 'estimate' : 'settle', inputTokens, outputTokens, estimated]);
-      await client.query(
-        `UPDATE requests SET status = $2, actual_micros = $3, input_tokens = $4, output_tokens = $5, updated_at = now()
-         WHERE request_id = $1`, [requestId, status, actual, inputTokens, outputTokens]);
-      await client.query(
-        `UPDATE reservations SET status = $2, actual_micros = $3, lease_expires_at = NULL, updated_at = now()
-         WHERE request_id = $1`, [requestId, estimated ? 'unknown' : 'settled', actual]);
-      const payload = { requestId, projectId, period, status, actualMicros: actual, chargedMicros: charge, estimated,
-        inputTokens, outputTokens, attempts: input.attempts };
-      await client.query(
-        `INSERT INTO outbox (id, event_id, event_type, project_id, payload, status)
-         VALUES ($1, $2, 'request.settled', $3, $4::jsonb, 'pending') ON CONFLICT (event_id) DO NOTHING`,
-        [randomUUID(), `request.settled:${requestId}`, projectId, JSON.stringify(payload)]);
+      const payload = {requestId,projectId,period,status,actualMicros:actual,chargedMicros:charge,estimated,
+        inputTokens,outputTokens,attempts:input.attempts};
+      // Preserve the existing transaction + row/project locks while committing
+      // the ledger, request, reservation and event writes in one database round trip.
+      await client.query(`WITH entry AS (
+        INSERT INTO ledger(event_id,request_id,project_id,period,amount_micros,kind,input_tokens,output_tokens,estimated)
+        VALUES($10,$1,$2,$3,$4,$15,$6,$7,$9) ON CONFLICT(event_id) DO NOTHING
+      ), request_update AS (
+        UPDATE requests SET status=$8,actual_micros=$5,input_tokens=$6,output_tokens=$7,updated_at=now() WHERE request_id=$1
+      ), reservation_update AS (
+        UPDATE reservations SET status=$14,actual_micros=$5,lease_expires_at=NULL,updated_at=now() WHERE request_id=$1
+      ) INSERT INTO outbox(id,event_id,event_type,project_id,payload,status)
+        VALUES($11,$12,'request.settled',$2,$13::jsonb,'pending') ON CONFLICT(event_id) DO NOTHING`,
+        [requestId,projectId,period,charge,actual,inputTokens,outputTokens,status,estimated,`settle:${requestId}`,
+          randomUUID(),`request.settled:${requestId}`,JSON.stringify(payload),estimated?'unknown':'settled',estimated?'estimate':'settle']);
       await client.query('COMMIT');
       committed = true;
           releaseClient();
-      await this.applySettlement(projectId, period, requestId, charge, usageState);
+      return () => this.applySettlement(projectId, period, requestId, charge, usageState);
     } catch (err) {
       if (!committed) await client.query('ROLLBACK').catch(() => undefined);
       throw err;
@@ -525,6 +582,11 @@ export class Billing {
   async cancelBeforeDispatch(requestIdInput: string): Promise<void> {
     this.ensureInitialized();
     const requestId = requireUuid(requestIdInput, 'requestId');
+    // Same-project finalization must not hold pool connections while parked.
+    await this.runFinancial(requestId, () => this.performCancel(requestId));
+  }
+
+  private async performCancel(requestId: string): Promise<void> {
     const client = await this.pool.connect();
     let committed = false;
     let projectId = '';
@@ -665,6 +727,9 @@ export class Billing {
     if(this.reconcileTimer)clearInterval(this.reconcileTimer);
     if(this.reconcileSoonTimer)clearTimeout(this.reconcileSoonTimer);
     this.reconcileTimer=null;this.reconcileSoonTimer=null;
+    // Financial settlement/cancel already accepted must finish before the pool closes.
+    await Promise.allSettled([...this.financialOperations]);
+    await this.settlementQueue.drain();
     await this.recovering?.catch(()=>undefined);
   }
 
