@@ -20,4 +20,3 @@
 | [#15 P1 协议扩展与运营能力评估](https://github.com/jihuayu/ai-gateway/issues/15) | P1 | [#14](https://github.com/jihuayu/ai-gateway/issues/14) |
 
 推荐顺序：基础工程 → PG → 权限/供应商/路由/key → Redis 限流计费 → 网关/事件 → 查询/控制台 → 故障验收。Kafka 为可选传输，outbox 和幂等消费为 P0 必需。
-
