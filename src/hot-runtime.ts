@@ -127,19 +127,23 @@ export class HotRuntime {
     if(!revision)throw new GatewayError(503,'configuration_unavailable','运行配置未就绪。');
     let value=this.cache.get(revision);
     if(!value){
-      const json=await this.redis.get(this.keys.snapshot(revision));
+      let json:string|null;
+      try{json=await this.redis.get(this.keys.snapshot(revision));}catch{throw new GatewayError(503,'configuration_unavailable','运行配置暂不可用。');}
       if(!json)throw new GatewayError(503,'configuration_unavailable','运行配置快照缺失。');
-      value=JSON.parse(json) as Snapshot;
-      if(value.epoch!==this.epoch)throw new GatewayError(503,'configuration_unavailable','运行配置代次不匹配。');
+      try{value=JSON.parse(json) as Snapshot;}catch{throw new GatewayError(503,'configuration_unavailable','运行配置快照损坏。');}
+      if(value.epoch!==this.epoch||!value.routes||!value.models)throw new GatewayError(503,'configuration_unavailable','运行配置代次不匹配。');
       this.remember(revision,value);
     }
     return value;
   }
   async authenticateKey(req:FastifyRequest):Promise<KeyContext>{
     const keyHash=hashKey(bearerToken(req));
-    const [revision,json]=await this.redis.eval(`local run=string.match(redis.call('INFO','server'),'run_id:([%w]+)');
+    let fields:Array<string|null>;
+    try{fields=await this.redis.eval(`local run=string.match(redis.call('INFO','server'),'run_id:([%w]+)');
       if redis.call('HGET',KEYS[1],'epoch')~=ARGV[1] or redis.call('HGET',KEYS[1],'run_id')~=run then return {false,false} end;
       return redis.call('HMGET',KEYS[2],'revision','key:'..ARGV[2])`,2,this.keys.runtime,this.keys.config,this.epoch,keyHash) as Array<string|null>;
+    }catch{throw new GatewayError(503,'configuration_unavailable','运行配置暂不可用。');}
+    const [revision,json]=fields;
     if(!revision)throw new GatewayError(503,'configuration_unavailable','运行配置未就绪。');
     const row:KeyRow|undefined=json?JSON.parse(json):undefined;
     return {...keyContextFromRow(row),runtimeRevision:revision,runtimeKeyHash:keyHash,

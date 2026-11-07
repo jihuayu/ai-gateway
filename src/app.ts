@@ -27,7 +27,7 @@ export async function buildApp(config: ReturnType<typeof loadConfig>, logging = 
   // An idle PG socket can fail independently of a query. It must not crash the
   // Redis data plane; background operations report failures and retain the journal.
   pool.on('error',()=>{});backgroundPool.on('error',()=>{});
-  const redis = new Redis(config.REDIS_URL, {maxRetriesPerRequest: 1, connectTimeout: 5000, enableOfflineQueue: false});
+  const redis = new Redis(config.REDIS_URL, {maxRetriesPerRequest: 1, connectTimeout: 5000, commandTimeout:5000, enableOfflineQueue: false});
   redis.on('error', () => {});
   try {
   if (redis.status !== 'ready') await new Promise<void>((resolve, reject) => {
@@ -99,16 +99,18 @@ export async function buildApp(config: ReturnType<typeof loadConfig>, logging = 
   });
   await app.register(staticFiles,{root:fileURLToPath(new URL('../web/',import.meta.url)),prefix:'/'});
   const events=new EventWorker(backgroundPool,config.KAFKA_BROKERS.split(',').filter(Boolean));await events.start();
-  const projector=new HotProjector(backgroundPool,redis,keys);
+  const projector=new HotProjector(backgroundPool,redis,keys,runtime.epoch);
   let processing:Promise<void>|null=null,publishing:Promise<void>|null=null;
   const eventTimer=options.backgroundWorkers===false?undefined:setInterval(()=>{
     if(processing)return;
     processing=(async()=>{
-      await billing.reap();
       const full=await backgroundPool.query("/*background:outbox-capacity*/ SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1");
       await redis.hset(keys.runtime,'projection_paused',full.rowCount?'1':'0');
       if(!full.rowCount)await projector.tick();
       await events.tick();
+      // A changed Redis identity fences new work, but retained events can still
+      // be committed while an operator verifies the recovery source.
+      await billing.reap();
     })().catch(()=>app.log.error('Background projection failed; uncommitted journal retained')).finally(()=>{processing=null;});
   },100);eventTimer?.unref();
   const publishTimer=options.backgroundWorkers===false?undefined:setInterval(()=>{

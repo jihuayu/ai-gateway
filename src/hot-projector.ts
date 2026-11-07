@@ -93,7 +93,7 @@ export class HotProjector {
   private stream:HotStream;
   private running:Promise<number>|null=null;
   private stopped=false;
-  constructor(private pool:Pool,private redis:Redis,private keys:HotKeys){this.stream=new HotStream(redis,keys.journal);}
+  constructor(private pool:Pool,private redis:Redis,private keys:HotKeys,private expectedEpoch?:string){this.stream=new HotStream(redis,keys.journal);}
   tick():Promise<number>{
     if(this.running)return this.running;
     if(this.stopped)return Promise.resolve(0);
@@ -102,6 +102,7 @@ export class HotProjector {
       const latest=new Map<string,{event:HotRequest;ids:string[]}>();
       for(const entry of entries){
         const event=eventSchema.parse(JSON.parse(entry.data));
+        if(this.expectedEpoch&&event.epoch!==this.expectedEpoch)throw Error('Unexpected financial epoch');
         const previous=latest.get(event.requestId);
         if(previous&&previous.event.epoch!==event.epoch)throw Error('Projection epoch conflict');
         const ids=[...(previous?.ids||[]),entry.id];

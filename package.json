@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "worker": "node --env-file-if-exists=.env --import tsx src/worker.ts",
     "benchmark": "node --env-file-if-exists=.env --import tsx scripts/benchmark.ts",
-    "retention": "node --env-file-if-exists=.env --import tsx scripts/retention.ts"
+    "retention": "node --env-file-if-exists=.env --import tsx scripts/retention.ts",
+    "project-journal": "node --env-file-if-exists=.env --import tsx scripts/project-hot-journal.ts"
   },
   "dependencies": {
     "fastify": "^5.6.2",

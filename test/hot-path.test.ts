@@ -14,6 +14,8 @@ import { prepareRequest,validateChatBody,admitRequest } from '../src/gateway.js'
 import { consumeEvent } from '../src/events.js';
 import type { FastifyRequest } from 'fastify';
 import { createServer,connect,type Socket } from 'node:net';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
 async function fixture(capacity=10000,connection?:(url:string)=>string){
   const db=await sandbox(),upstream=await mockUpstream();
@@ -241,4 +243,22 @@ test('real PostgreSQL TCP outage leaves the warm gateway serving and replays its
     blocked=false;await f.projector.drain();
     assert.equal((await f.db.pool.query('SELECT sum(amount_micros)::text AS amount FROM ledger')).rows[0].amount,'20');
   }finally{blocked=false;await f.close();for(const socket of sockets)socket.destroy();await new Promise<void>(r=>proxy.close(()=>r()));}
+});
+
+test('hot Redis AOF restart retains unprojected money but keeps new admission fenced',{skip:!hasServices||!process.env.HOT_RESTART_CONTAINER,timeout:60000},async()=>{
+  const container=process.env.HOT_RESTART_CONTAINER!;
+  assert.match(container,/^gateway-hot-restart-[a-z0-9-]+$/,'only a dedicated test container may be restarted');
+  const f=await fixture();
+  try{
+    const r=await f.send();assert.equal(r.response.status,200,r.body);await f.finished(r.id);
+    assert.equal((await f.db.pool.query('SELECT count(*)::int AS n FROM requests')).rows[0].n,0);
+    await promisify(execFile)('docker',['restart',container]);
+    let connected=false;for(let i=0;i<200;i++){try{await f.redis.ping();connected=true;break;}catch{}await new Promise(r=>setTimeout(r,25));}assert.ok(connected);
+    assert.equal(await f.billing.ready(),false);assert.equal((await f.send()).response.status,503);
+    const state=JSON.parse((await f.redis.get(f.runtime.keys.project(f.project)))!);
+    assert.equal(Object.values(state.budgets).map((b:any)=>b.spent)[0],20);
+    await f.projector.drain();assert.equal((await f.db.pool.query('SELECT sum(amount_micros)::text AS amount FROM ledger')).rows[0].amount,'20');
+    const next=new HotRuntime(f.backgroundPool,f.redis,f.runtime.keys,f.db.config.DATA_PLANE_NAMESPACE,'aof');
+    await assert.rejects(()=>next.initialize(),/HOT_FENCED/);
+  }finally{await f.close();}
 });
