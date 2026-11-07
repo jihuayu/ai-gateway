@@ -105,7 +105,7 @@ export async function buildApp(config: ReturnType<typeof loadConfig>, logging = 
     if(processing)return;
     processing=(async()=>{
       await billing.reap();
-      const full=await backgroundPool.query("SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1");
+      const full=await backgroundPool.query("/*background:outbox-capacity*/ SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1");
       await redis.hset(keys.runtime,'projection_paused',full.rowCount?'1':'0');
       if(!full.rowCount)await projector.tick();
       await events.tick();

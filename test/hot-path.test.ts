@@ -9,6 +9,7 @@ import { HotRuntime } from '../src/hot-runtime.js';
 import { HotBilling } from '../src/hot-billing.js';
 import { HotStream } from '../src/hot-stream.js';
 import { projectHotRequest } from '../src/hot-projector.js';
+import { hotKeys } from '../src/hot-contract.js';
 import { prepareRequest,validateChatBody,admitRequest } from '../src/gateway.js';
 import { consumeEvent } from '../src/events.js';
 import type { FastifyRequest } from 'fastify';
@@ -163,6 +164,9 @@ test('missing state and changed Redis identity fence admission instead of fallin
     await assert.rejects(()=>other.initialize(),/HOT_FENCED/);
     await f.redis.del(f.runtime.keys.runtime);
     await assert.rejects(()=>other.initialize(),/HOT_STATE_LOST/);
+    const renamed='renamed_'+randomUUID().replaceAll('-',''),newKeys=hotKeys(renamed);
+    await assert.rejects(()=>new HotRuntime(f.backgroundPool,f.redis,newKeys,renamed,'memory').initialize(),/HOT_NAMESPACE_CHANGE_REFUSED/);
+    assert.equal(await f.redis.exists(newKeys.runtime),0,'renaming cannot create a fresh zero budget');
   }finally{guard?.restore();await f.close();}
 });
 
@@ -170,7 +174,9 @@ test('unknown correction is immutable, projection is exact and safe-integer mone
   const f=await fixture();
   try{
     const p=await prepared(f),id=randomUUID();await admitRequest(f.billing,id,p);await f.billing.heartbeat(id);await f.billing.dispatch(id);
-    await f.billing.settle(id,{actualMicros:null,inputTokens:null,outputTokens:null,status:'unknown',attempts:[]});await f.projector.drain();
+    await f.billing.settle(id,{actualMicros:null,inputTokens:null,outputTokens:null,status:'cancelled',attempts:[]});await f.projector.drain();
+    const pending=await f.app.inject({url:`/api/usage?project_id=${f.project}`,headers:f.headers});
+    assert.equal(pending.json().unknown_requests,1,'cancelled upstream outcome still has a conservative unknown charge');
     await f.billing.settle(id,{actualMicros:4,inputTokens:2,outputTokens:1,status:'completed',attempts:[]});
     await f.billing.settle(id,{actualMicros:4,inputTokens:2,outputTokens:1,status:'completed',attempts:[]});
     await assert.rejects(()=>f.billing.settle(id,{actualMicros:8,inputTokens:2,outputTokens:1,status:'completed',attempts:[]}),e=>(e as any).code==='settlement_conflict');

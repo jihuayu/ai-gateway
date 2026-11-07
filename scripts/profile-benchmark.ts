@@ -47,6 +47,7 @@ try{
     metrics.begin();const at=performance.now(),gateway=await run(concurrency,false);
     while(metrics.completed<concurrency){if(performance.now()-at>30000)throw Error('Settlement timed out');await new Promise(r=>setTimeout(r,5));}
     const settlementElapsedMs=performance.now()-at,profile=metrics.end(concurrency);expected+=concurrency;
+    if(projector&&profile.requestSqlCalls!==0)throw Error('Redis hot path executed request SQL');
     await projector?.drain(30000);
     const ledgerProjectionElapsedMs=performance.now()-at;
     const ledger=(await pool.query('SELECT count(*)::int AS count,sum(amount_micros)::text AS micros FROM ledger')).rows[0];

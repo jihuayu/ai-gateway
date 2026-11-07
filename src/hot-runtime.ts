@@ -27,8 +27,8 @@ end
 for id,data in pairs(seeds) do
   if redis.call('SISMEMBER',KEYS[4],id)==0 then redis.call('SET',ARGV[5]..'project:'..id,data);redis.call('SADD',KEYS[4],id) end
 end
-if redis.call('HGET',KEYS[2],'revision')==ARGV[2] then return 0 end
 redis.call('SET',KEYS[3],ARGV[3],'EX',86400)
+if redis.call('HGET',KEYS[2],'revision')==ARGV[2] then return 0 end
 redis.call('DEL',KEYS[2])
 redis.call('HSET',KEYS[2],'revision',ARGV[2])
 local entries=cjson.decode(ARGV[6])
@@ -62,6 +62,8 @@ export class HotRuntime {
         if(await this.redis.hget(this.keys.runtime,'run_id')!==run)throw Error('HOT_FENCED: Redis identity changed; verify durable journal and isolate old primary before recovery');
         this.epoch=stored.epoch;
       }else{
+        if((await c.query('SELECT 1 FROM hot_runtime_manifests LIMIT 1')).rowCount)
+          throw Error('HOT_NAMESPACE_CHANGE_REFUSED: this PG schema already owns another financial namespace');
         if(existing)throw Error('HOT_ORPHAN_STATE: Redis namespace belongs to another manifest');
         const live=await c.query("SELECT 1 FROM requests WHERE status IN('preparing','reserved','dispatch_intent','dispatched') LIMIT 1");
         if(live.rowCount)throw Error('Drain legacy in-flight requests before enabling the Redis data plane');

@@ -39,7 +39,8 @@ export async function projectHotRequest(pool:Pool,input:HotRequest):Promise<void
       [e.requestId,e.projectId,e.keyId,e.period,e.reserveMicros,JSON.stringify(e.routeVersion),JSON.stringify(e.priceSnapshot),e.createdAt,e.updatedAt]);
     const previous=(await c.query('SELECT project_id::text,key_id::text,period,reserve_micros::text,actual_micros::text,status FROM requests WHERE request_id=$1 FOR UPDATE',[e.requestId])).rows[0];
     if(previous.project_id!==e.projectId||previous.key_id&&previous.key_id!==e.keyId||previous.period!==e.period||Number(previous.reserve_micros)!==e.reserveMicros)throw Error('Projection request collision');
-    if(previous.status==='cancelled'&&e.state!=='cancelled')throw Error('Cannot reopen cancelled request');
+    const previousReservation=(await c.query('SELECT status FROM reservations WHERE request_id=$1',[e.requestId])).rows[0];
+    if(previousReservation?.status==='cancelled'&&e.state!=='cancelled')throw Error('Cannot reopen cancelled request');
     if(previous.actual_micros!==null&&(e.actualMicros===null||Number(previous.actual_micros)!==e.actualMicros))throw Error('Actual settlement is immutable');
     const baseline=(await c.query('SELECT amount_micros::text,estimated,created_at FROM ledger WHERE event_id=ANY($1::text[]) ORDER BY event_id DESC',
       [[`settle:${e.requestId}`,`estimate:${e.requestId}`]])).rows[0];

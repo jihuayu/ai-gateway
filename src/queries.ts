@@ -46,10 +46,10 @@ export async function registerQueries(app:FastifyInstance,{pool,hotState}: {pool
     const q=req.query as Record<string,string>;const {from,to}=range(q);
     const totals=(await pool.query(`SELECT count(*)::int AS requests,
       count(*) FILTER(WHERE lower(status) IN('completed','success','succeeded'))::int AS successful_requests,
-      count(*) FILTER(WHERE actual_micros IS NULL AND lower(status) NOT IN('preparing','reserved','rejected','cancelled'))::int AS unknown_requests,
+      count(*) FILTER(WHERE actual_micros IS NULL AND EXISTS(SELECT 1 FROM reservations rr WHERE rr.request_id=requests.request_id AND rr.status='unknown'))::int AS unknown_requests,
       COALESCE(sum(input_tokens),0)::text AS input_tokens,COALESCE(sum(output_tokens),0)::text AS output_tokens,
       COALESCE(sum(actual_micros),0)::text AS actual_micros,
-      COALESCE(sum(reserve_micros) FILTER(WHERE actual_micros IS NULL),0)::text AS estimated_micros
+      COALESCE(sum(reserve_micros) FILTER(WHERE actual_micros IS NULL AND EXISTS(SELECT 1 FROM reservations rr WHERE rr.request_id=requests.request_id AND rr.status='unknown')),0)::text AS estimated_micros
       FROM requests WHERE project_id=$1 AND created_at>=$2 AND created_at<$3`,[id,from,to])).rows[0];
     const series=(await pool.query('SELECT * FROM usage_hourly WHERE project_id=$1 AND bucket>=$2 AND bucket<$3 ORDER BY bucket',[id,from,to])).rows;
     const project=(await pool.query('SELECT id,name,budget_micros FROM projects WHERE id=$1',[id])).rows[0];

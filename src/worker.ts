@@ -25,7 +25,7 @@ try{
   while(!stopped){
     try{
       await billing.reap();
-      const full=await pool.query("SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1");
+      const full=await pool.query("/*background:outbox-capacity*/ SELECT 1 FROM outbox WHERE status!='published' OFFSET 9999 LIMIT 1");
       await redis.hset(keys.runtime,'projection_paused',full.rowCount?'1':'0');
       if(!full.rowCount)await projector.tick();
       await worker.tick();
