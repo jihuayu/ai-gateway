@@ -8,3 +8,6 @@
 ## License
 
 [Apache License 2.0](LICENSE)
+
+- [模块实施设计与任务拆分](docs/implementation.md)：Redis 限流计费、PG 账本、可选 Kafka、模块依赖与验收。
+- [GitHub 任务索引](docs/tasks.md)：14 个 issues、优先级及依赖。
