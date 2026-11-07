@@ -10,5 +10,5 @@ export async function sandbox() {
   const url=new URL(process.env.DATABASE_URL!);url.searchParams.set('options',`-c search_path=${schema}`);
   const pool=new Pool({connectionString:url.toString(),max:6});
   await migrate(pool);
-  return {pool,config:loadConfig({DATABASE_URL:url.toString(),REDIS_URL:process.env.REDIS_URL,ENCRYPTION_KEY:'1'.repeat(64),ALLOW_PRIVATE_UPSTREAM:'true'}),cleanup:async()=>{await pool.end();await root.query(`DROP SCHEMA ${schema} CASCADE`);await root.end();}};
+  return {pool,config:loadConfig({DATABASE_URL:url.toString(),REDIS_URL:process.env.REDIS_URL,ENCRYPTION_KEY:'1'.repeat(64),ALLOW_PRIVATE_UPSTREAM:'true',DATA_PLANE_NAMESPACE:schema,HOT_DURABILITY:'memory'}),cleanup:async()=>{await pool.end();await root.query(`DROP SCHEMA ${schema} CASCADE`);await root.end();}};
 }

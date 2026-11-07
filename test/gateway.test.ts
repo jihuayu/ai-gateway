@@ -6,6 +6,7 @@ import { EventEmitter } from 'node:events';
 import type { Pool } from 'pg';
 import type { Billing } from '../src/billing.js';
 import { encrypt } from '../src/security.js';
+import { pgGatewayDataPlane } from './pg-gateway-adapter.js';
 import {
   registerGateway, validateChatBody, tokensToMicros, estimateAttemptMicros, SseParser, ReplyStreamSink,
   extractTargetIds, aggregateSettlement, type Timings, type AttemptRecord, type GatewayDeps,
@@ -124,7 +125,7 @@ async function buildHarness(options: HarnessOptions) {
   const billing = options.billing ?? new FakeBilling();
   const pool = poolStub(options.pool);
   const deps = {
-    pool, billing: billing as unknown as Billing,
+    dataPlane:pgGatewayDataPlane(pool), billing: billing as unknown as Billing,
     encryptionKey: ENCRYPTION_KEY, allowPrivateUpstream: options.allowPrivate ?? true, timings: options.timings,
   } satisfies GatewayDeps;
   const app: FastifyInstance = Fastify({ logger: false, bodyLimit: 1024 * 1024 });

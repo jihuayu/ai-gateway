@@ -3,7 +3,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import type { FastifyInstance } from 'fastify';
 import { Client, type Pool } from 'pg';
 import type { Redis } from 'ioredis';
-import type { Billing } from '../src/billing.js';
+import type { GatewayBilling } from '../src/gateway.js';
 
 export function distribution(values:number[]) {
   const sorted=[...values].sort((a,b)=>a-b);
@@ -11,7 +11,7 @@ export function distribution(values:number[]) {
   return {count:sorted.length,p50Ms:at(.5),p95Ms:at(.95),meanMs:values.length?values.reduce((a,b)=>a+b,0)/values.length:0};
 }
 /** Benchmark-process only: never records SQL values, credentials, prompts or results. */
-export function profileMetrics(app:FastifyInstance,pool:Pool,redis:Redis,billing:Billing) {
+export function profileMetrics(app:FastifyInstance,pool:Pool,redis:Redis,billing:GatewayBilling) {
   const contexts=new AsyncLocalStorage<'request'|undefined>();
   app.addHook('onRequest',(_req,_reply,done)=>contexts.run('request',done));
   let active=false,completedSettlements=0,maxWaiting=0;

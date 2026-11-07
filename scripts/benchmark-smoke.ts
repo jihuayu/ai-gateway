@@ -5,7 +5,7 @@ import { buildApp } from '../src/app.js';
 import { sandbox } from '../test/helpers.js';
 import { mockUpstream } from '../test/mock-upstream.js';
 const db=await sandbox(),mock=await mockUpstream();
-const {app,pool}=await buildApp(db.config,false);
+const {app,pool,projector}=await buildApp(db.config,false);
 const address=await app.listen({host:'127.0.0.1',port:0});
 try{
   const first=await app.inject({method:'POST',url:'/api/bootstrap',payload:{email:'perf@example.com',password:'performance-test-password',projectName:'performance'}});
@@ -28,6 +28,7 @@ try{
   };
   const baseline=await run(mock.url+'/chat/completions','mock-model');
   const gateway=await run(address+'/v1/chat/completions','perf-chat',`Bearer ${key.key}`);
+  await projector.drain(30000);
   for(let i=0;i<100;i++){if(Number((await pool.query('SELECT count(*) FROM ledger')).rows[0].count)===100)break;await new Promise(r=>setTimeout(r,50));}
   const ledger=(await pool.query('SELECT count(*)::int AS requests,sum(amount_micros)::text AS micros FROM ledger')).rows[0];
   const report={concurrency:100,environment:{logicalCpus:cpus().length,totalMemoryBytes:totalmem(),node:process.version},baseline,gateway,p95DifferenceMs:gateway.p95Ms-baseline.p95Ms,ledger,scope:'local mock upstream, real PostgreSQL/Redis; total response latency, not isolated gateway overhead'};

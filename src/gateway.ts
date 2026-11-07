@@ -53,16 +53,23 @@ export class GatewayError extends Error {
   }
 }
 
+export type GatewayBilling = Pick<Billing,'admit'|'dispatch'|'heartbeat'|'settle'|'cancelBeforeDispatch'>;
+export interface GatewayDataPlane {
+  authenticateKey(req:FastifyRequest):Promise<KeyContext>;
+  loadRoute(key:KeyContext,model:string):Promise<RouteSnapshot|null>;
+  models(key:KeyContext):Promise<Array<Record<string,unknown>>>;
+  persistMetadata(requestId:string,aliasName:string|null,status:SettlementStatus,attempts:AttemptRecord[],attemptsToPersist?:AttemptRecord[]):Promise<void>;
+}
 export interface GatewayDeps {
-  pool: Pool;
-  billing: Billing;
+  billing: GatewayBilling;
+  dataPlane: GatewayDataPlane;
   encryptionKey: string;
   allowPrivateUpstream: boolean;
   /** Test/deployment overrides; the contract fields above are sufficient in production. */
   timings?: Partial<Timings>;
 }
 
-interface KeyRow {
+export interface KeyRow {
   key_id: string;
   prefix: string;
   allowed_models: unknown;
@@ -78,6 +85,9 @@ interface KeyRow {
 }
 
 export interface KeyContext {
+  runtimeRevision?: string;
+  runtimeKeyHash?: string;
+  runtimeExpiresAt?: number | null;
   keyId: string;
   projectId: string;
   workspaceId: string;
@@ -98,7 +108,7 @@ SELECT k.id AS key_id, k.prefix, k.allowed_models, k.expires_at, k.revoked_at, k
 
 export const TOUCH_KEY_SQL = `/*gw:touch*/ UPDATE api_keys SET last_used_at = now() WHERE id = $1`;
 
-function bearerToken(req: FastifyRequest): string {
+export function bearerToken(req: FastifyRequest): string {
   const raw = req.headers.authorization;
   if (typeof raw !== 'string' || !/^Bearer[ ]+/i.test(raw)) {
     throw new GatewayError(401, 'invalid_api_key', '缺少有效的 API Key。');
@@ -129,12 +139,17 @@ export async function authenticateKey(req: FastifyRequest, pool: Pool): Promise<
   const token = bearerToken(req);
   const result = await pool.query(KEY_SQL, [hashKey(token)]);
   const row = result.rows[0] as KeyRow | undefined;
+  const context=keyContextFromRow(row);
+  void pool.query(TOUCH_KEY_SQL, [row!.key_id]).catch(() => undefined);
+  return context;
+}
+
+export function keyContextFromRow(row:KeyRow|undefined):KeyContext {
   if (!row) throw new GatewayError(401, 'invalid_api_key', 'API Key 无效或已失效。');
   if (row.revoked_at) throw new GatewayError(401, 'invalid_api_key', 'API Key 无效或已失效。');
   if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) {
     throw new GatewayError(401, 'invalid_api_key', 'API Key 无效或已失效。');
   }
-  void pool.query(TOUCH_KEY_SQL, [row.key_id]).catch(() => undefined);
   const budget = row.budget_micros === null || row.budget_micros === undefined ? -1 : safeNonNegative(row.budget_micros, 'budget_micros');
   return {
     keyId: row.key_id,
@@ -315,7 +330,7 @@ export function extractTargetIds(value: unknown): string[] {
 }
 
 /** Load the immutable published route for an alias; null when the alias is absent or unpublished. */
-export async function loadRoute(pool: Pool, projectId: string, workspaceId: string, aliasName: string): Promise<RouteSnapshot | null> {
+export async function loadRoute(pool: Pick<Pool,'query'>, projectId: string, workspaceId: string, aliasName: string): Promise<RouteSnapshot | null> {
   const routeResult = await pool.query(ROUTE_SQL, [projectId, aliasName]);
   const row = routeResult.rows[0] as Record<string, unknown> | undefined;
   if (!row) return null;
@@ -1102,8 +1117,8 @@ function modelList(rows: Array<Record<string, unknown>>, key: KeyContext): Model
 async function handleModels(app: FastifyInstance, deps: GatewayDeps, req: FastifyRequest, reply: FastifyReply): Promise<void> {
   const requestId = requestIdFor(req);
   try {
-    const key = await authenticateKey(req, deps.pool);
-    const rows = (await deps.pool.query(MODELS_SQL, [key.projectId])).rows as Array<Record<string, unknown>>;
+    const key = await deps.dataPlane.authenticateKey(req);
+    const rows = await deps.dataPlane.models(key);
     const data = modelList(rows, key);
     reply.header('x-request-id', requestId).send({ object: 'list', data, items: data });
   } catch (err) {
@@ -1170,6 +1185,9 @@ export function prepareRequest(key: KeyContext, body: ChatRequest, route: RouteS
     key, body, route, targets, maxOutputTokens, price,
     routeVersion: {
       alias_id: route.aliasId, alias_name: route.aliasName, version_id: route.routeVersionId,
+      runtime_revision:key.runtimeRevision,
+      runtime_key_hash:key.runtimeKeyHash,
+      runtime_expires_at:key.runtimeExpiresAt,
       version: route.version, targets: entries.map(e => ({ target_id: e.target_id, upstream_model: e.upstream_model })),
     },
   };
@@ -1177,7 +1195,7 @@ export function prepareRequest(key: KeyContext, body: ChatRequest, route: RouteS
 
 export interface Admission { requestId: string; period: string }
 
-export async function admitRequest(billing: Billing, requestId: string, prepared: PreparedRequest): Promise<Admission> {
+export async function admitRequest(billing: GatewayBilling, requestId: string, prepared: PreparedRequest): Promise<Admission> {
   const period = prepared.price.period;
   await billing.admit({
     requestId, projectId: prepared.key.projectId, keyId: prepared.key.keyId, period,
@@ -1388,7 +1406,7 @@ export async function handleChat(app: FastifyInstance, deps: GatewayDeps, timing
       return;
     }
     if (prepared) {
-      await persistRequestMetadata(deps.pool, requestId, prepared.route.aliasName, status, attempts,
+      await deps.dataPlane.persistMetadata(requestId,prepared.route.aliasName,status,attempts,
         attempts.filter(a=>!persistedAttempts.has(a.attempt_no))).catch(() => {
         app.log.error({ request_id: requestId, code: 'request_metadata_failed' }, 'request metadata persistence failed');
       });
@@ -1404,10 +1422,10 @@ export async function handleChat(app: FastifyInstance, deps: GatewayDeps, timing
     }
   };
   try {
-    const key = await authenticateKey(req, deps.pool);
+    const key = await deps.dataPlane.authenticateKey(req);
     const body = validateChatBody(req.body);
     if (!keyCanUseModel(key, '', body.model)) throw new GatewayError(403, 'model_not_permitted', 'API Key 无权使用该模型。');
-    const route = await loadRoute(deps.pool, key.projectId, key.workspaceId, body.model);
+    const route = await deps.dataPlane.loadRoute(key,body.model);
     if (!route) throw new GatewayError(404, 'model_not_found', '模型不存在或未发布。');
     if (!keyCanUseModel(key, route.aliasId, route.aliasName)) throw new GatewayError(403, 'model_not_permitted', 'API Key 无权使用该模型。');
     prepared = prepareRequest(key, body, route);
@@ -1436,7 +1454,7 @@ export async function handleChat(app: FastifyInstance, deps: GatewayDeps, timing
   const aliasName = prepared.route.aliasName;
   const onAttempt: AttemptCallback = async record => {
     try {
-      await persistRequestMetadata(deps.pool, requestId, aliasName, record.status === 'ok' ? 'completed' : 'failed', [record]);
+      await deps.dataPlane.persistMetadata(requestId,aliasName,record.status==='ok'?'completed':'failed',[record]);
       persistedAttempts.add(record.attempt_no);
     } catch {
       app.log.error({ request_id: requestId, code: 'attempt_metadata_failed' }, 'attempt metadata persistence failed');

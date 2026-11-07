@@ -11,7 +11,7 @@ const levels=(process.env.PERF_CONCURRENCY||'1,10,50,100').split(',').map(Number
 const repeats=Number(process.env.PERF_REPEATS||3);
 if(levels.some(n=>!Number.isSafeInteger(n)||n<1||n>500)||!Number.isSafeInteger(repeats)||repeats<1||repeats>10)throw Error('Invalid benchmark configuration');
 const db=await sandbox(),mock=await mockUpstream();
-const {app,pool,redis,billing}=await buildApp(db.config,false);
+const {app,pool,redis,billing,projector}=await buildApp(db.config,false);
 const metrics=profileMetrics(app,pool,redis,billing);
 const address=await app.listen({host:'127.0.0.1',port:0});
 try{
@@ -40,16 +40,24 @@ try{
   metrics.begin();const coldStart=performance.now(),cold=await run(1,false);
   while(metrics.completed<1){if(performance.now()-coldStart>30000)throw Error('Cold settlement timed out');await new Promise(r=>setTimeout(r,5));}
   const coldResult={...cold,settlementElapsedMs:performance.now()-coldStart,metrics:metrics.end(1)};expected++;
+  await projector?.drain(30000);
+  const coldProjectionElapsedMs=performance.now()-coldStart;
   for(const concurrency of levels)for(let repetition=1;repetition<=repeats;repetition++){
     const baseline=await run(concurrency,true);
     metrics.begin();const at=performance.now(),gateway=await run(concurrency,false);
     while(metrics.completed<concurrency){if(performance.now()-at>30000)throw Error('Settlement timed out');await new Promise(r=>setTimeout(r,5));}
     const settlementElapsedMs=performance.now()-at,profile=metrics.end(concurrency);expected+=concurrency;
+    await projector?.drain(30000);
+    const ledgerProjectionElapsedMs=performance.now()-at;
     const ledger=(await pool.query('SELECT count(*)::int AS count,sum(amount_micros)::text AS micros FROM ledger')).rows[0];
     if(gateway.statuses['200']!==concurrency||ledger.count!==expected||Number(ledger.micros)!==expected*20)throw Error('Response or accounting invariant failed');
-    results.push({concurrency,repetition,baseline,gateway,settlementElapsedMs,metrics:profile});
+    results.push({concurrency,repetition,baseline,gateway,settlementElapsedMs,ledgerProjectionElapsedMs,metrics:profile});
   }
-  const report={environment:{logicalCpus:cpus().length,totalMemoryBytes:totalmem(),node:process.version},cold:coldResult,results,accounting:{requests:expected,micros:expected*20},scope:'synthetic local upstream; real PG/Redis; SQL values and credentials excluded; method percentiles overlap and are not additive'};
+  const persistence=await redis.config('GET','appendonly','appendfsync','maxmemory-policy') as string[];
+  const redisPersistence=Object.fromEntries(Array.from({length:persistence.length/2},(_,i)=>[persistence[i*2],persistence[i*2+1]]));
+  const report={environment:{logicalCpus:cpus().length,totalMemoryBytes:totalmem(),node:process.version,redisPersistence},
+    mode:projector?'redis-journal-async-pg':'synchronous-pg',cold:{...coldResult,ledgerProjectionElapsedMs:coldProjectionElapsedMs},results,accounting:{requests:expected,micros:expected*20},
+    scope:'synthetic local upstream; real PG/Redis; SQL values and credentials excluded; method percentiles overlap and are not additive; Redis finalization and PG projection are measured separately'};
   const path=process.env.PERF_REPORT||'artifacts/performance/profile.json';await mkdir('artifacts/performance',{recursive:true});await writeFile(path,JSON.stringify(report,null,2)+'\n');
   console.log(JSON.stringify({path,accounting:report.accounting,results:results.map(r=>({concurrency:r.concurrency,repetition:r.repetition,p95Ms:r.gateway.response.p95Ms,settlementElapsedMs:r.settlementElapsedMs,sqlCallsPerRequest:r.metrics.sqlCallsPerRequest,requestSqlCallsPerRequest:r.metrics.requestSqlCallsPerRequest,redisCommandsPerRequest:r.metrics.redisCommandsPerRequest,pool:r.metrics.pool,phases:r.metrics.phases}))}));
 }finally{metrics.restore();await app.close();await mock.close();await db.cleanup();}

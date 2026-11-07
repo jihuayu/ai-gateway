@@ -1,5 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Pool } from 'pg';
+import type { Redis } from 'ioredis';
+import type { HotKeys } from './hot-contract.js';
 import { requireProject, authenticateSession } from './control.js';
 import { setupEvents } from './events.js';
 
@@ -15,7 +17,7 @@ function range(q:Record<string,string>) {
   if(!Number.isFinite(+to)||!Number.isFinite(+from)||+from>=+to||+to-+from>366*86400000)bad('时间范围无效。');
   return {from,to};
 }
-export async function registerQueries(app:FastifyInstance,{pool}: {pool:Pool}) {
+export async function registerQueries(app:FastifyInstance,{pool,hotState}: {pool:Pool;hotState?:{redis:Redis;keys:HotKeys}}) {
   await setupEvents(pool);
   app.get('/api/requests',async req=>{
     const id=projectId(req);await requireProject(req,pool,id);
@@ -57,8 +59,18 @@ export async function registerQueries(app:FastifyInstance,{pool}: {pool:Pool}) {
     const monthly=(await pool.query(`SELECT COALESCE(sum(amount_micros),0)::text AS spent_micros FROM ledger WHERE project_id=$1 AND period=$2`,[id,period])).rows[0];
     const monthlyReserved=(await pool.query(`SELECT COALESCE(sum(reserved_micros),0)::text AS reserved_micros FROM reservations WHERE project_id=$1 AND period=$2 AND status IN('preparing','reserved','dispatch_intent','dispatched')`,[id,period])).rows[0];
     const budget={period,...monthly,...monthlyReserved,limit_micros:project.budget_micros};
+    let pendingEvents=0;
+    if(hotState){
+      const raw=await hotState.redis.get(hotState.keys.project(id));
+      if(!raw)bad('实时预算暂不可用。',503);
+      const state=JSON.parse(raw),current=state.budgets?.[period]||{spent:0,reserved:0};
+      if(!state.budgets||!Number.isSafeInteger(current.spent)||!Number.isSafeInteger(current.reserved))bad('实时预算暂不可用。',503);
+      budget.spent_micros=String(current.spent);budget.reserved_micros=String(current.reserved);
+      pendingEvents=await hotState.redis.xlen(hotState.keys.journal);
+    }
     const updated_at=series.at(-1)?.updated_at||null;
-    return {...totals,...outstanding,budget,summary:totals,totals,project,series,items:series,updated_at,stale:backlog.oldest?Date.now()-+new Date(backlog.oldest)>60000:false,from,to};
+    return {...totals,...outstanding,budget,summary:totals,totals,project,series,items:series,updated_at,
+      ingestion_pending_events:pendingEvents,stale:pendingEvents>0||(backlog.oldest?Date.now()-+new Date(backlog.oldest)>60000:false),from,to};
   };
   app.get('/api/usage',usage);app.get('/api/usage/summary',usage);
   app.get('/api/audit',async req=>{

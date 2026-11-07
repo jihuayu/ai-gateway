@@ -10,12 +10,13 @@ import { registerQueries } from '../src/queries.js';
 import { Billing } from '../src/billing.js';
 import { mockUpstream } from './mock-upstream.js';
 import { hasServices,sandbox } from './helpers.js';
+import { pgGatewayDataPlane } from './pg-gateway-adapter.js';
 
 test('full gateway: setup, request, SSE, fallback, unknown usage, revocation and metadata',{skip:!hasServices,timeout:60000},async()=>{
   const db=await sandbox(),redis=new Redis(process.env.REDIS_URL!);redis.on('error',()=>{});
   const upstream=await mockUpstream(),app=Fastify();
   const billing=new Billing(db.pool,redis);await billing.initialize();
-  const deps={pool:db.pool,billing,encryptionKey:'1'.repeat(64),allowPrivateUpstream:true};
+  const deps={pool:db.pool,billing,dataPlane:pgGatewayDataPlane(db.pool),encryptionKey:'1'.repeat(64),allowPrivateUpstream:true};
   await registerControl(app,deps);await registerProviders(app,deps);await registerCatalog(app,deps);await registerGateway(app,deps);await registerQueries(app,deps);
   const address=await app.listen({host:'127.0.0.1',port:0});
   try{
