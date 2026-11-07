@@ -1,6 +1,14 @@
 # 实现与验收证据
 
-日期：2026-11-07（Asia/Hong_Kong）。分支：`codex/complete-issues`。目标：[#16](https://github.com/jihuayu/ai-gateway/issues/16)。
+日期：2026-11-07。分支：`codex/complete-issues`。初始目标#16及首轮#18的历史证据保留在下文；最新#23协议以 [Redis热路径设计](hot-path.md) 和 [零SQL验收](redis-performance-results.md) 为准。
+
+## 最新默认协议验收（#23）
+
+业务候选 `fa94339bd088a7735876b4c7ce1a5230606de5ec`：GitHub push/PR CI与类型检查通过；真实PG/Redis/Kafka完整82项，79通过、3专用跳过、0失败。新的独立AOF always重启专项另外通过；旧PG兼容故障演练不作为新协议自动恢复放行的依据。
+
+请求SQL严格为0；两个连接池被禁止query/connect时普通/SSE/备用/断流及新版本缓存补入均完成。真实PG TCP断连后仍服务，恢复后精确补账；跨实例撤销、容量、回滚/重放、精度、租约和身份/状态/日志/命名空间围栏均有用例。Chromium接入、实际请求、八页和390px通过，无pageerror。
+
+同一脚本、AOF always条件下，100并发总响应P95中位数1518.16→429.89ms，请求SQL22→0；两版各484笔/9680微美元。整批PG投影核对时间3558.48→7805.74ms，后台写入优化仍待#21。数据、测量边界及最终审阅范围见 [本轮结果](redis-performance-results.md)。原50ms纯处理/20ms块转发目标仍未证明。
 
 ## 验证范围
 

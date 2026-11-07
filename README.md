@@ -2,6 +2,8 @@
 
 面向开发者与小型团队的模型网关和中文 Web 控制台。使用 PostgreSQL 持久化配置与账本、Redis 实时限流和计费，可选 Kafka 事件通道。
 
+默认请求热路径仅访问内存/Redis：本机路由缓存、Redis鉴权及原子预算/日志，后台异步写PG。PG故障时预热请求可继续，受预算和有界日志容量保护。Redis需AOF always/noeviction；启动、控制台与统计仍使用PG，详见 [热路径协议](docs/hot-path.md)。
+
 ## 本地运行
 
 要求 Node.js 24、Docker Compose。
@@ -45,6 +47,8 @@ npm test
 - [P1 能力评估与契约](docs/p1-roadmap.md)
 - [验证与限制](docs/verification.md)
 - [性能优化计划](docs/performance-plan.md) 与 [首轮结果](docs/performance-results.md)
+- [Redis热路径与异步账本](docs/hot-path.md)
+- [零SQL验收与压测结果](docs/redis-performance-results.md)
 
 ## License
 

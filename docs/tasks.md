@@ -31,3 +31,14 @@
 | [#22 固定资源SSE与持续负载门槛](https://github.com/jihuayu/ai-gateway/issues/22) | 待开发 | #21，固定资源环境 |
 
 实现边界和后续验收顺序见 [性能计划](performance-plan.md)，当前测量见 [优化结果](performance-results.md)。
+
+## 零SQL热路径目标 #23
+
+| Issue | 交付范围 |
+| --- | --- |
+| [#24](https://github.com/jihuayu/ai-gateway/issues/24) | 版本配置发布、Redis鉴权、本机路由缓存、跨实例更新/撤销 |
+| [#25](https://github.com/jihuayu/ai-gateway/issues/25) | Redis原子预算/限流/租约与有界财务Stream、身份/状态/命名空间围栏 |
+| [#26](https://github.com/jihuayu/ai-gateway/issues/26) | 独立4连接池投影、事务幂等、提交后ack、pending接管和受控离线补账 |
+| [#27](https://github.com/jihuayu/ai-gateway/issues/27) | 零SQL/PG TCP故障/Redis AOF重启/浏览器/可比压测及审阅证据 |
+
+见 [最新协议](hot-path.md) 与 [验收结果](redis-performance-results.md)。#21的独立池部分已实现，批量投影/历史增长优化仍待开发；#22固定资源与SSE门槛继续开放。

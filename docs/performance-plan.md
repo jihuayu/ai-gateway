@@ -34,3 +34,9 @@ DATABASE_URL=... REDIS_URL=... PERF_REPORT=artifacts/performance/profile.json no
 PERF_CONCURRENCY指定并发级别，PERF_REPEATS指定重复次数。只对隔离测试数据库运行。输出包含SQL模板、耗时与计数，不包含参数或凭据。前后报告与解释见 [首轮优化结果](performance-results.md)：100并发三轮总响应P95中位数1222.52→952.27ms，请求SQL31→22；10并发中位数增加约6%，需要后续持续负载验证。
 
 DeepSeek本轮首次调用403；经用户要求重试后已恢复并完成结算队列实现，独立review使用新的只读会话。审阅结论见 [review记录](deepseek-review.md)。#19/#20已有实现与验证证据；#21已完成批次合并的前置工作，独立连接池、增量投影及#22继续按上述顺序实施。
+
+## 用户新增零SQL约束（#23）
+
+最新协议采用[Redis热路径与异步PG](hot-path.md)，替代本文件早期“每请求即时查询PG授权”的实现原则；成功配置发布后的撤销语义保留。请求SQL已由22降到0，HTTP延迟改善，但100并发整批PG投影核对约7.81秒，见[当前报告](redis-performance-results.md)。
+
+#21独立后台4连接池已落地；下一步优先减少多次状态投影与逐请求事务往返，再做万条及更大历史EXPLAIN、增量聚合和重放验证。#22保持固定资源/SSE目标验收，不能以零SQL或总响应时间替代。
