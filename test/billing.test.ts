@@ -1,4 +1,4 @@
-import test, { after, before, type TestContext } from 'node:test';
+import test, { after, before, beforeEach, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -103,7 +103,16 @@ before(async () => {
   }
 });
 
+beforeEach(async () => {
+  if (skipReason || !billing) return;
+  // Fault cases schedule automatic recovery. Drain and restart that worker so
+  // the next case cannot inherit a pending rebuild of a newly admitted project.
+  await billing.close();
+  await billing.initialize();
+});
+
 after(async () => {
+  await billing?.close().catch(() => undefined);
   for (const project of projects) await removeProjectKeys(project.id).catch(() => undefined);
   await pool?.end().catch(() => undefined);
   await redis?.quit().catch(() => undefined);

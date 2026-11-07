@@ -1334,13 +1334,13 @@ ON CONFLICT(request_id,attempt_no) DO UPDATE SET status=excluded.status,error_co
 
 /** Persist request outcome metadata and per-attempt rows. Bodies and credentials never reach these tables. */
 export async function persistRequestMetadata(pool: Pool, requestId: string, aliasName: string | null,
-  status: SettlementStatus, attempts: AttemptRecord[]): Promise<void> {
+  status: SettlementStatus, attempts: AttemptRecord[], attemptsToPersist: AttemptRecord[] = attempts): Promise<void> {
   const failure = [...attempts].reverse().find(a => a.status !== 'ok');
   const errorCode = status === 'completed' ? null
     : (failure?.error_code ?? (status === 'cancelled' ? 'client_cancelled' : null));
-  if(!attempts.length){await pool.query(REQUEST_META_SQL,[requestId,aliasName,errorCode]);return;}
+  if(!attemptsToPersist.length){await pool.query(REQUEST_META_SQL,[requestId,aliasName,errorCode]);return;}
   const finishedAt=Date.now();
-  const rows=attempts.map(a=>({id:randomUUID(),attempt_no:a.attempt_no,target_id:a.target_id||null,status:a.status,error_code:a.error_code,
+  const rows=attemptsToPersist.map(a=>({id:randomUUID(),attempt_no:a.attempt_no,target_id:a.target_id||null,status:a.status,error_code:a.error_code,
     started_at:new Date(finishedAt-Math.max(0,a.latency_ms)).toISOString(),finished_at:new Date(finishedAt).toISOString(),
     input_tokens:a.input_tokens,output_tokens:a.output_tokens,cost_micros:a.cost_micros}));
   await pool.query(REQUEST_ATTEMPTS_SQL,[requestId,aliasName,errorCode,JSON.stringify(rows)]);
@@ -1388,7 +1388,8 @@ export async function handleChat(app: FastifyInstance, deps: GatewayDeps, timing
       return;
     }
     if (prepared) {
-      await persistRequestMetadata(deps.pool, requestId, prepared.route.aliasName, status, attempts.filter(a=>!persistedAttempts.has(a.attempt_no))).catch(() => {
+      await persistRequestMetadata(deps.pool, requestId, prepared.route.aliasName, status, attempts,
+        attempts.filter(a=>!persistedAttempts.has(a.attempt_no))).catch(() => {
         app.log.error({ request_id: requestId, code: 'request_metadata_failed' }, 'request metadata persistence failed');
       });
     }

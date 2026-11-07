@@ -59,9 +59,16 @@ test('full gateway: setup, request, SSE, fallback, unknown usage, revocation and
     console.log('integration: stream');const stream=await send('chat',true);assert.equal(stream.statusCode,200,stream.body);assert.match(stream.body,/data: \[DONE\]/);
     console.log('integration: fallback');const fallback=await send('fallback');assert.equal(fallback.statusCode,200,fallback.body);
     let attemptCount=0;for(let i=0;i<100;i++){attemptCount=(await db.pool.query('SELECT * FROM attempts WHERE request_id=$1',[fallback.headers['x-request-id']])).rowCount||0;if(attemptCount===2)break;await new Promise(r=>setTimeout(r,20));}assert.equal(attemptCount,2);
+    assert.equal((await db.pool.query('SELECT error_code FROM requests WHERE request_id=$1',[fallback.headers['x-request-id']])).rows[0].error_code,null,'successful fallback clears the earlier failure code');
     console.log('integration: unknown');const unknown=await send('unknown');assert.equal(unknown.statusCode,200,unknown.body);
     assert.equal((await db.pool.query('SELECT actual_micros FROM requests WHERE request_id=$1',[unknown.headers['x-request-id']])).rows[0].actual_micros,null);
     const partial=await send('partial',true);assert.match(partial.body,/error/);assert.ok(!partial.body.includes('[DONE]'));
+    let partialRow:any;
+    for(let i=0;i<100;i++){partialRow=(await db.pool.query('SELECT status,error_code FROM requests WHERE request_id=$1',[partial.headers['x-request-id']])).rows[0];if(partialRow.status==='partial')break;await new Promise(r=>setTimeout(r,20));}
+    assert.equal(partialRow.status,'partial');
+    const partialAttempts=(await db.pool.query('SELECT error_code FROM attempts WHERE request_id=$1',[partial.headers['x-request-id']])).rows;
+    assert.equal(partialAttempts.length,1);assert.ok(partialAttempts[0].error_code);
+    assert.equal(partialRow.error_code,partialAttempts[0].error_code,'finalization must retain the incrementally persisted failure code');
     const detail=await app.inject({url:`/api/requests/${id}`,headers});assert.equal(detail.statusCode,200,detail.body);assert.ok(detail.json().attempts.length);
     assert.ok(!JSON.stringify((await db.pool.query('SELECT * FROM requests')).rows).includes('private-prompt-marker'));
     const primaryTarget=(await db.pool.query('SELECT targets FROM route_versions WHERE alias_id=$1 AND version=1',[aliases.chat])).rows[0].targets;

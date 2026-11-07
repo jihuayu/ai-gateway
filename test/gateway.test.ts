@@ -598,7 +598,7 @@ describe('streaming and model listing', () => {
       res.write(`data: ${JSON.stringify({ model: 'upstream-model', choices: [{ index: 0, delta: { content: 'truncated' }, finish_reason: null }] })}\n\n`);
       res.end();
     });
-    const { app, billing } = await buildHarness({
+    const { app, billing, pool } = await buildHarness({
       pool: { key: keyRow(), route: routeRow([TARGET_ID]), targets: [targetRow(TARGET_ID, mock.baseUrl, 'upstream-model')] },
     });
     try {
@@ -613,6 +613,8 @@ describe('streaming and model listing', () => {
       assert.equal(settled.status, 'partial');
       assert.equal(settled.actualMicros, null);
       assert.equal(settled.attempts[0].error_code, 'upstream_incomplete_stream');
+      const finalMetadata=pool.queries.filter(q=>q.sql.includes('/*gw:request-meta*/')).at(-1);
+      assert.equal(finalMetadata?.params[2],'upstream_incomplete_stream','finalization preserves the request error after incremental attempt persistence');
     } finally {
       await app.close();
       await mock.close();
