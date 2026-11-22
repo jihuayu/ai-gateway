@@ -1,6 +1,7 @@
 package com.jihuayu.aigateway.worker;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.jihuayu.aigateway.control.ControlAuthService;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -14,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.TreeSet;
 import javax.sql.DataSource;
 import org.apache.kafka.clients.producer.KafkaProducer;
@@ -83,6 +85,17 @@ public class EventWorker {
                   updated_at timestamptz NOT NULL DEFAULT now(),
                   PRIMARY KEY(project_id, bucket)
                 );
+                CREATE TABLE IF NOT EXISTS usage_request_state (
+                  request_id uuid PRIMARY KEY,
+                  project_id uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                  bucket timestamptz NOT NULL,
+                  actual_micros bigint NOT NULL DEFAULT 0,
+                  estimated_micros bigint NOT NULL DEFAULT 0,
+                  input_tokens bigint NOT NULL DEFAULT 0,
+                  output_tokens bigint NOT NULL DEFAULT 0,
+                  counted boolean NOT NULL DEFAULT false,
+                  updated_at timestamptz NOT NULL DEFAULT now()
+                );
                 CREATE TABLE IF NOT EXISTS dead_letters (
                   event_id text PRIMARY KEY,
                   envelope jsonb NOT NULL,
@@ -95,80 +108,84 @@ public class EventWorker {
         }
     }
 
+    /**
+     * #21 O(1) Request-Level Incremental Usage Projection:
+     * Claims events in consumer_inbox, extracts the affected (project_id, request_id) pairs,
+     * and computes the exact delta between the request's current net ledger state and its
+     * previously projected state in usage_request_state. Never scans the full historical ledger.
+     */
     public static void consumeEvents(DataSource pool, List<Envelope> events, ObjectMapper mapper) {
         if (events == null || events.isEmpty()) return;
-        Map<String, Map<String, String>> deduped = new LinkedHashMap<>();
+        Map<String, Envelope> deduped = new LinkedHashMap<>();
+        List<Map<String, String>> inboxRows = new ArrayList<>();
         for (Envelope ev : events) {
             if (ev == null || ev.schema_version() != 1 || ev.event_id() == null || ev.event_id().isBlank()) {
                 throw new IllegalArgumentException("Unsupported event schema");
             }
-            Map<String, String> item = new LinkedHashMap<>();
-            item.put("event_id", ev.event_id());
-            item.put("project_id", ev.project_id());
-            deduped.put(ev.event_id(), item);
+            if (!deduped.containsKey(ev.event_id())) {
+                deduped.put(ev.event_id(), ev);
+                Map<String, String> row = new LinkedHashMap<>();
+                row.put("event_id", ev.event_id());
+                row.put("project_id", ev.project_id());
+                inboxRows.add(row);
+            }
         }
-        List<Map<String, String>> entries = new ArrayList<>(deduped.values());
-        entries.sort((a, b) -> a.get("event_id").compareTo(b.get("event_id")));
+        inboxRows.sort((a, b) -> a.get("event_id").compareTo(b.get("event_id")));
 
         try (Connection conn = pool.getConnection()) {
             boolean oldAuto = conn.getAutoCommit();
             conn.setAutoCommit(false);
             try {
-                Set<String> projects = new TreeSet<>();
+                Set<String> newlyInsertedEventIds = new LinkedHashSet<>();
                 try (PreparedStatement ps = conn.prepareStatement("""
                     INSERT INTO consumer_inbox(consumer_name, event_id, project_id)
                     SELECT 'usage-v1', event_id, project_id
                       FROM jsonb_to_recordset(?::jsonb) AS e(event_id text, project_id uuid)
                      ORDER BY event_id
                     ON CONFLICT DO NOTHING
-                    RETURNING project_id::text
+                    RETURNING event_id
                     """)) {
-                    ps.setString(1, mapper.writeValueAsString(entries));
+                    ps.setString(1, mapper.writeValueAsString(inboxRows));
                     try (ResultSet rs = ps.executeQuery()) {
                         while (rs.next()) {
-                            String pid = rs.getString(1);
-                            if (pid != null && !pid.isBlank()) {
-                                projects.add(pid);
-                            }
+                            newlyInsertedEventIds.add(rs.getString(1));
                         }
                     }
                 }
-                for (String project : projects) {
+                if (newlyInsertedEventIds.isEmpty()) {
+                    conn.commit();
+                    return;
+                }
+
+                // Group affected requestIds by projectId
+                Map<String, Set<String>> requestsByProject = new TreeMap<>();
+                Set<String> fallbackFullProjects = new TreeSet<>();
+                for (String evId : newlyInsertedEventIds) {
+                    Envelope ev = deduped.get(evId);
+                    if (ev == null || ev.project_id() == null || ev.project_id().isBlank()) continue;
+                    String reqId = extractRequestId(ev);
+                    if (reqId != null && ControlAuthService.isUuid(reqId)) {
+                        requestsByProject.computeIfAbsent(ev.project_id(), k -> new TreeSet<>()).add(reqId);
+                    } else {
+                        fallbackFullProjects.add(ev.project_id());
+                    }
+                }
+
+                Set<String> allProjects = new TreeSet<>(requestsByProject.keySet());
+                allProjects.addAll(fallbackFullProjects);
+
+                for (String project : allProjects) {
                     try (PreparedStatement lockPs = conn.prepareStatement("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))")) {
                         lockPs.setString(1, project);
                         lockPs.execute();
                     }
-                    try (PreparedStatement aggPs = conn.prepareStatement("""
-                        INSERT INTO usage_hourly(project_id, bucket, actual_micros, estimated_micros, input_tokens, output_tokens, event_count)
-                        SELECT project_id, date_trunc('hour', first_at),
-                               COALESCE(sum(amount) FILTER(WHERE NOT estimated), 0),
-                               COALESCE(sum(amount) FILTER(WHERE estimated), 0),
-                               COALESCE(sum(input_tokens), 0),
-                               COALESCE(sum(output_tokens), 0),
-                               count(*)
-                          FROM (
-                            SELECT project_id,
-                                   COALESCE(request_id::text, NULLIF(split_part(event_id, ':', 2), ''), event_id) AS identity,
-                                   min(created_at) AS first_at,
-                                   sum(amount_micros) AS amount,
-                                   (array_agg(estimated ORDER BY created_at DESC, event_id DESC))[1] AS estimated,
-                                   (array_agg(input_tokens ORDER BY created_at DESC, event_id DESC))[1] AS input_tokens,
-                                   (array_agg(output_tokens ORDER BY created_at DESC, event_id DESC))[1] AS output_tokens
-                              FROM ledger
-                             WHERE project_id = ?::uuid
-                             GROUP BY project_id, identity
-                          ) entries
-                         GROUP BY project_id, date_trunc('hour', first_at)
-                        ON CONFLICT(project_id, bucket) DO UPDATE
-                           SET actual_micros = excluded.actual_micros,
-                               estimated_micros = excluded.estimated_micros,
-                               input_tokens = excluded.input_tokens,
-                               output_tokens = excluded.output_tokens,
-                               event_count = excluded.event_count,
-                               updated_at = now()
-                        """)) {
-                        aggPs.setString(1, project);
-                        aggPs.executeUpdate();
+                    if (fallbackFullProjects.contains(project)) {
+                        recomputeProjectUsageFull(conn, project);
+                    } else {
+                        Set<String> reqIds = requestsByProject.get(project);
+                        if (reqIds != null && !reqIds.isEmpty()) {
+                            incrementallyProjectRequests(conn, project, reqIds);
+                        }
                     }
                 }
                 conn.commit();
@@ -181,7 +198,181 @@ public class EventWorker {
         } catch (RuntimeException re) {
             throw re;
         } catch (Exception e) {
-            throw new IllegalStateException("Consume events failed", e);
+            throw new IllegalStateException("Consume events failed: " + e.getMessage(), e);
+        }
+    }
+
+    private static String extractRequestId(Envelope ev) {
+        if (ev.payload() instanceof Map<?, ?> map) {
+            Object r = map.get("requestId") != null ? map.get("requestId") : map.get("request_id");
+            if (r instanceof String s && ControlAuthService.isUuid(s)) {
+                return s;
+            }
+        }
+        String eventId = ev.event_id();
+        String[] parts = eventId.split(":");
+        if (parts.length >= 2 && ControlAuthService.isUuid(parts[1])) {
+            return parts[1];
+        }
+        return null;
+    }
+
+    /**
+     * Incrementally updates usage_hourly for only the specific request IDs touched in this batch.
+     * Complexity is O(|reqIds|) using the indexed `ledger (request_id)` lookup, independent of total historical ledger size.
+     */
+    private static void incrementallyProjectRequests(Connection conn, String projectId, Set<String> reqIds) throws Exception {
+        for (String reqId : reqIds) {
+            Timestamp newBucket = null;
+            long netAmount = 0L;
+            boolean latestEstimated = false;
+            long latestInTokens = 0L;
+            long latestOutTokens = 0L;
+            boolean hasLedgerEntry = false;
+
+            try (PreparedStatement ps = conn.prepareStatement("""
+                SELECT date_trunc('hour', min(created_at)) AS bucket,
+                       COALESCE(sum(amount_micros), 0)::bigint AS amount,
+                       (array_agg(estimated ORDER BY created_at DESC, event_id DESC))[1] AS estimated,
+                       COALESCE((array_agg(input_tokens ORDER BY created_at DESC, event_id DESC))[1], 0)::bigint AS input_tokens,
+                       COALESCE((array_agg(output_tokens ORDER BY created_at DESC, event_id DESC))[1], 0)::bigint AS output_tokens,
+                       count(*)::int AS cnt
+                  FROM ledger
+                 WHERE project_id = ?::uuid AND request_id = ?::uuid
+                """)) {
+                ps.setString(1, projectId);
+                ps.setString(2, reqId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next() && rs.getInt("cnt") > 0) {
+                        hasLedgerEntry = true;
+                        newBucket = rs.getTimestamp("bucket");
+                        netAmount = rs.getLong("amount");
+                        latestEstimated = rs.getBoolean("estimated");
+                        latestInTokens = rs.getLong("input_tokens");
+                        latestOutTokens = rs.getLong("output_tokens");
+                    }
+                }
+            }
+            if (!hasLedgerEntry || newBucket == null) {
+                continue;
+            }
+
+            long newActual = latestEstimated ? 0L : netAmount;
+            long newEstimated = latestEstimated ? netAmount : 0L;
+
+            Timestamp oldBucket = null;
+            long oldActual = 0L;
+            long oldEstimated = 0L;
+            long oldIn = 0L;
+            long oldOut = 0L;
+            boolean oldCounted = false;
+
+            try (PreparedStatement ps = conn.prepareStatement("""
+                SELECT bucket, actual_micros, estimated_micros, input_tokens, output_tokens, counted
+                  FROM usage_request_state
+                 WHERE request_id = ?::uuid
+                   FOR UPDATE
+                """)) {
+                ps.setString(1, reqId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        oldBucket = rs.getTimestamp(1);
+                        oldActual = rs.getLong(2);
+                        oldEstimated = rs.getLong(3);
+                        oldIn = rs.getLong(4);
+                        oldOut = rs.getLong(5);
+                        oldCounted = rs.getBoolean(6);
+                    }
+                }
+            }
+
+            Timestamp targetBucket = oldBucket != null ? oldBucket : newBucket;
+            long deltaActual = newActual - oldActual;
+            long deltaEstimated = newEstimated - oldEstimated;
+            long deltaIn = latestInTokens - oldIn;
+            long deltaOut = latestOutTokens - oldOut;
+            long deltaCount = oldCounted ? 0L : 1L;
+
+            if (deltaActual == 0 && deltaEstimated == 0 && deltaIn == 0 && deltaOut == 0 && deltaCount == 0) {
+                continue;
+            }
+
+            try (PreparedStatement ps = conn.prepareStatement("""
+                INSERT INTO usage_request_state(request_id, project_id, bucket, actual_micros, estimated_micros, input_tokens, output_tokens, counted, updated_at)
+                VALUES(?::uuid, ?::uuid, ?, ?, ?, ?, ?, true, now())
+                ON CONFLICT(request_id) DO UPDATE
+                   SET actual_micros = excluded.actual_micros,
+                       estimated_micros = excluded.estimated_micros,
+                       input_tokens = excluded.input_tokens,
+                       output_tokens = excluded.output_tokens,
+                       counted = true,
+                       updated_at = now()
+                """)) {
+                ps.setString(1, reqId);
+                ps.setString(2, projectId);
+                ps.setTimestamp(3, targetBucket);
+                ps.setLong(4, newActual);
+                ps.setLong(5, newEstimated);
+                ps.setLong(6, latestInTokens);
+                ps.setLong(7, latestOutTokens);
+                ps.executeUpdate();
+            }
+
+            try (PreparedStatement ps = conn.prepareStatement("""
+                INSERT INTO usage_hourly(project_id, bucket, actual_micros, estimated_micros, input_tokens, output_tokens, event_count, updated_at)
+                VALUES(?::uuid, ?, ?, ?, ?, ?, ?, now())
+                ON CONFLICT(project_id, bucket) DO UPDATE
+                   SET actual_micros = usage_hourly.actual_micros + excluded.actual_micros,
+                       estimated_micros = usage_hourly.estimated_micros + excluded.estimated_micros,
+                       input_tokens = usage_hourly.input_tokens + excluded.input_tokens,
+                       output_tokens = usage_hourly.output_tokens + excluded.output_tokens,
+                       event_count = usage_hourly.event_count + excluded.event_count,
+                       updated_at = now()
+                """)) {
+                ps.setString(1, projectId);
+                ps.setTimestamp(2, targetBucket);
+                ps.setLong(3, deltaActual);
+                ps.setLong(4, deltaEstimated);
+                ps.setLong(5, deltaIn);
+                ps.setLong(6, deltaOut);
+                ps.setLong(7, deltaCount);
+                ps.executeUpdate();
+            }
+        }
+    }
+
+    private static void recomputeProjectUsageFull(Connection conn, String project) throws Exception {
+        try (PreparedStatement aggPs = conn.prepareStatement("""
+            INSERT INTO usage_hourly(project_id, bucket, actual_micros, estimated_micros, input_tokens, output_tokens, event_count)
+            SELECT project_id, date_trunc('hour', first_at),
+                   COALESCE(sum(amount) FILTER(WHERE NOT estimated), 0),
+                   COALESCE(sum(amount) FILTER(WHERE estimated), 0),
+                   COALESCE(sum(input_tokens), 0),
+                   COALESCE(sum(output_tokens), 0),
+                   count(*)
+              FROM (
+                SELECT project_id,
+                       COALESCE(request_id::text, NULLIF(split_part(event_id, ':', 2), ''), event_id) AS identity,
+                       min(created_at) AS first_at,
+                       sum(amount_micros) AS amount,
+                       (array_agg(estimated ORDER BY created_at DESC, event_id DESC))[1] AS estimated,
+                       (array_agg(input_tokens ORDER BY created_at DESC, event_id DESC))[1] AS input_tokens,
+                       (array_agg(output_tokens ORDER BY created_at DESC, event_id DESC))[1] AS output_tokens
+                  FROM ledger
+                 WHERE project_id = ?::uuid
+                 GROUP BY project_id, identity
+              ) entries
+             GROUP BY project_id, date_trunc('hour', first_at)
+            ON CONFLICT(project_id, bucket) DO UPDATE
+               SET actual_micros = excluded.actual_micros,
+                   estimated_micros = excluded.estimated_micros,
+                   input_tokens = excluded.input_tokens,
+                   output_tokens = excluded.output_tokens,
+                   event_count = excluded.event_count,
+                   updated_at = now()
+            """)) {
+            aggPs.setString(1, project);
+            aggPs.executeUpdate();
         }
     }
 
@@ -201,7 +392,7 @@ public class EventWorker {
                    WHERE status IN ('pending', 'leased') AND available_at <= now()
                    ORDER BY created_at
                    FOR UPDATE SKIP LOCKED
-                   LIMIT 50
+                   LIMIT 200
                 )
                 UPDATE outbox o
                    SET status = 'leased', available_at = now() + interval '30 seconds'

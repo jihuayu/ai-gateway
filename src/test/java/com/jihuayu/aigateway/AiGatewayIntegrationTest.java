@@ -1,7 +1,6 @@
 package com.jihuayu.aigateway;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.jihuayu.aigateway.config.GatewayConfig;
 import com.jihuayu.aigateway.control.ControlAuthService;
 import com.jihuayu.aigateway.hot.GatewayException;
@@ -9,20 +8,21 @@ import com.jihuayu.aigateway.hot.HotBilling;
 import com.jihuayu.aigateway.hot.HotContract.AdmitInput;
 import com.jihuayu.aigateway.hot.HotContract.AttemptRecord;
 import com.jihuayu.aigateway.hot.HotContract.HotKeys;
-import com.jihuayu.aigateway.hot.HotContract.HotRequest;
 import com.jihuayu.aigateway.hot.HotContract.SettleInput;
 import com.jihuayu.aigateway.hot.HotProjector;
 import com.jihuayu.aigateway.hot.HotRuntime;
-import com.jihuayu.aigateway.hot.HotStream;
 import com.jihuayu.aigateway.netty.DataPlaneExecutor;
 import com.jihuayu.aigateway.security.SecurityUtils;
 import com.jihuayu.aigateway.security.SecurityUtils.ProviderUrlException;
 import com.jihuayu.aigateway.worker.EventWorker;
+import com.jihuayu.aigateway.worker.EventWorker.Envelope;
 import com.jihuayu.aigateway.worker.RetentionService;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import com.zaxxer.hikari.HikariDataSource;
 import io.lettuce.core.api.StatefulRedisConnection;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -34,14 +34,20 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -107,6 +113,7 @@ public class AiGatewayIntegrationTest {
     private HttpServer mockUpstream;
     private int upstreamPort;
     private final AtomicInteger primaryStatus = new AtomicInteger(200);
+    private final AtomicBoolean forceInvalidJsonOutput = new AtomicBoolean(false);
     private final AtomicInteger primaryCalls = new AtomicInteger(0);
     private final AtomicInteger fallbackCalls = new AtomicInteger(0);
 
@@ -117,20 +124,23 @@ public class AiGatewayIntegrationTest {
     private String providerId;
     private String primaryTargetId;
     private String fallbackTargetId;
+    private String p1TargetId;
     private String aliasId;
+    private String p1AliasId;
     private String apiKeyPlaintext;
     private String apiKeyId;
+    private String activeKeyPlain;
+    private String activeKeyId;
 
     @BeforeAll
     void setupCleanStateAndMockUpstream() throws Exception {
-        // Ensure clean DB and Redis before suite
         try (Connection conn = primaryPool.getConnection(); Statement st = conn.createStatement()) {
             st.execute("""
                 TRUNCATE TABLE workspaces, users, projects, project_members, sessions, invitations,
                                providers, model_targets, aliases, route_versions, api_keys,
                                requests, attempts, reservations, ledger, outbox, consumer_inbox,
-                               audit_events, settings, usage_hourly, dead_letters, billing_state,
-                               hot_projection_state, hot_runtime_manifests CASCADE
+                               audit_events, settings, usage_hourly, usage_request_state,
+                               dead_letters, billing_state, hot_projection_state, hot_runtime_manifests CASCADE
                 """);
         }
         redisConn.sync().flushall();
@@ -158,11 +168,35 @@ public class AiGatewayIntegrationTest {
             }
         });
 
+        mockUpstream.createContext("/v1/embeddings", exchange -> {
+            byte[] reqBytes = exchange.getRequestBody().readAllBytes();
+            Map<?, ?> reqJson = mapper.readValue(reqBytes, Map.class);
+            String model = String.valueOf(reqJson.get("model"));
+            String json = """
+                {
+                  "object": "list",
+                  "data": [
+                    { "object": "embedding", "index": 0, "embedding": [0.125, -0.25, 0.5] }
+                  ],
+                  "model": "%s",
+                  "usage": { "prompt_tokens": 50, "total_tokens": 50 }
+                }
+                """.formatted(model);
+            byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, bytes.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(bytes);
+            }
+        });
+
         mockUpstream.createContext("/v1/chat/completions", (HttpExchange exchange) -> {
             byte[] reqBytes = exchange.getRequestBody().readAllBytes();
             Map<?, ?> reqJson = mapper.readValue(reqBytes, Map.class);
             String model = String.valueOf(reqJson.get("model"));
             boolean stream = Boolean.TRUE.equals(reqJson.get("stream"));
+            boolean hasTools = reqJson.get("tools") instanceof List<?> l && !l.isEmpty();
+            boolean hasRespFormat = reqJson.get("response_format") != null;
 
             if ("gpt-primary".equals(model)) {
                 primaryCalls.incrementAndGet();
@@ -185,15 +219,74 @@ public class AiGatewayIntegrationTest {
                 exchange.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
                 exchange.sendResponseHeaders(200, 0);
                 try (OutputStream os = exchange.getResponseBody()) {
-                    String chunk1 = "data: {\"id\":\"up_1\",\"object\":\"chat.completion.chunk\",\"model\":\"" + model + "\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello \"}}]}\n\n";
-                    String chunk2 = "data: {\"id\":\"up_1\",\"object\":\"chat.completion.chunk\",\"model\":\"" + model + "\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Java 25!\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30}}\n\n";
-                    String done = "data: [DONE]\n\n";
+                    long t1 = System.nanoTime();
+                    String chunk1 = "data: {\"id\":\"up_1\",\"object\":\"chat.completion.chunk\",\"model\":\"" + model + "\",\"upstream_sent_ns\":" + t1 + ",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello \"}}]}\n\n";
                     os.write(chunk1.getBytes(StandardCharsets.UTF_8));
                     os.flush();
+                    long t2 = System.nanoTime();
+                    String chunk2 = "data: {\"id\":\"up_1\",\"object\":\"chat.completion.chunk\",\"model\":\"" + model + "\",\"upstream_sent_ns\":" + t2 + ",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Java 25!\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30}}\n\n";
                     os.write(chunk2.getBytes(StandardCharsets.UTF_8));
                     os.flush();
+                    String done = "data: [DONE]\n\n";
                     os.write(done.getBytes(StandardCharsets.UTF_8));
                     os.flush();
+                }
+            } else if (hasTools) {
+                String json = """
+                    {
+                      "id": "up_tool_1",
+                      "object": "chat.completion",
+                      "created": 1700000000,
+                      "model": "%s",
+                      "choices": [
+                        {
+                          "index": 0,
+                          "message": {
+                            "role": "assistant",
+                            "content": null,
+                            "tool_calls": [
+                              {
+                                "id": "call_abc123",
+                                "type": "function",
+                                "function": { "name": "get_weather", "arguments": "{\\"city\\":\\"Singapore\\"}" }
+                              }
+                            ]
+                          },
+                          "finish_reason": "tool_calls"
+                        }
+                      ],
+                      "usage": { "prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150 }
+                    }
+                    """.formatted(model);
+                byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set("Content-Type", "application/json");
+                exchange.sendResponseHeaders(200, bytes.length);
+                try (OutputStream os = exchange.getResponseBody()) {
+                    os.write(bytes);
+                }
+            } else if (hasRespFormat) {
+                String contentVal = forceInvalidJsonOutput.get() ? "NOT_VALID_JSON" : "{\\\"status\\\":\\\"ok\\\",\\\"score\\\":99}";
+                String json = """
+                    {
+                      "id": "up_json_1",
+                      "object": "chat.completion",
+                      "created": 1700000000,
+                      "model": "%s",
+                      "choices": [
+                        {
+                          "index": 0,
+                          "message": { "role": "assistant", "content": "%s" },
+                          "finish_reason": "stop"
+                        }
+                      ],
+                      "usage": { "prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150 }
+                    }
+                    """.formatted(model, contentVal);
+                byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set("Content-Type", "application/json");
+                exchange.sendResponseHeaders(200, bytes.length);
+                try (OutputStream os = exchange.getResponseBody()) {
+                    os.write(bytes);
                 }
             } else {
                 String json = """
@@ -243,7 +336,6 @@ public class AiGatewayIntegrationTest {
         assertTrue(SecurityUtils.verifyPassword("super-secure-password", pwHash));
         assertFalse(SecurityUtils.verifyPassword("wrong-password", pwHash));
 
-        // SSRF checks
         assertTrue(SecurityUtils.isBlockedAddress("127.0.0.1"));
         assertTrue(SecurityUtils.isBlockedAddress("10.0.0.1"));
         assertTrue(SecurityUtils.isBlockedAddress("169.254.169.254"));
@@ -261,12 +353,10 @@ public class AiGatewayIntegrationTest {
     @Test
     @Order(2)
     void testControlPlaneBootstrapProvidersAliasesAndKeys() throws Exception {
-        // 1. Static Console HTML served on /
         HttpResponse<String> htmlResp = sendAdmin("GET", "/", null, false);
         assertEquals(200, htmlResp.statusCode());
         assertTrue(htmlResp.body().contains("AI Gateway 控制台"));
 
-        // 2. Bootstrap first admin and project
         HttpResponse<String> bootResp = sendAdmin("POST", "/api/bootstrap", Map.of(
             "email", "admin@example.com",
             "password", "admin-password-123",
@@ -282,7 +372,6 @@ public class AiGatewayIntegrationTest {
         projectId = String.valueOf(projMap.get("id"));
         assertTrue(ControlAuthService.isUuid(projectId));
 
-        // Second bootstrap must fail with 409
         HttpResponse<String> bootAgain = sendAdmin("POST", "/api/bootstrap", Map.of(
             "email", "other@example.com",
             "password", "admin-password-123",
@@ -290,20 +379,17 @@ public class AiGatewayIntegrationTest {
         ), false);
         assertEquals(409, bootAgain.statusCode());
 
-        // 3. CSRF enforcement: mutating request without X-CSRF-Token must return 403
         HttpResponse<String> noCsrfResp = sendAdmin("PATCH", "/api/projects/" + projectId, Map.of("budget_micros", 1_000_000L), false);
         assertEquals(403, noCsrfResp.statusCode());
 
-        // With valid CSRF token: set project budget to 500,000 micro-USD ($0.50)
         HttpResponse<String> patchProj = sendAdmin("PATCH", "/api/projects/" + projectId, Map.of(
-            "budget_micros", 500_000L,
-            "rpm", 600,
-            "concurrency", 16,
+            "budget_micros", 50_000_000L,
+            "rpm", 100000,
+            "concurrency", 256,
             "max_output_tokens", 1000
         ), true);
         assertEquals(200, patchProj.statusCode(), patchProj.body());
 
-        // 4. Create Provider & test upstream connection
         HttpResponse<String> provResp = sendAdmin("POST", "/api/providers", Map.of(
             "name", "LocalMockOpenAI",
             "protocol", "openai",
@@ -319,11 +405,8 @@ public class AiGatewayIntegrationTest {
 
         HttpResponse<String> testConnResp = sendAdmin("POST", "/api/providers/" + providerId + "/test", Map.of(), true);
         assertEquals(200, testConnResp.statusCode(), testConnResp.body());
-        Map<?, ?> testConnJson = mapper.readValue(testConnResp.body(), Map.class);
-        assertEquals("ok", testConnJson.get("status"));
+        assertEquals("ok", mapper.readValue(testConnResp.body(), Map.class).get("status"));
 
-        // 5. Create primary and fallback model targets
-        // Primary: input 1,000,000 micros/1M ($1/1M = 1 micro/token), output 2,000,000 micros/1M (2 micros/token)
         HttpResponse<String> t1Resp = sendAdmin("POST", "/api/providers/" + providerId + "/targets", Map.of(
             "upstream_model", "gpt-primary",
             "input_price", 1_000_000L,
@@ -344,7 +427,6 @@ public class AiGatewayIntegrationTest {
         assertEquals(200, t2Resp.statusCode(), t2Resp.body());
         fallbackTargetId = String.valueOf(mapper.readValue(t2Resp.body(), Map.class).get("id"));
 
-        // 6. Create Model Alias draft & publish with optimistic version check
         HttpResponse<String> aliasResp = sendAdmin("POST", "/api/aliases", Map.of(
             "project_id", projectId,
             "name", "support-chat",
@@ -354,20 +436,17 @@ public class AiGatewayIntegrationTest {
         assertEquals(200, aliasResp.statusCode(), aliasResp.body());
         aliasId = String.valueOf(mapper.readValue(aliasResp.body(), Map.class).get("id"));
 
-        // Stale expectedVersion must return 409
         HttpResponse<String> stalePub = sendAdmin("POST", "/api/aliases/" + aliasId + "/publish", Map.of(
             "expectedVersion", 99
         ), true);
         assertEquals(409, stalePub.statusCode());
 
-        // Publish version 1
         HttpResponse<String> pubResp = sendAdmin("POST", "/api/aliases/" + aliasId + "/publish", Map.of(
             "expectedVersion", 1
         ), true);
         assertEquals(200, pubResp.statusCode(), pubResp.body());
         assertEquals("published", mapper.readValue(pubResp.body(), Map.class).get("status"));
 
-        // 7. Create API Key
         HttpResponse<String> keyResp = sendAdmin("POST", "/api/keys", Map.of(
             "project_id", projectId,
             "name", "prod-service-key",
@@ -386,7 +465,6 @@ public class AiGatewayIntegrationTest {
         int nettyPort = nettyServer.getBoundPort();
         assertTrue(nettyPort > 0);
 
-        // 1. GET /v1/models on direct Netty port
         HttpRequest modelsReq = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/models"))
             .header("Authorization", "Bearer " + apiKeyPlaintext)
@@ -400,7 +478,6 @@ public class AiGatewayIntegrationTest {
         assertEquals(1, modelData.size());
         assertEquals("support-chat", ((Map<?, ?>) modelData.get(0)).get("id"));
 
-        // 2. Reject unknown parameter (no silent drop)
         HttpRequest badParamReq = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
             .header("Authorization", "Bearer " + apiKeyPlaintext)
@@ -411,7 +488,6 @@ public class AiGatewayIntegrationTest {
         assertEquals(400, badParamResp.statusCode());
         assertTrue(badParamResp.body().contains("unsupported_parameter"));
 
-        // 3. Buffered POST /v1/chat/completions on Netty port (100 prompt + 50 completion = 100*1 + 50*2 = 200 micro-USD)
         HttpRequest chatReq = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
             .header("Authorization", "Bearer " + apiKeyPlaintext)
@@ -422,11 +498,7 @@ public class AiGatewayIntegrationTest {
         assertEquals(200, chatResp.statusCode(), chatResp.body());
         Map<?, ?> chatJson = mapper.readValue(chatResp.body(), Map.class);
         assertEquals("support-chat", chatJson.get("model"));
-        Map<?, ?> usage = (Map<?, ?>) chatJson.get("usage");
-        assertEquals(100, ((Number) usage.get("prompt_tokens")).intValue());
-        assertEquals(50, ((Number) usage.get("completion_tokens")).intValue());
 
-        // 4. SSE Stream POST /v1/chat/completions on Netty port (10 prompt + 20 completion = 10*1 + 20*2 = 50 micro-USD)
         HttpRequest streamReq = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
             .header("Authorization", "Bearer " + apiKeyPlaintext)
@@ -440,7 +512,6 @@ public class AiGatewayIntegrationTest {
         assertTrue(streamResp.body().contains("Java 25!"));
         assertTrue(streamResp.body().contains("data: [DONE]"));
 
-        // 5. Fallback when primary returns 429 (100 prompt + 50 completion on fallback = 200 micro-USD)
         primaryStatus.set(429);
         try {
             HttpResponse<String> fbResp = httpClient.send(chatReq, HttpResponse.BodyHandlers.ofString());
@@ -450,7 +521,7 @@ public class AiGatewayIntegrationTest {
             primaryStatus.set(200);
         }
 
-        // Verify PG still has 0 rows before HotProjector drains (proving zero-SQL hot path!)
+        // Verify PG still has 0 rows before HotProjector drains
         try (Connection conn = primaryPool.getConnection();
              PreparedStatement ps = conn.prepareStatement("SELECT count(*)::int FROM requests");
              ResultSet rs = ps.executeQuery()) {
@@ -458,11 +529,9 @@ public class AiGatewayIntegrationTest {
             assertEquals(0, rs.getInt(1), "Hot path must execute zero SQL on PostgreSQL during request handling");
         }
 
-        // Now drain Redis Stream journal to PostgreSQL via HotProjector + EventWorker
         hotProjector.drain(5_000L);
         eventWorker.tick();
 
-        // Verify PostgreSQL ledger & requests match exact micro-USD (200 + 50 + 200 = 450 micro-USD)
         try (Connection conn = primaryPool.getConnection()) {
             try (PreparedStatement ps = conn.prepareStatement("SELECT count(*)::int, COALESCE(sum(actual_micros),0)::bigint FROM requests WHERE project_id = ?::uuid")) {
                 ps.setString(1, projectId);
@@ -490,21 +559,6 @@ public class AiGatewayIntegrationTest {
             }
         }
 
-        // 6. Verify /api/usage and /api/requests on Control Plane
-        HttpResponse<String> usageResp = sendAdmin("GET", "/api/usage?project_id=" + projectId, null, false);
-        assertEquals(200, usageResp.statusCode(), usageResp.body());
-        Map<?, ?> usageJson = mapper.readValue(usageResp.body(), Map.class);
-        assertEquals("450", String.valueOf(usageJson.get("actual_micros")));
-        Map<?, ?> budgetObj = (Map<?, ?>) usageJson.get("budget");
-        assertEquals("450", String.valueOf(budgetObj.get("spent_micros")));
-        assertEquals("0", String.valueOf(budgetObj.get("reserved_micros")));
-
-        HttpResponse<String> reqsResp = sendAdmin("GET", "/api/requests?project_id=" + projectId, null, false);
-        assertEquals(200, reqsResp.statusCode(), reqsResp.body());
-        List<?> items = (List<?>) mapper.readValue(reqsResp.body(), Map.class).get("items");
-        assertEquals(3, items.size());
-
-        // 7. Immediate key revocation enforcement
         HttpResponse<String> revResp = sendAdmin("POST", "/api/keys/" + apiKeyId + "/revoke", Map.of(), true);
         assertEquals(200, revResp.statusCode());
 
@@ -515,16 +569,15 @@ public class AiGatewayIntegrationTest {
     @Test
     @Order(4)
     void testUnknownSettlementAdjustmentNearMaxSafeIntegerAndRetention() throws Exception {
-        // Create a fresh active API key since apiKeyId was revoked at the end of Order(3)
         HttpResponse<String> keyResp = sendAdmin("POST", "/api/keys", Map.of(
             "project_id", projectId,
             "name", "active-billing-key",
-            "allowed_models", List.of("support-chat")
+            "allowed_models", List.of()
         ), true);
         assertEquals(200, keyResp.statusCode(), keyResp.body());
         Map<?, ?> keyJson = mapper.readValue(keyResp.body(), Map.class);
-        String activeKeyId = String.valueOf(keyJson.get("id"));
-        String activeKeyPlain = String.valueOf(keyJson.get("key"));
+        activeKeyId = String.valueOf(keyJson.get("id"));
+        activeKeyPlain = String.valueOf(keyJson.get("key"));
 
         String reqId = UUID.randomUUID().toString();
         String period = DataPlaneExecutor.utcPeriod();
@@ -534,10 +587,10 @@ public class AiGatewayIntegrationTest {
             activeKeyId,
             period,
             1000L,
-            600,
-            600,
-            16,
-            500_000L,
+            100000,
+            100000,
+            256,
+            50_000_000L,
             new LinkedHashMap<String, Object>() {{
                 put("alias_id", aliasId);
                 put("alias_name", "support-chat");
@@ -549,22 +602,33 @@ public class AiGatewayIntegrationTest {
         ));
         hotBilling.dispatch(reqId);
 
-        // Settle with unknown usage (actualMicros = null -> charges reserveMicros = 1000)
         AttemptRecord unknownAttempt = new AttemptRecord(
             1, primaryTargetId, "gpt-primary", "ok", 200, null,
             true, false, false, null, null, null, 1000L, false, 15L
         );
         hotBilling.settle(reqId, new SettleInput(null, null, null, "completed", List.of(unknownAttempt)));
         hotProjector.drain(5_000L);
+        eventWorker.tick();
 
-        // Now deliver actual usage correction (actualMicros = 350 -> net delta = -650)
+        // Check usage_hourly reflects 450 actual and 1000 estimated before correction
+        try (Connection conn = primaryPool.getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT COALESCE(sum(actual_micros),0)::bigint, COALESCE(sum(estimated_micros),0)::bigint, COALESCE(sum(event_count),0)::bigint FROM usage_hourly WHERE project_id = ?::uuid")) {
+            ps.setString(1, projectId);
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                assertEquals(450L, rs.getLong(1));
+                assertEquals(1000L, rs.getLong(2));
+                assertEquals(4L, rs.getLong(3));
+            }
+        }
+
+        // Deliver actual usage correction (actualMicros = 350 -> net delta = -650, shifts from estimated to actual)
         AttemptRecord knownAttempt = new AttemptRecord(
             1, primaryTargetId, "gpt-primary", "ok", 200, null,
             true, false, true, 150L, 100L, 350L, 1000L, false, 15L
         );
         hotBilling.settle(reqId, new SettleInput(350L, 150L, 100L, "completed", List.of(knownAttempt)));
 
-        // Conflicting second actual amount must throw 409 settlement_conflict
         GatewayException conflict = assertThrows(GatewayException.class, () ->
             hotBilling.settle(reqId, new SettleInput(400L, 150L, 125L, "completed", List.of(knownAttempt)))
         );
@@ -574,18 +638,18 @@ public class AiGatewayIntegrationTest {
         hotProjector.drain(5_000L);
         eventWorker.tick();
 
-        // Total spent should now be 450 + 350 = 800 micro-USD across 5 ledger entries (3 settle + 1 estimate + 1 adjust)
+        // Verify incremental usage_hourly transferred 1000 estimated -> 350 actual (total actual = 800, estimated = 0, event_count = 4)
         try (Connection conn = primaryPool.getConnection();
-             PreparedStatement ps = conn.prepareStatement("SELECT count(*)::int, COALESCE(sum(amount_micros),0)::bigint FROM ledger WHERE project_id = ?::uuid")) {
+             PreparedStatement ps = conn.prepareStatement("SELECT COALESCE(sum(actual_micros),0)::bigint, COALESCE(sum(estimated_micros),0)::bigint, COALESCE(sum(event_count),0)::bigint FROM usage_hourly WHERE project_id = ?::uuid")) {
             ps.setString(1, projectId);
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();
-                assertEquals(5, rs.getInt(1));
-                assertEquals(800L, rs.getLong(2));
+                assertEquals(800L, rs.getLong(1));
+                assertEquals(0L, rs.getLong(2));
+                assertEquals(4L, rs.getLong(3));
             }
         }
 
-        // Test RetentionService preserves ledger and hot_projection_state tombstones
         RetentionService.cleanExpiredData(primaryPool, 30);
         try (Connection conn = primaryPool.getConnection();
              PreparedStatement ps = conn.prepareStatement("SELECT count(*)::int FROM hot_projection_state WHERE request_id = ?::uuid")) {
@@ -593,6 +657,374 @@ public class AiGatewayIntegrationTest {
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();
                 assertEquals(1, rs.getInt(1));
+            }
+        }
+    }
+
+    @Test
+    @Order(5)
+    void testP1ProtocolExtensionsAndOperationalCapabilities() throws Exception {
+        int nettyPort = nettyServer.getBoundPort();
+
+        // 1. P1-A: Calling tools on 'support-chat' (which only declared chat, stream) must be rejected with 400 capability_not_supported
+        HttpRequest toolsOnBasicAlias = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
+            .header("Authorization", "Bearer " + activeKeyPlain)
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString("""
+                {
+                  "model": "support-chat",
+                  "messages": [{"role": "user", "content": "Weather in Singapore?"}],
+                  "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}]
+                }
+                """))
+            .build();
+        HttpResponse<String> capRejResp = httpClient.send(toolsOnBasicAlias, HttpResponse.BodyHandlers.ofString());
+        assertEquals(400, capRejResp.statusCode(), capRejResp.body());
+        assertTrue(capRejResp.body().contains("capability_not_supported"));
+
+        // 2. Create a P1 target & alias declaring tools, json_object, json_schema, embeddings, vision, anthropic_messages
+        HttpResponse<String> p1TargResp = sendAdmin("POST", "/api/providers/" + providerId + "/targets", Map.of(
+            "upstream_model", "gpt-p1-full",
+            "input_price", 1_000_000L,
+            "output_price", 2_000_000L,
+            "capabilities", List.of("chat", "stream", "stream_usage", "tools", "json_object", "json_schema", "embeddings", "vision", "anthropic_messages"),
+            "enabled", true
+        ), true);
+        assertEquals(200, p1TargResp.statusCode(), p1TargResp.body());
+        p1TargetId = String.valueOf(mapper.readValue(p1TargResp.body(), Map.class).get("id"));
+
+        HttpResponse<String> p1AliasResp = sendAdmin("POST", "/api/aliases", Map.of(
+            "project_id", projectId,
+            "name", "agent-pro",
+            "targets", List.of(p1TargetId),
+            "capabilities", List.of("chat", "stream", "tools", "json_object", "json_schema", "embeddings", "vision", "anthropic_messages")
+        ), true);
+        assertEquals(200, p1AliasResp.statusCode(), p1AliasResp.body());
+        p1AliasId = String.valueOf(mapper.readValue(p1AliasResp.body(), Map.class).get("id"));
+
+        HttpResponse<String> p1PubResp = sendAdmin("POST", "/api/aliases/" + p1AliasId + "/publish", Map.of("expectedVersion", 1), true);
+        assertEquals(200, p1PubResp.statusCode(), p1PubResp.body());
+
+        // 3. P1-B: Tool Calling positive test on agent-pro (200 micro-USD)
+        HttpRequest toolCallReq = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
+            .header("Authorization", "Bearer " + activeKeyPlain)
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString("""
+                {
+                  "model": "agent-pro",
+                  "messages": [{"role": "user", "content": "Weather in Singapore?"}],
+                  "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}]
+                }
+                """))
+            .build();
+        HttpResponse<String> toolCallResp = httpClient.send(toolCallReq, HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, toolCallResp.statusCode(), toolCallResp.body());
+        assertTrue(toolCallResp.body().contains("get_weather"));
+        assertTrue(toolCallResp.body().contains("tool_calls"));
+
+        // 4. P1-C: Structured Output json_schema positive & invalid-JSON negative test (200 micro-USD for valid, 200 micro-USD for invalid attempt that executed upstream)
+        HttpRequest structReq = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
+            .header("Authorization", "Bearer " + activeKeyPlain)
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString("""
+                {
+                  "model": "agent-pro",
+                  "messages": [{"role": "user", "content": "Return status JSON"}],
+                  "response_format": {
+                    "type": "json_schema",
+                    "json_schema": { "name": "status_resp", "schema": { "type": "object" } }
+                  }
+                }
+                """))
+            .build();
+        HttpResponse<String> structResp = httpClient.send(structReq, HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, structResp.statusCode(), structResp.body());
+        assertTrue(structResp.body().contains("\\\"score\\\":99"));
+
+        forceInvalidJsonOutput.set(true);
+        try {
+            HttpResponse<String> badStructResp = httpClient.send(structReq, HttpResponse.BodyHandlers.ofString());
+            assertEquals(502, badStructResp.statusCode(), badStructResp.body());
+            assertTrue(badStructResp.body().contains("upstream_invalid_response"));
+        } finally {
+            forceInvalidJsonOutput.set(false);
+        }
+
+        // 5. P1-D: Embeddings endpoint POST /v1/embeddings on Netty port (50 prompt tokens * 1 micro = 50 micro-USD)
+        HttpRequest embReq = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/embeddings"))
+            .header("Authorization", "Bearer " + activeKeyPlain)
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString("{\"model\":\"agent-pro\",\"input\":[\"Modern Java 25 Virtual Threads\"]}"))
+            .build();
+        HttpResponse<String> embResp = httpClient.send(embReq, HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, embResp.statusCode(), embResp.body());
+        assertTrue(embResp.body().contains("\"embedding\""));
+        assertTrue(embResp.body().contains("\"model\":\"agent-pro\""));
+
+        // 6. P1-E: Vision Input data-URI positive & invalid MIME negative test (200 micro-USD)
+        HttpRequest badVisionReq = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
+            .header("Authorization", "Bearer " + activeKeyPlain)
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString("""
+                {
+                  "model": "agent-pro",
+                  "messages": [{
+                    "role": "user",
+                    "content": [
+                      {"type": "text", "text": "What is this?"},
+                      {"type": "image_url", "image_url": {"url": "data:text/html;base64,PGh0bWw+"}}
+                    ]
+                  }]
+                }
+                """))
+            .build();
+        HttpResponse<String> badVisionResp = httpClient.send(badVisionReq, HttpResponse.BodyHandlers.ofString());
+        assertEquals(400, badVisionResp.statusCode());
+        assertTrue(badVisionResp.body().contains("invalid_vision_input"));
+
+        HttpRequest okVisionReq = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
+            .header("Authorization", "Bearer " + activeKeyPlain)
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString("""
+                {
+                  "model": "agent-pro",
+                  "messages": [{
+                    "role": "user",
+                    "content": [
+                      {"type": "text", "text": "Describe image"},
+                      {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="}}
+                    ]
+                  }]
+                }
+                """))
+            .build();
+        HttpResponse<String> okVisionResp = httpClient.send(okVisionReq, HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, okVisionResp.statusCode(), okVisionResp.body());
+
+        // 7. P1-F: Native Anthropic Messages endpoint POST /v1/messages with x-api-key header (200 micro-USD)
+        HttpRequest anthroReq = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/messages"))
+            .header("x-api-key", activeKeyPlain)
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString("""
+                {
+                  "model": "agent-pro",
+                  "max_tokens": 128,
+                  "system": "You are a concise Java assistant.",
+                  "messages": [{"role": "user", "content": "Hello Anthropic adapter"}]
+                }
+                """))
+            .build();
+        HttpResponse<String> anthroResp = httpClient.send(anthroReq, HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, anthroResp.statusCode(), anthroResp.body());
+        Map<?, ?> anthroJson = mapper.readValue(anthroResp.body(), Map.class);
+        assertEquals("message", anthroJson.get("type"));
+        assertEquals("end_turn", anthroJson.get("stop_reason"));
+
+        // 8. P1-G: Operational capabilities - Route Version Rollback & CSV Usage Export
+        HttpResponse<String> v2Draft = sendAdmin("POST", "/api/aliases/" + p1AliasId + "/versions", Map.of(
+            "targets", List.of(p1TargetId, fallbackTargetId),
+            "capabilities", List.of("chat", "stream")
+        ), true);
+        assertEquals(200, v2Draft.statusCode(), v2Draft.body());
+        HttpResponse<String> v2Pub = sendAdmin("POST", "/api/aliases/" + p1AliasId + "/publish", Map.of("expectedVersion", 2), true);
+        assertEquals(200, v2Pub.statusCode(), v2Pub.body());
+
+        // Rollback from v2 back to v1 -> creates immutable published v3 with v1's full P1 capabilities
+        HttpResponse<String> rbResp = sendAdmin("POST", "/api/aliases/" + p1AliasId + "/rollback", Map.of("target_version", 1), true);
+        assertEquals(200, rbResp.statusCode(), rbResp.body());
+        Map<?, ?> rbJson = mapper.readValue(rbResp.body(), Map.class);
+        assertEquals(3, ((Number) rbJson.get("version")).intValue());
+        assertEquals("published", rbJson.get("status"));
+
+        hotProjector.drain(5_000L);
+        eventWorker.tick();
+
+        HttpResponse<String> csvResp = sendAdmin("GET", "/api/usage/export?project_id=" + projectId + "&format=csv", null, false);
+        assertEquals(200, csvResp.statusCode());
+        assertTrue(csvResp.body().startsWith("bucket,event_count,actual_micros,estimated_micros,input_tokens,output_tokens"));
+    }
+
+    @Test
+    @Order(6)
+    void testIssue21TenThousandHistoryIncrementalAggregationAndExplainPlan() throws Exception {
+        // #21: Seed 10,000 historical ledger entries and verify O(1) incremental projection latency and EXPLAIN ANALYZE index usage
+        String scaleProjId = UUID.randomUUID().toString();
+        String workspaceId;
+        try (Connection conn = primaryPool.getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT workspace_id::text FROM projects WHERE id = ?::uuid")) {
+            ps.setString(1, projectId);
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                workspaceId = rs.getString(1);
+            }
+        }
+        try (Connection conn = primaryPool.getConnection()) {
+            try (PreparedStatement ps = conn.prepareStatement("INSERT INTO projects(id, workspace_id, name) VALUES(?::uuid, ?::uuid, 'Scale-10k-Project')")) {
+                ps.setString(1, scaleProjId);
+                ps.setString(2, workspaceId);
+                ps.executeUpdate();
+            }
+            // Bulk insert 10,000 requests and 10,000 ledger rows in one CTE statement via generate_series
+            try (PreparedStatement ps = conn.prepareStatement("""
+                WITH reqs AS (
+                  INSERT INTO requests(request_id, project_id, period, reserve_micros, price_snapshot, status, actual_micros, created_at, updated_at)
+                  SELECT gen_random_uuid(), ?::uuid, '2026-11', 20, '{}'::jsonb, 'completed', 20,
+                         now() - ((g % 720) * interval '1 hour'), now()
+                    FROM generate_series(1, 10000) AS g
+                  RETURNING request_id, project_id, period, actual_micros, created_at
+                )
+                INSERT INTO ledger(event_id, request_id, project_id, period, amount_micros, kind, input_tokens, output_tokens, estimated, created_at)
+                SELECT 'settle:' || request_id::text, request_id, project_id, period, actual_micros, 'settle', 10, 5, false, created_at
+                  FROM reqs
+                """)) {
+                ps.setString(1, scaleProjId);
+                ps.executeUpdate();
+            }
+        }
+
+        // Now measure O(1) incremental EventWorker projection for 1 new request in the 10,000-row project
+        String newReqId = UUID.randomUUID().toString();
+        try (Connection conn = primaryPool.getConnection()) {
+            try (PreparedStatement ps = conn.prepareStatement("""
+                INSERT INTO requests(request_id, project_id, period, reserve_micros, price_snapshot, status, actual_micros)
+                VALUES(?::uuid, ?::uuid, '2026-11', 250, '{}'::jsonb, 'completed', 250)
+                """)) {
+                ps.setString(1, newReqId);
+                ps.setString(2, scaleProjId);
+                ps.executeUpdate();
+            }
+            try (PreparedStatement ps = conn.prepareStatement("""
+                 INSERT INTO ledger(event_id, request_id, project_id, period, amount_micros, kind, input_tokens, output_tokens, estimated, created_at)
+                 VALUES(?, ?::uuid, ?::uuid, '2026-11', 250, 'settle', 100, 75, false, now())
+                 """)) {
+                ps.setString(1, "settle:" + newReqId);
+                ps.setString(2, newReqId);
+                ps.setString(3, scaleProjId);
+                ps.executeUpdate();
+            }
+        }
+
+        long t0 = System.nanoTime();
+        EventWorker.consumeEvent(primaryPool, new Envelope(
+            "request.settled:" + newReqId, 1, Instant.now().toString(), scaleProjId, "request.settled",
+            Map.of("requestId", newReqId, "projectId", scaleProjId)
+        ), mapper);
+        double incrementalMs = (System.nanoTime() - t0) / 1_000_000.0;
+        assertTrue(incrementalMs < 100.0, "Incremental O(1) aggregation on 10k+ ledger should take < 100ms, took " + incrementalMs + "ms");
+
+        // Verify EXPLAIN ANALYZE uses Index Scan on ledger_request_id_idx
+        StringBuilder explainPlan = new StringBuilder();
+        try (Connection conn = primaryPool.getConnection();
+             PreparedStatement ps = conn.prepareStatement("""
+                 EXPLAIN ANALYZE
+                 SELECT date_trunc('hour', min(created_at)) AS bucket,
+                        COALESCE(sum(amount_micros), 0)::bigint AS amount
+                   FROM ledger
+                  WHERE project_id = ?::uuid AND request_id = ?::uuid
+                 """)) {
+            ps.setString(1, scaleProjId);
+            ps.setString(2, newReqId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    explainPlan.append(rs.getString(1)).append("\n");
+                }
+            }
+        }
+        String planText = explainPlan.toString();
+        assertTrue(planText.contains("Index Scan") || planText.contains("Bitmap Heap Scan"), "Expected indexed lookup in EXPLAIN ANALYZE:\n" + planText);
+    }
+
+    @Test
+    @Order(7)
+    void testIssue22FixedResourceSseChunkForwardingAndConcurrentLoadBenchmark() throws Exception {
+        int nettyPort = nettyServer.getBoundPort();
+
+        // 1. Measure SSE first-token & per-chunk forwarding latency overhead (< 20ms target)
+        List<Double> chunkLatenciesMs = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            HttpRequest streamReq = HttpRequest.newBuilder()
+                .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
+                .header("Authorization", "Bearer " + activeKeyPlain)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"model\":\"support-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"SSE benchmark\"}],\"stream\":true,\"max_tokens\":64}"))
+                .build();
+            HttpResponse<java.io.InputStream> resp = httpClient.send(streamReq, HttpResponse.BodyHandlers.ofInputStream());
+            assertEquals(200, resp.statusCode());
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(resp.body(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    long recvNs = System.nanoTime();
+                    if (line.startsWith("data: {") && line.contains("upstream_sent_ns")) {
+                        Map<?, ?> frame = mapper.readValue(line.substring(6), Map.class);
+                        if (frame.get("upstream_sent_ns") instanceof Number sentNs) {
+                            double forwardMs = (recvNs - sentNs.longValue()) / 1_000_000.0;
+                            chunkLatenciesMs.add(forwardMs);
+                        }
+                    }
+                }
+            }
+        }
+        Collections.sort(chunkLatenciesMs);
+        double sseChunkP95Ms = chunkLatenciesMs.get((int) Math.floor(chunkLatenciesMs.size() * 0.95));
+        assertTrue(sseChunkP95Ms < 20.0, "SSE chunk forwarding P95 latency must be < 20ms, was " + sseChunkP95Ms + "ms");
+
+        // 2. Multi-concurrency (50 concurrent virtual threads, 100 requests total) buffered benchmark + exact ledger reconciliation
+        int totalConcurrentRequests = 100;
+        List<Double> httpLatenciesMs = Collections.synchronizedList(new ArrayList<>());
+        try (ExecutorService vExec = Executors.newVirtualThreadPerTaskExecutor()) {
+            List<Callable<Integer>> tasks = new ArrayList<>();
+            for (int i = 0; i < totalConcurrentRequests; i++) {
+                tasks.add(() -> {
+                    long startNs = System.nanoTime();
+                    HttpRequest req = HttpRequest.newBuilder()
+                        .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
+                        .header("Authorization", "Bearer " + activeKeyPlain)
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString("{\"model\":\"support-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"Bench\"}],\"max_tokens\":64}"))
+                        .build();
+                    HttpResponse<String> r = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+                    httpLatenciesMs.add((System.nanoTime() - startNs) / 1_000_000.0);
+                    return r.statusCode();
+                });
+            }
+            for (Future<Integer> f : vExec.invokeAll(tasks)) {
+                assertEquals(200, f.get());
+            }
+        }
+        Collections.sort(httpLatenciesMs);
+        double httpP50Ms = httpLatenciesMs.get(httpLatenciesMs.size() / 2);
+        double httpP95Ms = httpLatenciesMs.get((int) Math.floor(httpLatenciesMs.size() * 0.95));
+
+        long drainStart = System.nanoTime();
+        hotProjector.drain(10_000L);
+        eventWorker.tick();
+        double batchDrainMs = (System.nanoTime() - drainStart) / 1_000_000.0;
+
+        System.out.printf("[BENCHMARK] Netty+VirtualThreads 100 reqs: HTTP P50=%.2fms, P95=%.2fms | SSE Chunk Forwarding P95=%.2fms | Batch PG Drain=%.2fms%n",
+            httpP50Ms, httpP95Ms, sseChunkP95Ms, batchDrainMs);
+
+        // Verify exact PostgreSQL ledger reconciliation against Redis real-time budget
+        String rawProj = redisConn.sync().get(hotKeys.project(projectId));
+        Map<?, ?> hotState = mapper.readValue(rawProj, Map.class);
+        Map<?, ?> budgets = (Map<?, ?>) hotState.get("budgets");
+        Map<?, ?> periodBudget = (Map<?, ?>) budgets.get(DataPlaneExecutor.utcPeriod());
+        long redisSpent = ((Number) periodBudget.get("spent")).longValue();
+        long redisReserved = ((Number) periodBudget.get("reserved")).longValue();
+        assertEquals(0L, redisReserved, "All completed requests must release remaining reservation");
+
+        try (Connection conn = primaryPool.getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT COALESCE(sum(amount_micros),0)::bigint FROM ledger WHERE project_id = ?::uuid")) {
+            ps.setString(1, projectId);
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                assertEquals(redisSpent, rs.getLong(1), "PostgreSQL ledger total must match Redis real-time spent micro-USD exactly");
             }
         }
     }

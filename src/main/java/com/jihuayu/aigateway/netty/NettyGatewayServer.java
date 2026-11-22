@@ -123,6 +123,7 @@ public class NettyGatewayServer {
             String path = uri.contains("?") ? uri.substring(0, uri.indexOf('?')) : uri;
             HttpMethod method = req.method();
             String authHeader = req.headers().get(HttpHeaderNames.AUTHORIZATION);
+            String xApiKeyHeader = req.headers().get("x-api-key");
 
             ByteBuf content = req.content();
             byte[] bodyBytes = new byte[content.readableBytes()];
@@ -148,6 +149,16 @@ public class NettyGatewayServer {
                 if (HttpMethod.POST.equals(method) && "/v1/chat/completions".equals(path)) {
                     NettyResponseSender sender = new NettyResponseSender(ch);
                     dataPlane.handleChat(authHeader, bodyBytes, requestId, sender);
+                    return;
+                }
+                if (HttpMethod.POST.equals(method) && "/v1/embeddings".equals(path)) {
+                    NettyResponseSender sender = new NettyResponseSender(ch);
+                    dataPlane.handleEmbeddings(authHeader, bodyBytes, requestId, sender);
+                    return;
+                }
+                if (HttpMethod.POST.equals(method) && "/v1/messages".equals(path)) {
+                    NettyResponseSender sender = new NettyResponseSender(ch);
+                    dataPlane.handleAnthropicMessages(authHeader, xApiKeyHeader, bodyBytes, requestId, sender);
                     return;
                 }
                 sendJsonDirect(ch, 404, requestId, "{\"error\":{\"code\":\"not_found\",\"message\":\"Not found\"},\"request_id\":\"" + requestId + "\"}", null);

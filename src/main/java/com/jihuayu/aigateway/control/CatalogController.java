@@ -287,6 +287,93 @@ public class CatalogController {
         }
     }
 
+
+    @PostMapping("/api/aliases/{id}/rollback")
+    public Map<String, Object> rollbackAlias(HttpServletRequest req, @PathVariable("id") String aliasId, @RequestBody(required = false) Map<String, Object> body) {
+        requireUuidOr404(aliasId);
+        Object targetVerObj = body != null ? (body.get("target_version") != null ? body.get("target_version") : body.get("targetVersion")) : null;
+        if (!(targetVerObj instanceof Number n) || n.doubleValue() != Math.floor(n.doubleValue()) || n.intValue() < 1) {
+            throw new GatewayException(400, "validation_error", "target_version is required and must be a positive integer");
+        }
+        int targetVersionNo = n.intValue();
+        try (Connection conn = pool.getConnection()) {
+            AliasAccess acc = aliasForAccess(req, conn, aliasId, true);
+            List<String> oldTargets;
+            List<String> oldCaps;
+            int newVersion;
+            String newVersionId = UUID.randomUUID().toString();
+            List<TargetDetail> targets;
+            Map<String, Object> snapshot;
+
+            boolean oldAuto = conn.getAutoCommit();
+            conn.setAutoCommit(false);
+            try {
+                try (PreparedStatement ps = conn.prepareStatement("SELECT id FROM aliases WHERE id = ?::uuid FOR UPDATE")) {
+                    ps.setString(1, aliasId);
+                    ps.executeQuery();
+                }
+                try (PreparedStatement ps = conn.prepareStatement("SELECT targets::text, capabilities::text FROM route_versions WHERE alias_id = ?::uuid AND version = ? AND status = 'published'")) {
+                    ps.setString(1, aliasId);
+                    ps.setInt(2, targetVersionNo);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (!rs.next()) {
+                            throw new GatewayException(404, "version_not_found", "Published target version not found");
+                        }
+                        oldTargets = parseJsonList(rs.getString(1));
+                        oldCaps = parseJsonList(rs.getString(2));
+                    }
+                }
+                targets = loadTargets(conn, acc.workspaceId(), oldTargets);
+                requireCoverage(targets, oldCaps);
+                snapshot = buildPriceSnapshot(targets);
+                try (PreparedStatement ps = conn.prepareStatement("SELECT COALESCE(MAX(version), 0) + 1 FROM route_versions WHERE alias_id = ?::uuid")) {
+                    ps.setString(1, aliasId);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        rs.next();
+                        newVersion = rs.getInt(1);
+                    }
+                }
+                try (PreparedStatement ps = conn.prepareStatement(
+                    "INSERT INTO route_versions (id, alias_id, version, targets, capabilities, price_snapshot, status, created_by, published_at) " +
+                    "VALUES (?::uuid, ?::uuid, ?, ?::jsonb, ?::jsonb, ?::jsonb, 'published', ?::uuid, now())")) {
+                    ps.setString(1, newVersionId);
+                    ps.setString(2, aliasId);
+                    ps.setInt(3, newVersion);
+                    ps.setString(4, mapper.writeValueAsString(oldTargets));
+                    ps.setString(5, mapper.writeValueAsString(oldCaps));
+                    ps.setString(6, mapper.writeValueAsString(snapshot));
+                    ps.setString(7, acc.auth().userId());
+                    ps.executeUpdate();
+                }
+                try (PreparedStatement ps = conn.prepareStatement("UPDATE aliases SET current_version_id = ?::uuid, updated_at = now() WHERE id = ?::uuid")) {
+                    ps.setString(1, newVersionId);
+                    ps.setString(2, aliasId);
+                    ps.executeUpdate();
+                }
+                conn.commit();
+            } catch (Exception e) {
+                conn.rollback();
+                throw e;
+            } finally {
+                conn.setAutoCommit(oldAuto);
+            }
+            authService.audit(conn, acc.auth(), acc.projectId(), "alias.rollback", "alias", aliasId, Map.of(
+                "from_version", targetVersionNo, "new_version", newVersion, "version_id", newVersionId
+            ));
+            hotRuntime.publish();
+            Map<String, TargetDetail> detailMap = new LinkedHashMap<>();
+            for (TargetDetail t : targets) detailMap.put(t.id(), t);
+            return buildAliasPublic(
+                aliasId, acc.projectId(), acc.name(), newVersionId, newVersion, oldTargets, oldCaps, snapshot,
+                null, null, List.of(), List.of(), Map.of(), detailMap
+            );
+        } catch (GatewayException ge) {
+            throw ge;
+        } catch (Exception e) {
+            throw new GatewayException(500, "internal_error", "Failed to rollback alias");
+        }
+    }
+
     @GetMapping("/api/keys")
     public Map<String, Object> listKeysQuery(HttpServletRequest req, @RequestParam(value = "project_id", required = false) String projectId) {
         return doListKeys(req, requireQueryProjectId(projectId));

@@ -15,7 +15,8 @@ public final class DatabaseMigrator {
         "002_integrity.sql",
         "003_billing_state.sql",
         "004_hot_projection.sql",
-        "005_single_hot_owner.sql"
+        "005_single_hot_owner.sql",
+        "006_incremental_usage.sql"
     );
 
     private DatabaseMigrator() {}

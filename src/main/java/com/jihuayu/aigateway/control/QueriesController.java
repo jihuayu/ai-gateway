@@ -417,6 +417,115 @@ public class QueriesController {
         }
     }
 
+
+    @GetMapping("/api/usage/export")
+    public ResponseEntity<String> exportUsage(
+        HttpServletRequest req,
+        @RequestParam(value = "project_id", required = false) String p1,
+        @RequestParam(value = "projectId", required = false) String p2,
+        @RequestParam(value = "from", required = false) String fromStr,
+        @RequestParam(value = "to", required = false) String toStr,
+        @RequestParam(value = "format", required = false, defaultValue = "json") String format
+    ) {
+        Map<String, Object> usageData = getUsage(req, p1, p2, fromStr, toStr);
+        String projectId = resolveProjectId(p1, p2);
+        SessionInfo auth = authService.authenticateSession(req);
+        authService.audit(auth, projectId, "usage.export", "project", projectId, Map.of("format", format));
+        if ("csv".equalsIgnoreCase(format)) {
+            StringBuilder csv = new StringBuilder("bucket,event_count,actual_micros,estimated_micros,input_tokens,output_tokens\n");
+            if (usageData.get("series") instanceof List<?> series) {
+                for (Object item : series) {
+                    if (item instanceof Map<?, ?> row) {
+                        csv.append(row.get("bucket")).append(",")
+                           .append(row.get("event_count")).append(",")
+                           .append(row.get("actual_micros")).append(",")
+                           .append(row.get("estimated_micros")).append(",")
+                           .append(row.get("input_tokens")).append(",")
+                           .append(row.get("output_tokens")).append("\n");
+                    }
+                }
+            }
+            return ResponseEntity.ok()
+                .header("Content-Type", "text/csv; charset=utf-8")
+                .header("Content-Disposition", "attachment; filename=\"usage-" + projectId + ".csv\"")
+                .body(csv.toString());
+        }
+        try {
+            return ResponseEntity.ok()
+                .header("Content-Type", "application/json; charset=utf-8")
+                .body(mapper.writeValueAsString(usageData));
+        } catch (Exception e) {
+            throw new GatewayException(500, "internal_error", "Failed to serialize usage export");
+        }
+    }
+
+    @PostMapping("/v1/embeddings")
+    public ResponseEntity<String> v1Embeddings(HttpServletRequest req) throws IOException {
+        String requestId = UUID.randomUUID().toString();
+        byte[] rawBody = req.getInputStream().readNBytes(DataPlaneExecutor.MAX_BODY_BYTES + 1);
+        AtomicInteger statusRef = new AtomicInteger(200);
+        AtomicReference<String> jsonRef = new AtomicReference<>("{}");
+        ResponseSender capture = new ResponseSender() {
+            @Override public boolean isClientClosed() { return false; }
+            @Override public void sendJson(int status, String reqId, String jsonBody, Integer retryAfterSec) {
+                statusRef.set(status);
+                jsonRef.set(jsonBody);
+            }
+            @Override public void startSse(String reqId) {}
+            @Override public boolean isSseStarted() { return false; }
+            @Override public void writeSseFrame(String frame, long deadlineAt) {}
+            @Override public void finishSse() {}
+        };
+        dataPlane.handleEmbeddings(req.getHeader("Authorization"), rawBody, requestId, capture);
+        return ResponseEntity.status(statusRef.get())
+            .header("Content-Type", "application/json; charset=utf-8")
+            .header("x-request-id", requestId)
+            .body(jsonRef.get());
+    }
+
+    @PostMapping("/v1/messages")
+    public void v1AnthropicMessages(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+        String requestId = UUID.randomUUID().toString();
+        byte[] rawBody = req.getInputStream().readNBytes(DataPlaneExecutor.MAX_BODY_BYTES + 1);
+        AtomicBoolean sseStarted = new AtomicBoolean(false);
+        AtomicBoolean closed = new AtomicBoolean(false);
+        ResponseSender sender = new ResponseSender() {
+            @Override public boolean isClientClosed() { return closed.get(); }
+            @Override public void sendJson(int status, String reqId, String jsonBody, Integer retryAfterSec) {
+                if (resp.isCommitted()) return;
+                resp.setStatus(status);
+                resp.setContentType("application/json; charset=utf-8");
+                resp.setHeader("x-request-id", reqId);
+                try {
+                    byte[] bytes = jsonBody.getBytes(StandardCharsets.UTF_8);
+                    resp.setContentLength(bytes.length);
+                    resp.getOutputStream().write(bytes);
+                    resp.getOutputStream().flush();
+                } catch (IOException e) { closed.set(true); }
+            }
+            @Override public void startSse(String reqId) {
+                if (sseStarted.compareAndSet(false, true)) {
+                    resp.setStatus(200);
+                    resp.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+                    resp.setHeader("Cache-Control", "no-store");
+                    resp.setHeader("x-request-id", reqId);
+                    try { resp.flushBuffer(); } catch (IOException e) { closed.set(true); }
+                }
+            }
+            @Override public boolean isSseStarted() { return sseStarted.get(); }
+            @Override public void writeSseFrame(String frame, long deadlineAt) {
+                try {
+                    resp.getOutputStream().write(frame.getBytes(StandardCharsets.UTF_8));
+                    resp.getOutputStream().flush();
+                } catch (IOException e) { closed.set(true); }
+            }
+            @Override public void finishSse() {
+                try { resp.getOutputStream().flush(); } catch (IOException e) { closed.set(true); }
+            }
+        };
+        dataPlane.handleAnthropicMessages(req.getHeader("Authorization"), req.getHeader("x-api-key"), rawBody, requestId, sender);
+    }
+
     @GetMapping("/api/audit")
     public Map<String, Object> getAudit(HttpServletRequest req) {
         SessionInfo auth = authService.authenticateSession(req);
