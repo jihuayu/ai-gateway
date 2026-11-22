@@ -78,8 +78,6 @@ public class HotProjector {
             latest.put(event.requestId(), new CoalescedEntry(chosen, ids));
         }
 
-        // Group coalesced requests by projectId in deterministic order so a single PG transaction
-        // projects all requests for that project with one advisory lock and one COMMIT.
         Map<String, List<CoalescedEntry>> byProject = new TreeMap<>();
         for (CoalescedEntry item : latest.values()) {
             byProject.computeIfAbsent(item.event().projectId(), k -> new ArrayList<>()).add(item);
@@ -101,7 +99,6 @@ public class HotProjector {
                 }
                 stream.ack(batchAckIds);
             } catch (Exception batchErr) {
-                // Fallback to per-request transactions so valid peers commit and any poison record stays unacked
                 for (CoalescedEntry item : projectBatch) {
                     projectHotRequest(pool, item.event(), mapper);
                     stream.ack(item.ids());
@@ -373,6 +370,7 @@ public class HotProjector {
         try (PreparedStatement ps = conn.prepareStatement("""
             UPDATE requests
                SET status = ?, actual_micros = ?, input_tokens = ?, output_tokens = ?,
+                   cached_input_tokens = ?, reasoning_tokens = ?,
                    alias_name = ?, error_code = ?, updated_at = ?
              WHERE request_id = ?::uuid
             """)) {
@@ -380,10 +378,12 @@ public class HotProjector {
             setNullableLong(ps, 2, e.actualMicros());
             setNullableLong(ps, 3, e.inputTokens());
             setNullableLong(ps, 4, e.outputTokens());
-            ps.setString(5, e.aliasName());
-            ps.setString(6, e.errorCode());
-            ps.setTimestamp(7, Timestamp.from(updatedAt));
-            ps.setString(8, e.requestId());
+            setNullableLong(ps, 5, e.cachedInputTokens());
+            setNullableLong(ps, 6, e.reasoningTokens());
+            ps.setString(7, e.aliasName());
+            ps.setString(8, e.errorCode());
+            ps.setTimestamp(9, Timestamp.from(updatedAt));
+            ps.setString(10, e.requestId());
             ps.executeUpdate();
         }
 
@@ -417,14 +417,16 @@ public class HotProjector {
                 Instant finished = updatedAt;
                 Instant started = finished.minusMillis(Math.max(0L, a.latency_ms()));
                 try (PreparedStatement ps = conn.prepareStatement("""
-                    INSERT INTO attempts(id, request_id, attempt_no, target_id, status, error_code, started_at, finished_at, input_tokens, output_tokens, cost_micros)
-                    VALUES(?::uuid, ?::uuid, ?, (SELECT id FROM model_targets WHERE id = ?::uuid), ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO attempts(id, request_id, attempt_no, target_id, status, error_code, started_at, finished_at, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens, cost_micros)
+                    VALUES(?::uuid, ?::uuid, ?, (SELECT id FROM model_targets WHERE id = ?::uuid), ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(request_id, attempt_no) DO UPDATE
                        SET status = excluded.status,
                            error_code = excluded.error_code,
                            finished_at = excluded.finished_at,
                            input_tokens = excluded.input_tokens,
                            output_tokens = excluded.output_tokens,
+                           cached_input_tokens = excluded.cached_input_tokens,
+                           reasoning_tokens = excluded.reasoning_tokens,
                            cost_micros = excluded.cost_micros
                     """)) {
                     ps.setString(1, UUID.randomUUID().toString());
@@ -437,7 +439,9 @@ public class HotProjector {
                     ps.setTimestamp(8, Timestamp.from(finished));
                     setNullableLong(ps, 9, a.input_tokens());
                     setNullableLong(ps, 10, a.output_tokens());
-                    setNullableLong(ps, 11, a.cost_micros());
+                    setNullableLong(ps, 11, a.cached_input_tokens());
+                    setNullableLong(ps, 12, a.reasoning_tokens());
+                    setNullableLong(ps, 13, a.cost_micros());
                     ps.executeUpdate();
                 }
             }
@@ -454,6 +458,8 @@ public class HotProjector {
             outboxPayload.put("estimated", "unknown".equals(e.state()));
             outboxPayload.put("inputTokens", e.inputTokens());
             outboxPayload.put("outputTokens", e.outputTokens());
+            outboxPayload.put("cachedInputTokens", e.cachedInputTokens());
+            outboxPayload.put("reasoningTokens", e.reasoningTokens());
             outboxPayload.put("attempts", e.attempts());
             try (PreparedStatement ps = conn.prepareStatement("""
                 INSERT INTO outbox(id, event_id, event_type, project_id, payload, status, created_at)
@@ -516,7 +522,7 @@ public class HotProjector {
             throw new IllegalStateException("Invalid reserveMicros");
         }
         if (e.attempts() != null) {
-            if (e.attempts().size() > 2) throw new IllegalStateException("Too many attempts");
+            if (e.attempts().size() > 8) throw new IllegalStateException("Too many attempts");
             Set<Integer> seen = new HashSet<>();
             for (AttemptRecord a : e.attempts()) {
                 if (!seen.add(a.attempt_no())) {

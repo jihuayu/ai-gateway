@@ -6,8 +6,8 @@ import com.jihuayu.aigateway.hot.HotContract.AttemptRecord;
 import com.jihuayu.aigateway.hot.HotContract.HotKeys;
 import com.jihuayu.aigateway.hot.HotContract.HotRequest;
 import com.jihuayu.aigateway.hot.HotContract.SettleInput;
-import io.lettuce.core.Range;
 import io.lettuce.core.Limit;
+import io.lettuce.core.Range;
 import io.lettuce.core.ScriptOutputType;
 import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.api.sync.RedisCommands;
@@ -198,8 +198,12 @@ public class HotBilling {
         }
         requireSafeInt(input.reserveMicros(), 0, HotContract.MAX_SAFE_INTEGER);
         requireSafeInt(input.budgetMicros(), -1, HotContract.MAX_SAFE_INTEGER);
+        requireSafeInt(input.keyBudgetMicros(), -1, HotContract.MAX_SAFE_INTEGER);
         requireSafeInt(input.rpm(), 1, 1_000_000);
         requireSafeInt(input.keyRpm(), 1, 1_000_000);
+        if (input.projectTpm() != null) requireSafeInt(input.projectTpm(), 1, 1_000_000_000);
+        if (input.keyTpm() != null) requireSafeInt(input.keyTpm(), 1, 1_000_000_000);
+        requireSafeInt(input.reserveTokens(), 0, HotContract.MAX_SAFE_INTEGER);
         requireSafeInt(input.concurrency(), 1, 1_000_000);
 
         RequestScope scope = new RequestScope(input.projectId(), input.keyId(), UUID.randomUUID().toString());
@@ -211,8 +215,12 @@ public class HotBilling {
         map.put("reserveMicros", input.reserveMicros());
         map.put("rpm", input.rpm());
         map.put("keyRpm", input.keyRpm());
+        map.put("projectTpm", input.projectTpm());
+        map.put("keyTpm", input.keyTpm());
+        map.put("reserveTokens", input.reserveTokens());
         map.put("concurrency", input.concurrency());
         map.put("budgetMicros", input.budgetMicros());
+        map.put("keyBudgetMicros", input.keyBudgetMicros());
         map.put("routeVersion", input.routeVersion());
         map.put("priceSnapshot", input.priceSnapshot());
 
@@ -240,12 +248,16 @@ public class HotBilling {
         if (input.actualMicros() != null) requireSafeInt(input.actualMicros(), 0, HotContract.MAX_SAFE_INTEGER);
         if (input.inputTokens() != null) requireSafeInt(input.inputTokens(), 0, HotContract.MAX_SAFE_INTEGER);
         if (input.outputTokens() != null) requireSafeInt(input.outputTokens(), 0, HotContract.MAX_SAFE_INTEGER);
+        if (input.cachedInputTokens() != null) requireSafeInt(input.cachedInputTokens(), 0, HotContract.MAX_SAFE_INTEGER);
+        if (input.reasoningTokens() != null) requireSafeInt(input.reasoningTokens(), 0, HotContract.MAX_SAFE_INTEGER);
         List<AttemptRecord> rows = validateAttempts(input.attempts());
         String errorCode = deriveErrorCode(input.status(), rows);
         Map<String, Object> map = new LinkedHashMap<>();
         map.put("actualMicros", input.actualMicros());
         map.put("inputTokens", input.inputTokens());
         map.put("outputTokens", input.outputTokens());
+        map.put("cachedInputTokens", input.cachedInputTokens());
+        map.put("reasoningTokens", input.reasoningTokens());
         map.put("status", input.status());
         map.put("attempts", rows);
         map.put("errorCode", errorCode);
@@ -309,16 +321,18 @@ public class HotBilling {
     }
 
     private static List<AttemptRecord> validateAttempts(List<AttemptRecord> input) {
-        if (input == null || input.size() > 2) {
+        if (input == null || input.size() > 8) {
             throw new GatewayException(400, "invalid_request", "Invalid attempts");
         }
         List<AttemptRecord> out = new ArrayList<>(input.size());
         for (AttemptRecord raw : input) {
-            requireSafeInt(raw.attempt_no(), 1, 2);
+            requireSafeInt(raw.attempt_no(), 1, 8);
             requireUuid(raw.target_id());
             if (raw.http_status() != null) requireSafeInt(raw.http_status(), 100, 599);
             if (raw.input_tokens() != null) requireSafeInt(raw.input_tokens(), 0, HotContract.MAX_SAFE_INTEGER);
             if (raw.output_tokens() != null) requireSafeInt(raw.output_tokens(), 0, HotContract.MAX_SAFE_INTEGER);
+            if (raw.cached_input_tokens() != null) requireSafeInt(raw.cached_input_tokens(), 0, HotContract.MAX_SAFE_INTEGER);
+            if (raw.reasoning_tokens() != null) requireSafeInt(raw.reasoning_tokens(), 0, HotContract.MAX_SAFE_INTEGER);
             if (raw.cost_micros() != null) requireSafeInt(raw.cost_micros(), 0, HotContract.MAX_SAFE_INTEGER);
             requireSafeInt(raw.upper_bound_micros(), 0, HotContract.MAX_SAFE_INTEGER);
             String model = raw.upstream_model() != null ? raw.upstream_model().substring(0, Math.min(256, raw.upstream_model().length())) : "";
@@ -338,7 +352,9 @@ public class HotBilling {
                 raw.cost_micros(),
                 raw.upper_bound_micros(),
                 raw.retry_safe(),
-                Math.max(0L, raw.latency_ms())
+                Math.max(0L, raw.latency_ms()),
+                raw.cached_input_tokens(),
+                raw.reasoning_tokens()
             ));
         }
         return out;

@@ -17,11 +17,13 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
+import java.sql.Types;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import javax.net.ssl.SSLException;
 import javax.sql.DataSource;
@@ -35,6 +37,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 public class ProvidersController {
+    private static final Set<String> SUPPORTED_PROTOCOLS = Set.of("openai", "anthropic", "gemini");
     private static final Map<String, String> TEST_MESSAGES = Map.of(
         "auth_failed", "Upstream rejected credentials",
         "endpoint_not_found", "Models endpoint not found",
@@ -95,10 +98,10 @@ public class ProvidersController {
         if (body == null) throw new GatewayException(400, "validation_error", "Request body required");
         String name = requireString(body.get("name"), "name", 1, 100);
         String baseUrl = requireString(body.get("base_url"), "base_url", 1, 2000);
-        String secret = requireString(body.get("secret"), "secret", 1, 8192);
-        String protocol = body.get("protocol") != null ? String.valueOf(body.get("protocol")) : "openai";
-        if (!"openai".equals(protocol)) {
-            throw new GatewayException(400, "validation_error", "protocol: must be openai");
+        String secret = requireSecretOrKeyList(body);
+        String protocol = body.get("protocol") != null ? String.valueOf(body.get("protocol")).trim().toLowerCase() : "openai";
+        if (!SUPPORTED_PROTOCOLS.contains(protocol)) {
+            throw new GatewayException(400, "validation_error", "protocol: must be one of openai, anthropic, gemini");
         }
         boolean enabled = body.get("enabled") == null || Boolean.TRUE.equals(body.get("enabled"));
 
@@ -120,7 +123,7 @@ public class ProvidersController {
                 ps.executeUpdate();
             }
             authService.audit(conn, auth, null, "provider.create", "provider", id, Map.of(
-                "name", name, "base_url", baseUrl, "enabled", enabled
+                "name", name, "protocol", protocol, "base_url", baseUrl, "enabled", enabled
             ));
             created = loadProviderPublic(conn, id);
         } catch (SQLException sqle) {
@@ -154,6 +157,15 @@ public class ProvidersController {
                 params.add(name);
                 changes.put("name", name);
             }
+            if (body.containsKey("protocol") && body.get("protocol") != null) {
+                String protocol = String.valueOf(body.get("protocol")).trim().toLowerCase();
+                if (!SUPPORTED_PROTOCOLS.contains(protocol)) {
+                    throw new GatewayException(400, "validation_error", "protocol: must be one of openai, anthropic, gemini");
+                }
+                sets.add("protocol = ?");
+                params.add(protocol);
+                changes.put("protocol", protocol);
+            }
             if (body.containsKey("base_url") && body.get("base_url") != null) {
                 String baseUrl = requireString(body.get("base_url"), "base_url", 1, 2000);
                 checkUrl(baseUrl);
@@ -169,8 +181,8 @@ public class ProvidersController {
                 params.add(b);
                 changes.put("enabled", b);
             }
-            if (body.containsKey("secret") && body.get("secret") != null) {
-                String secret = requireString(body.get("secret"), "secret", 1, 8192);
+            if ((body.containsKey("secret") && body.get("secret") != null) || (body.containsKey("secrets") && body.get("secrets") != null)) {
+                String secret = requireSecretOrKeyList(body);
                 sets.add("encrypted_secret = ?");
                 params.add(SecurityUtils.encrypt(secret, config.getEncryptionKey()));
                 changes.put("secret", "replaced");
@@ -203,6 +215,22 @@ public class ProvidersController {
         }
     }
 
+    private String requireSecretOrKeyList(Map<String, Object> body) {
+        if (body.get("secrets") instanceof List<?> list && !list.isEmpty()) {
+            List<String> keys = new ArrayList<>();
+            for (Object item : list) {
+                String k = requireString(item, "secrets[]", 1, 2048);
+                keys.add(k);
+            }
+            try {
+                return mapper.writeValueAsString(keys);
+            } catch (Exception e) {
+                throw new GatewayException(400, "validation_error", "Invalid secrets array");
+            }
+        }
+        return requireString(body.get("secret"), "secret", 1, 8192);
+    }
+
     @DeleteMapping("/api/providers/{id}")
     public Map<String, Object> deleteProvider(HttpServletRequest req, @PathVariable("id") String id) {
         SessionInfo auth = authService.requireWorkspaceRole(req, List.of("admin"));
@@ -212,7 +240,7 @@ public class ProvidersController {
             try (PreparedStatement ps = conn.prepareStatement("""
                 SELECT 1 FROM route_versions rv
                   JOIN model_targets mt ON mt.provider_id = ?::uuid
-                 WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text(rv.targets) t WHERE t = mt.id::text)
+                 WHERE rv.targets::text LIKE '%' || mt.id::text || '%'
                  LIMIT 1
                 """)) {
                 ps.setString(1, id);
@@ -263,6 +291,10 @@ public class ProvidersController {
         String secret;
         try {
             secret = SecurityUtils.decrypt(encryptedSecret, config.getEncryptionKey());
+            if (secret.startsWith("[")) {
+                List<?> list = mapper.readValue(secret, List.class);
+                if (!list.isEmpty()) secret = String.valueOf(list.get(0));
+            }
         } catch (Exception e) {
             throw new GatewayException(500, "credential_error", "Provider credential could not be decrypted");
         }
@@ -311,7 +343,9 @@ public class ProvidersController {
         try (Connection conn = pool.getConnection()) {
             ensureProviderExists(conn, id, auth.workspaceId());
             try (PreparedStatement ps = conn.prepareStatement("""
-                SELECT id::text, provider_id::text, upstream_model, input_price, output_price, capabilities::text, enabled, created_at, updated_at
+                SELECT id::text, provider_id::text, upstream_model, input_price, output_price,
+                       cached_input_price, cache_write_price, reasoning_price,
+                       capabilities::text, enabled, created_at, updated_at
                   FROM model_targets
                  WHERE provider_id = ?::uuid
                  ORDER BY upstream_model
@@ -339,6 +373,9 @@ public class ProvidersController {
         String upstreamModel = requireString(body.get("upstream_model"), "upstream_model", 1, 200);
         long inputPrice = requirePrice(body.get("input_price"), "input_price");
         long outputPrice = requirePrice(body.get("output_price"), "output_price");
+        Long cachedInputPrice = optionalPrice(body.get("cached_input_price"), "cached_input_price");
+        Long cacheWritePrice = optionalPrice(body.get("cache_write_price"), "cache_write_price");
+        Long reasoningPrice = optionalPrice(body.get("reasoning_price"), "reasoning_price");
         List<String> capabilities = parseCapabilities(body.get("capabilities"));
         boolean enabled = body.get("enabled") == null || Boolean.TRUE.equals(body.get("enabled"));
         String targetId = UUID.randomUUID().toString();
@@ -347,17 +384,20 @@ public class ProvidersController {
         try (Connection conn = pool.getConnection()) {
             ensureProviderExists(conn, id, auth.workspaceId());
             try (PreparedStatement ps = conn.prepareStatement("""
-                INSERT INTO model_targets (id, provider_id, upstream_model, input_price, output_price, capabilities, enabled)
-                VALUES (?::uuid, ?::uuid, ?, ?, ?, ?::jsonb, ?)
-                RETURNING id::text, provider_id::text, upstream_model, input_price, output_price, capabilities::text, enabled, created_at, updated_at
+                INSERT INTO model_targets (id, provider_id, upstream_model, input_price, output_price, cached_input_price, cache_write_price, reasoning_price, capabilities, enabled)
+                VALUES (?::uuid, ?::uuid, ?, ?, ?, ?, ?, ?, ?::jsonb, ?)
+                RETURNING id::text, provider_id::text, upstream_model, input_price, output_price, cached_input_price, cache_write_price, reasoning_price, capabilities::text, enabled, created_at, updated_at
                 """)) {
                 ps.setString(1, targetId);
                 ps.setString(2, id);
                 ps.setString(3, upstreamModel);
                 ps.setLong(4, inputPrice);
                 ps.setLong(5, outputPrice);
-                ps.setString(6, mapper.writeValueAsString(capabilities));
-                ps.setBoolean(7, enabled);
+                setNullableLong(ps, 6, cachedInputPrice);
+                setNullableLong(ps, 7, cacheWritePrice);
+                setNullableLong(ps, 8, reasoningPrice);
+                ps.setString(9, mapper.writeValueAsString(capabilities));
+                ps.setBoolean(10, enabled);
                 try (ResultSet rs = ps.executeQuery()) {
                     rs.next();
                     created = readTargetRow(rs);
@@ -368,6 +408,9 @@ public class ProvidersController {
             changes.put("upstream_model", upstreamModel);
             changes.put("input_price", inputPrice);
             changes.put("output_price", outputPrice);
+            changes.put("cached_input_price", cachedInputPrice);
+            changes.put("cache_write_price", cacheWritePrice);
+            changes.put("reasoning_price", reasoningPrice);
             changes.put("capabilities", capabilities);
             changes.put("enabled", enabled);
             authService.audit(conn, auth, null, "target.create", "model_target", targetId, changes);
@@ -419,6 +462,18 @@ public class ProvidersController {
                 sets.add("output_price = ?");
                 params.add(requirePrice(body.get("output_price"), "output_price"));
             }
+            if (body.containsKey("cached_input_price")) {
+                sets.add("cached_input_price = ?");
+                params.add(optionalPrice(body.get("cached_input_price"), "cached_input_price"));
+            }
+            if (body.containsKey("cache_write_price")) {
+                sets.add("cache_write_price = ?");
+                params.add(optionalPrice(body.get("cache_write_price"), "cache_write_price"));
+            }
+            if (body.containsKey("reasoning_price")) {
+                sets.add("reasoning_price = ?");
+                params.add(optionalPrice(body.get("reasoning_price"), "reasoning_price"));
+            }
             if (body.containsKey("enabled") && body.get("enabled") != null) {
                 if (!(body.get("enabled") instanceof Boolean b)) throw new GatewayException(400, "validation_error", "enabled must be boolean");
                 sets.add("enabled = ?");
@@ -435,10 +490,11 @@ public class ProvidersController {
             Map<String, Object> updated;
             try (PreparedStatement ps = conn.prepareStatement(
                 "UPDATE model_targets SET " + String.join(", ", sets) + ", updated_at = now() WHERE id = ?::uuid " +
-                "RETURNING id::text, provider_id::text, upstream_model, input_price, output_price, capabilities::text, enabled, created_at, updated_at")) {
+                "RETURNING id::text, provider_id::text, upstream_model, input_price, output_price, cached_input_price, cache_write_price, reasoning_price, capabilities::text, enabled, created_at, updated_at")) {
                 for (int i = 0; i < params.size(); i++) {
                     Object p = params.get(i);
-                    if (p instanceof Long l) ps.setLong(i + 1, l);
+                    if (p == null) ps.setNull(i + 1, Types.BIGINT);
+                    else if (p instanceof Long l) ps.setLong(i + 1, l);
                     else if (p instanceof Boolean b) ps.setBoolean(i + 1, b);
                     else ps.setString(i + 1, String.valueOf(p));
                 }
@@ -569,14 +625,25 @@ public class ProvidersController {
         row.put("upstream_model", rs.getString(3));
         row.put("input_price", rs.getLong(4));
         row.put("output_price", rs.getLong(5));
-        String capJson = rs.getString(6);
+        long cIn = rs.getLong(6);
+        row.put("cached_input_price", rs.wasNull() ? null : cIn);
+        long cWr = rs.getLong(7);
+        row.put("cache_write_price", rs.wasNull() ? null : cWr);
+        long rPr = rs.getLong(8);
+        row.put("reasoning_price", rs.wasNull() ? null : rPr);
+        String capJson = rs.getString(9);
         row.put("capabilities", capJson != null ? mapper.readValue(capJson, List.class) : List.of());
-        row.put("enabled", rs.getBoolean(7));
-        Timestamp cAt = rs.getTimestamp(8);
-        Timestamp uAt = rs.getTimestamp(9);
+        row.put("enabled", rs.getBoolean(10));
+        Timestamp cAt = rs.getTimestamp(11);
+        Timestamp uAt = rs.getTimestamp(12);
         row.put("created_at", cAt != null ? cAt.toInstant().toString() : null);
         row.put("updated_at", uAt != null ? uAt.toInstant().toString() : null);
         return row;
+    }
+
+    private static void setNullableLong(PreparedStatement ps, int index, Long val) throws Exception {
+        if (val == null) ps.setNull(index, Types.BIGINT);
+        else ps.setLong(index, val);
     }
 
     private static void requireUuidOr404(String id) {
@@ -603,6 +670,11 @@ public class ProvidersController {
             throw new GatewayException(400, "validation_error", field + " out of range");
         }
         return l;
+    }
+
+    private static Long optionalPrice(Object val, String field) {
+        if (val == null) return null;
+        return requirePrice(val, field);
     }
 
     private static List<String> parseCapabilities(Object val) {
