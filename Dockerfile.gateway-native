@@ -21,15 +21,18 @@
 FROM container-registry.oracle.com/graalvm/native-image:25 AS builder
 WORKDIR /workspace
 
+RUN command -v mvn >/dev/null 2>&1 || ( \
+    curl -fsSL https://archive.apache.org/dist/maven/maven-3/3.9.9/binaries/apache-maven-3.9.9-bin.tar.gz \
+    | tar -xz -C /opt && ln -s /opt/apache-maven-3.9.9/bin/mvn /usr/local/bin/mvn )
+
 COPY pom.xml ./
 COPY src ./src
 
 # Compile standalone zero-SQL Netty Gateway to native executable: target/ai-gateway-netty
-RUN ./mvnw -B -Pgateway-native -DskipTests native:compile 2>/dev/null || \
-    mvn -B -Pgateway-native -DskipTests native:compile
+RUN mvn -B -Pgateway-native -DskipTests native:compile
 
-# Stage 2: Minimal Distroless Runtime Image (Contains CA certs & glibc for HTTPS upstream calls)
-FROM gcr.io/distroless/base-debian12:nonroot
+# Stage 2: Minimal Oracle Linux 9 Slim Runtime Image (100% glibc/zlib/CA ABI match with Oracle GraalVM 25 builder)
+FROM container-registry.oracle.com/os/oraclelinux:9-slim
 WORKDIR /app
 
 COPY --from=builder /workspace/target/ai-gateway-netty /app/ai-gateway-netty
