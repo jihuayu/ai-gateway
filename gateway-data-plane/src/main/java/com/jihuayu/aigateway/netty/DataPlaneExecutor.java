@@ -73,7 +73,8 @@ public class DataPlaneExecutor {
 
     public static final Set<String> KNOWN_CAPABILITIES = Set.of(
         "chat", "stream", "stream_usage", "tools", "json_object", "json_schema",
-        "embeddings", "vision", "anthropic_messages", "reasoning"
+        "embeddings", "vision", "anthropic_messages", "reasoning",
+        "image_generation", "rerank"
     );
 
     private static final Set<String> ALLOWED_CHAT_KEYS = Set.of(
@@ -86,7 +87,18 @@ public class DataPlaneExecutor {
         "role", "content", "name", "tool_calls", "tool_call_id"
     );
     private static final Set<String> ALLOWED_ROLES = Set.of("system", "user", "assistant", "tool", "developer");
-    private static final Set<String> ALLOWED_EMBED_KEYS = Set.of("model", "input", "encoding_format", "dimensions", "user");
+    private static final Set<String> ALLOWED_EMBED_KEYS = Set.of(
+        "model", "input", "encoding_format", "dimensions", "user",
+        "input_type", "task_type", "normalized", "truncate"
+    );
+    private static final Set<String> ALLOWED_IMAGE_KEYS = Set.of(
+        "model", "prompt", "n", "size", "quality", "style", "response_format",
+        "background", "output_format", "negative_prompt", "seed", "user"
+    );
+    private static final Set<String> ALLOWED_RERANK_KEYS = Set.of(
+        "model", "query", "documents", "top_n", "topN",
+        "return_documents", "returnDocuments", "max_chunks_per_doc", "rank_fields", "user"
+    );
     private static final Set<String> ALLOWED_ANTHROPIC_KEYS = Set.of(
         "model", "messages", "max_tokens", "system", "temperature", "top_p", "stop_sequences",
         "stream", "tools", "tool_choice", "thinking", "metadata"
@@ -150,7 +162,32 @@ public class DataPlaneExecutor {
         String model,
         List<String> inputs,
         String encodingFormat,
-        Integer dimensions
+        Integer dimensions,
+        String inputType
+    ) {
+        public EmbeddingRequest(String model, List<String> inputs, String encodingFormat, Integer dimensions) {
+            this(model, inputs, encodingFormat, dimensions, null);
+        }
+    }
+
+    public record RerankRequest(
+        String model,
+        String query,
+        List<String> documents,
+        int topN,
+        boolean returnDocuments
+    ) {}
+
+    public record ImageGenerationRequest(
+        String model,
+        String prompt,
+        int n,
+        String size,
+        String quality,
+        String style,
+        String responseFormat,
+        String negativePrompt,
+        Long seed
     ) {}
 
     public record PriceEntry(
@@ -811,25 +848,21 @@ public class DataPlaneExecutor {
                 long started = System.currentTimeMillis();
                 try {
                     String token = providerToken(target.targetId(), target.encryptedSecret(), encryptionKey);
-                    URI endpoint = embeddingsEndpoint(target.baseUrl());
+                    String protocol = target.protocol() != null ? target.protocol().toLowerCase() : "openai";
+                    URI endpoint = protocolEmbeddingsEndpoint(protocol, target.baseUrl(), target.upstreamModel());
                     SecurityUtils.validateProviderUrl(endpoint.toString(), allowPrivateUpstream);
-                    Map<String, Object> upPayload = new LinkedHashMap<>();
-                    upPayload.put("model", target.upstreamModel());
-                    upPayload.put("input", embReq.inputs().size() == 1 ? embReq.inputs().get(0) : embReq.inputs());
-                    if (embReq.encodingFormat() != null) upPayload.put("encoding_format", embReq.encodingFormat());
-                    if (embReq.dimensions() != null) upPayload.put("dimensions", embReq.dimensions());
-                    byte[] outBytes = mapper.writeValueAsBytes(upPayload);
+                    byte[] outBytes = buildEmbeddingsPayloadForProtocol(protocol, target, embReq);
 
-                    HttpRequest httpReq = HttpRequest.newBuilder()
+                    HttpRequest.Builder reqBuilder = HttpRequest.newBuilder()
                         .uri(endpoint)
                         .timeout(Duration.ofMillis(Math.max(100, t.firstByteMs())))
                         .header("Content-Type", "application/json")
                         .header("Accept", "application/json")
-                        .header("Authorization", "Bearer " + token)
                         .header("User-Agent", "ai-gateway/0.2")
                         .header("X-Request-Id", requestId)
-                        .POST(HttpRequest.BodyPublishers.ofByteArray(outBytes))
-                        .build();
+                        .POST(HttpRequest.BodyPublishers.ofByteArray(outBytes));
+                    applyProtocolAuthHeaders(reqBuilder, protocol, token);
+                    HttpRequest httpReq = reqBuilder.build();
                     pooledRequestsDispatched.incrementAndGet();
                     HttpResponse<InputStream> httpResp = sendPooledRequest(httpReq, t.firstByteMs(), new AtomicReference<>(), new AtomicReference<>());
                     int code = httpResp.statusCode();
@@ -852,11 +885,15 @@ public class DataPlaneExecutor {
                         continue;
                     }
                     byte[] rawResp = readBoundedStream(httpResp.body(), MAX_UPSTREAM_JSON_BYTES, new AtomicReference<>());
-                    Map<String, Object> parsed = new LinkedHashMap<>(mapper.readValue(rawResp, Map.class));
+                    Map<String, Object> parsed = translateEmbeddingsResponseToOpenAi(
+                        protocol,
+                        mapper.readValue(rawResp, Map.class),
+                        route.aliasName(),
+                        estInputTokens
+                    );
                     if (!(parsed.get("data") instanceof List<?> dataList) || dataList.isEmpty()) {
                         throw new GatewayException(502, "upstream_invalid_response", "上游嵌入响应无效。");
                     }
-                    parsed.put("model", route.aliasName());
                     Long pTokens = null;
                     if (parsed.get("usage") instanceof Map<?, ?> uMap && uMap.get("prompt_tokens") instanceof Number n && n.longValue() >= 0) {
                         pTokens = n.longValue();
@@ -902,6 +939,431 @@ public class DataPlaneExecutor {
             }
         } finally {
             finishRequest(requestId, admitted, dispatched, prepared, finalStatus, attempts, persistedAttempts, null);
+        }
+    }
+
+    /** #47: POST /v1/rerank & POST /v1/rank with cross-protocol adaptation (openai, cohere, jina, gemini) */
+    @SuppressWarnings("unchecked")
+    public void handleRerank(String authorizationHeader, byte[] rawBody, String requestId, ResponseSender sender) {
+        Timings t = this.timings;
+        List<AttemptRecord> attempts = new ArrayList<>();
+        Set<Integer> persistedAttempts = new HashSet<>();
+        PreparedRequest prepared = null;
+        boolean admitted = false;
+        boolean dispatched = false;
+        String finalStatus = "failed";
+        Snapshot snapshot = null;
+        PluginExecutionContext pluginCtx = null;
+
+        try {
+            if (rawBody != null && rawBody.length > MAX_BODY_BYTES) {
+                throw new GatewayException(400, "invalid_request", "请求体超过大小上限。");
+            }
+            KeyContext key = runtime.authenticateBearerHeader(authorizationHeader);
+            snapshot = runtime.snapshotFor(key);
+            Object parsedBody;
+            try {
+                if (rawBody == null || rawBody.length == 0) {
+                    throw new GatewayException(400, "invalid_request", "请求体必须是 JSON 对象。");
+                }
+                parsedBody = mapper.readValue(rawBody, Object.class);
+            } catch (GatewayException ge) {
+                throw ge;
+            } catch (Exception e) {
+                throw new GatewayException(400, "invalid_request", "请求体必须是合法 JSON。");
+            }
+
+            Map<String, Object> reqJsonMap = parsedBody instanceof Map<?, ?> m
+                ? new LinkedHashMap<>((Map<String, Object>) m)
+                : new LinkedHashMap<>();
+            RerankRequest rerankReq = validateRerankBody(reqJsonMap);
+            pluginCtx = new PluginExecutionContext(
+                requestId, key.projectId(), key.workspaceId(), key.keyId(),
+                "/v1/rerank", rerankReq.model(), false,
+                new LinkedHashMap<>(), reqJsonMap
+            );
+
+            PluginResult rPre = pluginPipeline.executeStage(snapshot, PluginStage.PRE_ADMIT, pluginCtx);
+            sender.addResponseHeaders(pluginCtx.responseHeaders());
+            if (rPre instanceof PluginResult.Reject rej) {
+                sender.addResponseHeaders(rej.headers());
+                throw new GatewayException(rej.httpStatus(), rej.errorCode(), rej.message());
+            } else if (rPre instanceof PluginResult.ShortCircuit sc) {
+                sender.addResponseHeaders(sc.headers());
+                sender.sendJson(sc.httpStatus(), requestId, sc.responseBody(), null);
+                return;
+            }
+            if (pluginCtx.isRequestBodyMutated()) {
+                rerankReq = validateRerankBody(pluginCtx.requestJson());
+            }
+
+            if (!key.canUseModel("", rerankReq.model())) {
+                throw new GatewayException(403, "model_not_permitted", "API Key 无权使用该模型。");
+            }
+            RouteSnapshot route = runtime.loadRoute(key, rerankReq.model());
+            if (route == null) {
+                throw new GatewayException(404, "model_not_found", "模型不存在或未发布。");
+            }
+            if (!key.canUseModel(route.aliasId(), route.aliasName())) {
+                throw new GatewayException(403, "model_not_permitted", "API Key 无权使用该模型。");
+            }
+            verifyCapabilities(route, Set.of("rerank"));
+
+            List<RouteTarget> targets = selectOrderedTargets(route);
+            if (targets.isEmpty()) {
+                throw new GatewayException(503, "model_unavailable", "模型当前没有可用目标。");
+            }
+            long chars = rerankReq.query().length() + rerankReq.documents().stream().mapToLong(String::length).sum();
+            int estInputTokens = (int) Math.max(1L, (chars + 2) / 3 + (long) rerankReq.documents().size() * 2);
+            List<PriceEntry> entries = new ArrayList<>(targets.size());
+            long totalReserved = 0;
+            for (int i = 0; i < targets.size(); i++) {
+                RouteTarget target = targets.get(i);
+                long res = tokensToMicros(estInputTokens, target.inputPrice());
+                totalReserved += res;
+                entries.add(new PriceEntry(i + 1, target.targetId(), target.upstreamModel(), target.inputPrice(), 0L, 0, estInputTokens, res));
+            }
+            String period = utcPeriod();
+            Map<String, Object> priceSnap = new LinkedHashMap<>();
+            priceSnap.put("version", 1);
+            priceSnap.put("currency", "USD");
+            priceSnap.put("unit", "tokens");
+            priceSnap.put("period", period);
+            priceSnap.put("max_attempts", entries.size());
+            priceSnap.put("estimated_input_tokens", estInputTokens);
+            priceSnap.put("max_output_tokens", 0);
+            priceSnap.put("total_reserved_micros", totalReserved);
+            priceSnap.put("attempts", entries);
+
+            Map<String, Object> routeVer = new LinkedHashMap<>();
+            routeVer.put("alias_id", route.aliasId());
+            routeVer.put("alias_name", route.aliasName());
+            routeVer.put("version_id", route.routeVersionId());
+            routeVer.put("runtime_revision", key.runtimeRevision());
+            routeVer.put("runtime_key_hash", key.runtimeKeyHash());
+            routeVer.put("runtime_expires_at", key.runtimeExpiresAt());
+            routeVer.put("version", route.version());
+            routeVer.put("targets", entries.stream().map(e -> Map.of("target_id", e.target_id(), "upstream_model", e.upstream_model())).toList());
+
+            ChatRequest syntheticChat = new ChatRequest(rerankReq.model(), List.of(), false, null, null, null, null, null, Set.of("rerank"));
+            prepared = new PreparedRequest(key, syntheticChat, route, targets, 0, estInputTokens, priceSnap, entries, totalReserved, period, routeVer);
+
+            admitRequest(requestId, prepared);
+            admitted = true;
+            billing.dispatch(requestId);
+            dispatched = true;
+
+            GatewayException lastErr = null;
+            for (int i = 0; i < targets.size(); i++) {
+                RouteTarget target = targets.get(i);
+                PriceEntry pe = entries.get(i);
+                long started = System.currentTimeMillis();
+                try {
+                    String token = providerToken(target.targetId(), target.encryptedSecret(), encryptionKey);
+                    String protocol = target.protocol() != null ? target.protocol().toLowerCase() : "openai";
+                    URI endpoint = protocolRerankEndpoint(protocol, target.baseUrl(), target.upstreamModel());
+                    SecurityUtils.validateProviderUrl(endpoint.toString(), allowPrivateUpstream);
+                    byte[] outBytes = buildRerankPayloadForProtocol(protocol, target, rerankReq);
+
+                    HttpRequest.Builder reqBuilder = HttpRequest.newBuilder()
+                        .uri(endpoint)
+                        .timeout(Duration.ofMillis(Math.max(100, t.firstByteMs())))
+                        .header("Content-Type", "application/json")
+                        .header("Accept", "application/json")
+                        .header("User-Agent", "ai-gateway/0.2")
+                        .header("X-Request-Id", requestId)
+                        .POST(HttpRequest.BodyPublishers.ofByteArray(outBytes));
+                    applyProtocolAuthHeaders(reqBuilder, protocol, token);
+
+                    pooledRequestsDispatched.incrementAndGet();
+                    HttpResponse<InputStream> httpResp = sendPooledRequest(reqBuilder.build(), t.firstByteMs(), new AtomicReference<>(), new AtomicReference<>());
+                    int code = httpResp.statusCode();
+                    long lat = Math.max(0L, System.currentTimeMillis() - started);
+                    if (code < 200 || code >= 300) {
+                        try (InputStream errIn = httpResp.body()) {
+                            if (errIn != null) errIn.readNBytes(4096);
+                        } catch (Exception ignored) {}
+                        UpstreamHttpErr info = upstreamHttpError(code);
+                        boolean zeroCharge = code == 429 || code == 502 || code == 503 || code == 504;
+                        AttemptRecord ar = new AttemptRecord(
+                            pe.attempt_no(), target.targetId(), target.upstreamModel(), "error", code, info.code(),
+                            !zeroCharge, !zeroCharge, zeroCharge, zeroCharge ? 0L : null, zeroCharge ? 0L : null, zeroCharge ? 0L : null,
+                            pe.reserved_micros(), info.retrySafe(), lat
+                        );
+                        if (info.retrySafe()) recordTargetFailure(target.targetId());
+                        attempts.add(ar);
+                        lastErr = errorFromRecord(ar);
+                        if (!canFallback(ar, i, targets.size())) break;
+                        continue;
+                    }
+                    byte[] rawResp = readBoundedStream(httpResp.body(), MAX_UPSTREAM_JSON_BYTES, new AtomicReference<>());
+                    Map<String, Object> normalized = normalizeRerankResponse(
+                        mapper.readValue(rawResp, Map.class),
+                        route.aliasName(),
+                        requestId,
+                        rerankReq,
+                        estInputTokens
+                    );
+                    Long pTokens = (long) estInputTokens;
+                    if (normalized.get("usage") instanceof Map<?, ?> uMap && uMap.get("prompt_tokens") instanceof Number n && n.longValue() >= 0) {
+                        pTokens = n.longValue();
+                    }
+                    Long cost = tokensToMicros(pTokens, target.inputPrice());
+                    AttemptRecord okRec = new AttemptRecord(
+                        pe.attempt_no(), target.targetId(), target.upstreamModel(), "ok", code, null,
+                        true, false, true, pTokens, 0L, cost,
+                        pe.reserved_micros(), false, lat
+                    );
+                    recordTargetSuccess(target.targetId());
+                    attempts.add(okRec);
+                    sender.sendJson(200, requestId, mapper.writeValueAsString(normalized), null);
+                    finalStatus = "completed";
+                    return;
+                } catch (GatewayException ge) {
+                    long lat = Math.max(0L, System.currentTimeMillis() - started);
+                    AttemptRecord ar = new AttemptRecord(
+                        pe.attempt_no(), target.targetId(), target.upstreamModel(), "error", null, ge.getCode(),
+                        true, true, false, null, null, null, pe.reserved_micros(), false, lat
+                    );
+                    attempts.add(ar);
+                    lastErr = ge;
+                    break;
+                } catch (Exception ex) {
+                    long lat = Math.max(0L, System.currentTimeMillis() - started);
+                    recordTargetFailure(target.targetId());
+                    AttemptRecord ar = new AttemptRecord(
+                        pe.attempt_no(), target.targetId(), target.upstreamModel(), "error", null, "upstream_connect_failed",
+                        false, false, true, 0L, 0L, 0L, pe.reserved_micros(), true, lat
+                    );
+                    attempts.add(ar);
+                    lastErr = errorFromRecord(ar);
+                    if (!canFallback(ar, i, targets.size())) break;
+                }
+            }
+            HttpResponsePayload errPayload = buildErrorPayload(requestId, lastErr != null ? lastErr : new GatewayException(502, "upstream_error", "上游重排序调用失败。"), null);
+            sender.sendJson(errPayload.status(), requestId, errPayload.jsonBody(), null);
+        } catch (Exception e) {
+            if (!sender.isClientClosed()) {
+                HttpResponsePayload errPayload = buildErrorPayload(requestId, e, retryAfterOf(e));
+                sender.sendJson(errPayload.status(), requestId, errPayload.jsonBody(), null);
+            }
+        } finally {
+            finishRequest(requestId, admitted, dispatched, prepared, finalStatus, attempts, persistedAttempts, null, snapshot, pluginCtx);
+        }
+    }
+
+    /** #47: POST /v1/images/generations & POST /v1/images/edits with cross-protocol adaptation (openai, jina, gemini Imagen :predict) */
+    @SuppressWarnings("unchecked")
+    public void handleImageGenerations(String authorizationHeader, byte[] rawBody, String requestId, ResponseSender sender) {
+        Timings t = this.timings;
+        List<AttemptRecord> attempts = new ArrayList<>();
+        Set<Integer> persistedAttempts = new HashSet<>();
+        PreparedRequest prepared = null;
+        boolean admitted = false;
+        boolean dispatched = false;
+        String finalStatus = "failed";
+        Snapshot snapshot = null;
+        PluginExecutionContext pluginCtx = null;
+
+        try {
+            if (rawBody != null && rawBody.length > MAX_BODY_BYTES) {
+                throw new GatewayException(400, "invalid_request", "请求体超过大小上限。");
+            }
+            KeyContext key = runtime.authenticateBearerHeader(authorizationHeader);
+            snapshot = runtime.snapshotFor(key);
+            Object parsedBody;
+            try {
+                if (rawBody == null || rawBody.length == 0) {
+                    throw new GatewayException(400, "invalid_request", "请求体必须是 JSON 对象。");
+                }
+                parsedBody = mapper.readValue(rawBody, Object.class);
+            } catch (GatewayException ge) {
+                throw ge;
+            } catch (Exception e) {
+                throw new GatewayException(400, "invalid_request", "请求体必须是合法 JSON。");
+            }
+
+            Map<String, Object> reqJsonMap = parsedBody instanceof Map<?, ?> m
+                ? new LinkedHashMap<>((Map<String, Object>) m)
+                : new LinkedHashMap<>();
+            ImageGenerationRequest imgReq = validateImageGenerationBody(reqJsonMap);
+            pluginCtx = new PluginExecutionContext(
+                requestId, key.projectId(), key.workspaceId(), key.keyId(),
+                "/v1/images/generations", imgReq.model(), false,
+                new LinkedHashMap<>(), reqJsonMap
+            );
+
+            PluginResult rPre = pluginPipeline.executeStage(snapshot, PluginStage.PRE_ADMIT, pluginCtx);
+            sender.addResponseHeaders(pluginCtx.responseHeaders());
+            if (rPre instanceof PluginResult.Reject rej) {
+                sender.addResponseHeaders(rej.headers());
+                throw new GatewayException(rej.httpStatus(), rej.errorCode(), rej.message());
+            } else if (rPre instanceof PluginResult.ShortCircuit sc) {
+                sender.addResponseHeaders(sc.headers());
+                sender.sendJson(sc.httpStatus(), requestId, sc.responseBody(), null);
+                return;
+            }
+            if (pluginCtx.isRequestBodyMutated()) {
+                imgReq = validateImageGenerationBody(pluginCtx.requestJson());
+            }
+
+            if (!key.canUseModel("", imgReq.model())) {
+                throw new GatewayException(403, "model_not_permitted", "API Key 无权使用该模型。");
+            }
+            RouteSnapshot route = runtime.loadRoute(key, imgReq.model());
+            if (route == null) {
+                throw new GatewayException(404, "model_not_found", "模型不存在或未发布。");
+            }
+            if (!key.canUseModel(route.aliasId(), route.aliasName())) {
+                throw new GatewayException(403, "model_not_permitted", "API Key 无权使用该模型。");
+            }
+            verifyCapabilities(route, Set.of("image_generation"));
+
+            List<RouteTarget> targets = selectOrderedTargets(route);
+            if (targets.isEmpty()) {
+                throw new GatewayException(503, "model_unavailable", "模型当前没有可用目标。");
+            }
+            int estInputTokens = (int) Math.max(1L, (imgReq.prompt().length() + 2) / 3);
+            int estImageOutputTokens = imgReq.n() * 1000;
+            List<PriceEntry> entries = new ArrayList<>(targets.size());
+            long totalReserved = 0;
+            for (int i = 0; i < targets.size(); i++) {
+                RouteTarget target = targets.get(i);
+                long res = estimateAttemptMicros(estInputTokens, estImageOutputTokens, target);
+                totalReserved += res;
+                entries.add(new PriceEntry(i + 1, target.targetId(), target.upstreamModel(), target.inputPrice(), target.outputPrice(), estImageOutputTokens, estInputTokens, res));
+            }
+            String period = utcPeriod();
+            Map<String, Object> priceSnap = new LinkedHashMap<>();
+            priceSnap.put("version", 1);
+            priceSnap.put("currency", "USD");
+            priceSnap.put("unit", "images");
+            priceSnap.put("period", period);
+            priceSnap.put("max_attempts", entries.size());
+            priceSnap.put("estimated_input_tokens", estInputTokens);
+            priceSnap.put("max_output_tokens", estImageOutputTokens);
+            priceSnap.put("total_reserved_micros", totalReserved);
+            priceSnap.put("attempts", entries);
+
+            Map<String, Object> routeVer = new LinkedHashMap<>();
+            routeVer.put("alias_id", route.aliasId());
+            routeVer.put("alias_name", route.aliasName());
+            routeVer.put("version_id", route.routeVersionId());
+            routeVer.put("runtime_revision", key.runtimeRevision());
+            routeVer.put("runtime_key_hash", key.runtimeKeyHash());
+            routeVer.put("runtime_expires_at", key.runtimeExpiresAt());
+            routeVer.put("version", route.version());
+            routeVer.put("targets", entries.stream().map(e -> Map.of("target_id", e.target_id(), "upstream_model", e.upstream_model())).toList());
+
+            ChatRequest syntheticChat = new ChatRequest(imgReq.model(), List.of(), false, null, null, null, null, null, Set.of("image_generation"));
+            prepared = new PreparedRequest(key, syntheticChat, route, targets, estImageOutputTokens, (long) estInputTokens + estImageOutputTokens, priceSnap, entries, totalReserved, period, routeVer);
+
+            admitRequest(requestId, prepared);
+            admitted = true;
+            billing.dispatch(requestId);
+            dispatched = true;
+
+            GatewayException lastErr = null;
+            for (int i = 0; i < targets.size(); i++) {
+                RouteTarget target = targets.get(i);
+                PriceEntry pe = entries.get(i);
+                long started = System.currentTimeMillis();
+                try {
+                    String token = providerToken(target.targetId(), target.encryptedSecret(), encryptionKey);
+                    String protocol = target.protocol() != null ? target.protocol().toLowerCase() : "openai";
+                    URI endpoint = protocolImageEndpoint(protocol, target.baseUrl(), target.upstreamModel());
+                    SecurityUtils.validateProviderUrl(endpoint.toString(), allowPrivateUpstream);
+                    byte[] outBytes = buildImagePayloadForProtocol(protocol, target, imgReq);
+
+                    HttpRequest.Builder reqBuilder = HttpRequest.newBuilder()
+                        .uri(endpoint)
+                        .timeout(Duration.ofMillis(Math.max(100, t.firstByteMs())))
+                        .header("Content-Type", "application/json")
+                        .header("Accept", "application/json")
+                        .header("User-Agent", "ai-gateway/0.2")
+                        .header("X-Request-Id", requestId)
+                        .POST(HttpRequest.BodyPublishers.ofByteArray(outBytes));
+                    applyProtocolAuthHeaders(reqBuilder, protocol, token);
+
+                    pooledRequestsDispatched.incrementAndGet();
+                    HttpResponse<InputStream> httpResp = sendPooledRequest(reqBuilder.build(), t.firstByteMs(), new AtomicReference<>(), new AtomicReference<>());
+                    int code = httpResp.statusCode();
+                    long lat = Math.max(0L, System.currentTimeMillis() - started);
+                    if (code < 200 || code >= 300) {
+                        try (InputStream errIn = httpResp.body()) {
+                            if (errIn != null) errIn.readNBytes(4096);
+                        } catch (Exception ignored) {}
+                        UpstreamHttpErr info = upstreamHttpError(code);
+                        boolean zeroCharge = code == 429 || code == 502 || code == 503 || code == 504;
+                        AttemptRecord ar = new AttemptRecord(
+                            pe.attempt_no(), target.targetId(), target.upstreamModel(), "error", code, info.code(),
+                            !zeroCharge, !zeroCharge, zeroCharge, zeroCharge ? 0L : null, zeroCharge ? 0L : null, zeroCharge ? 0L : null,
+                            pe.reserved_micros(), info.retrySafe(), lat
+                        );
+                        if (info.retrySafe()) recordTargetFailure(target.targetId());
+                        attempts.add(ar);
+                        lastErr = errorFromRecord(ar);
+                        if (!canFallback(ar, i, targets.size())) break;
+                        continue;
+                    }
+                    byte[] rawResp = readBoundedStream(httpResp.body(), MAX_UPSTREAM_JSON_BYTES, new AtomicReference<>());
+                    Map<String, Object> normalized = translateImageResponseToOpenAi(
+                        protocol,
+                        mapper.readValue(rawResp, Map.class),
+                        route.aliasName(),
+                        imgReq,
+                        estInputTokens,
+                        estImageOutputTokens
+                    );
+                    Long pTokens = (long) estInputTokens;
+                    Long cTokens = (long) estImageOutputTokens;
+                    if (normalized.get("usage") instanceof Map<?, ?> uMap) {
+                        if (uMap.get("input_tokens") instanceof Number n) pTokens = n.longValue();
+                        else if (uMap.get("prompt_tokens") instanceof Number n) pTokens = n.longValue();
+                        if (uMap.get("output_tokens") instanceof Number n) cTokens = n.longValue();
+                        else if (uMap.get("completion_tokens") instanceof Number n) cTokens = n.longValue();
+                    }
+                    Long cost = usageMicros(pTokens, cTokens, target.inputPrice(), target.outputPrice());
+                    AttemptRecord okRec = new AttemptRecord(
+                        pe.attempt_no(), target.targetId(), target.upstreamModel(), "ok", code, null,
+                        true, false, true, pTokens, cTokens, cost,
+                        pe.reserved_micros(), false, lat
+                    );
+                    recordTargetSuccess(target.targetId());
+                    attempts.add(okRec);
+                    sender.sendJson(200, requestId, mapper.writeValueAsString(normalized), null);
+                    finalStatus = "completed";
+                    return;
+                } catch (GatewayException ge) {
+                    long lat = Math.max(0L, System.currentTimeMillis() - started);
+                    AttemptRecord ar = new AttemptRecord(
+                        pe.attempt_no(), target.targetId(), target.upstreamModel(), "error", null, ge.getCode(),
+                        true, true, false, null, null, null, pe.reserved_micros(), false, lat
+                    );
+                    attempts.add(ar);
+                    lastErr = ge;
+                    break;
+                } catch (Exception ex) {
+                    long lat = Math.max(0L, System.currentTimeMillis() - started);
+                    recordTargetFailure(target.targetId());
+                    AttemptRecord ar = new AttemptRecord(
+                        pe.attempt_no(), target.targetId(), target.upstreamModel(), "error", null, "upstream_connect_failed",
+                        false, false, true, 0L, 0L, 0L, pe.reserved_micros(), true, lat
+                    );
+                    attempts.add(ar);
+                    lastErr = errorFromRecord(ar);
+                    if (!canFallback(ar, i, targets.size())) break;
+                }
+            }
+            HttpResponsePayload errPayload = buildErrorPayload(requestId, lastErr != null ? lastErr : new GatewayException(502, "upstream_error", "上游生图调用失败。"), null);
+            sender.sendJson(errPayload.status(), requestId, errPayload.jsonBody(), null);
+        } catch (Exception e) {
+            if (!sender.isClientClosed()) {
+                HttpResponsePayload errPayload = buildErrorPayload(requestId, e, retryAfterOf(e));
+                sender.sendJson(errPayload.status(), requestId, errPayload.jsonBody(), null);
+            }
+        } finally {
+            finishRequest(requestId, admitted, dispatched, prepared, finalStatus, attempts, persistedAttempts, null, snapshot, pluginCtx);
         }
     }
 
@@ -2350,7 +2812,8 @@ public class DataPlaneExecutor {
             }
             dims = n.intValue();
         }
-        return new EmbeddingRequest(model, inputs, encFmt, dims);
+        String inputType = map.get("input_type") instanceof String it ? it : (map.get("task_type") instanceof String tt ? tt : null);
+        return new EmbeddingRequest(model, inputs, encFmt, dims, inputType);
     }
 
     public static int estimateInputTokens(List<ChatMessage> messages) {
@@ -2620,6 +3083,391 @@ public class DataPlaneExecutor {
         } catch (Exception e) {
             throw new GatewayException(502, "invalid_provider_url", "上游服务地址无效。");
         }
+    }
+
+    public static URI protocolEmbeddingsEndpoint(String protocol, String baseUrl, String upstreamModel) {
+        try {
+            URI u = new URI(baseUrl.trim());
+            String path = u.getPath() != null ? u.getPath() : "";
+            if (!path.endsWith("/")) path += "/";
+            if ("gemini".equals(protocol)) {
+                path += "models/" + upstreamModel + ":batchEmbedContents";
+            } else if ("cohere".equals(protocol)) {
+                path += "embed";
+            } else {
+                path += "embeddings";
+            }
+            return new URI(u.getScheme(), u.getUserInfo(), u.getHost(), u.getPort(), path, null, null);
+        } catch (Exception e) {
+            throw new GatewayException(502, "invalid_provider_url", "上游服务地址无效。");
+        }
+    }
+
+    public static URI protocolRerankEndpoint(String protocol, String baseUrl, String upstreamModel) {
+        try {
+            URI u = new URI(baseUrl.trim());
+            String path = u.getPath() != null ? u.getPath() : "";
+            if (!path.endsWith("/")) path += "/";
+            path += "rerank";
+            return new URI(u.getScheme(), u.getUserInfo(), u.getHost(), u.getPort(), path, null, null);
+        } catch (Exception e) {
+            throw new GatewayException(502, "invalid_provider_url", "上游服务地址无效。");
+        }
+    }
+
+    public static URI protocolImageEndpoint(String protocol, String baseUrl, String upstreamModel) {
+        try {
+            URI u = new URI(baseUrl.trim());
+            String path = u.getPath() != null ? u.getPath() : "";
+            if (!path.endsWith("/")) path += "/";
+            if ("gemini".equals(protocol)) {
+                path += "models/" + upstreamModel + ":predict";
+            } else {
+                path += "images/generations";
+            }
+            return new URI(u.getScheme(), u.getUserInfo(), u.getHost(), u.getPort(), path, null, null);
+        } catch (Exception e) {
+            throw new GatewayException(502, "invalid_provider_url", "上游服务地址无效。");
+        }
+    }
+
+    private byte[] buildEmbeddingsPayloadForProtocol(String protocol, RouteTarget target, EmbeddingRequest embReq) throws Exception {
+        if ("gemini".equals(protocol)) {
+            List<Map<String, Object>> requests = new ArrayList<>(embReq.inputs().size());
+            String modelRef = target.upstreamModel().startsWith("models/") ? target.upstreamModel() : "models/" + target.upstreamModel();
+            for (String text : embReq.inputs()) {
+                Map<String, Object> reqItem = new LinkedHashMap<>();
+                reqItem.put("model", modelRef);
+                reqItem.put("content", Map.of("parts", List.of(Map.of("text", text))));
+                if (embReq.dimensions() != null) {
+                    reqItem.put("outputDimensionality", embReq.dimensions());
+                }
+                if (embReq.inputType() != null) {
+                    reqItem.put("taskType", embReq.inputType());
+                }
+                requests.add(reqItem);
+            }
+            return mapper.writeValueAsBytes(Map.of("requests", requests));
+        }
+        if ("cohere".equals(protocol)) {
+            Map<String, Object> coherePayload = new LinkedHashMap<>();
+            coherePayload.put("model", target.upstreamModel());
+            coherePayload.put("texts", embReq.inputs());
+            coherePayload.put("input_type", embReq.inputType() != null ? embReq.inputType() : "search_document");
+            if (embReq.encodingFormat() != null) {
+                coherePayload.put("embedding_types", List.of(embReq.encodingFormat()));
+            }
+            return mapper.writeValueAsBytes(coherePayload);
+        }
+        Map<String, Object> upPayload = new LinkedHashMap<>();
+        upPayload.put("model", target.upstreamModel());
+        upPayload.put("input", embReq.inputs().size() == 1 ? embReq.inputs().get(0) : embReq.inputs());
+        if (embReq.encodingFormat() != null) upPayload.put("encoding_format", embReq.encodingFormat());
+        if (embReq.dimensions() != null) upPayload.put("dimensions", embReq.dimensions());
+        if ("jina".equals(protocol) && embReq.inputType() != null) {
+            upPayload.put("task", embReq.inputType());
+        }
+        return mapper.writeValueAsBytes(upPayload);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> translateEmbeddingsResponseToOpenAi(
+        String protocol,
+        Map<?, ?> raw,
+        String aliasName,
+        int estInputTokens
+    ) {
+        if ("gemini".equals(protocol)) {
+            List<Map<String, Object>> data = new ArrayList<>();
+            if (raw.get("embeddings") instanceof List<?> embList) {
+                for (int i = 0; i < embList.size(); i++) {
+                    if (embList.get(i) instanceof Map<?, ?> em && em.get("values") instanceof List<?> vals) {
+                        Map<String, Object> item = new LinkedHashMap<>();
+                        item.put("object", "embedding");
+                        item.put("index", i);
+                        item.put("embedding", vals);
+                        data.add(item);
+                    }
+                }
+            } else if (raw.get("embedding") instanceof Map<?, ?> singleEm && singleEm.get("values") instanceof List<?> vals) {
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("object", "embedding");
+                item.put("index", 0);
+                item.put("embedding", vals);
+                data.add(item);
+            }
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("object", "list");
+            out.put("data", data);
+            out.put("model", aliasName);
+            out.put("usage", Map.of("prompt_tokens", estInputTokens, "total_tokens", estInputTokens));
+            return out;
+        }
+        if ("cohere".equals(protocol)) {
+            List<Map<String, Object>> data = new ArrayList<>();
+            List<?> vectors = null;
+            if (raw.get("embeddings") instanceof List<?> list) {
+                vectors = list;
+            } else if (raw.get("embeddings") instanceof Map<?, ?> emMap) {
+                if (emMap.get("float") instanceof List<?> fl) vectors = fl;
+                else if (emMap.get("base64") instanceof List<?> bl) vectors = bl;
+            }
+            if (vectors != null) {
+                for (int i = 0; i < vectors.size(); i++) {
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("object", "embedding");
+                    item.put("index", i);
+                    item.put("embedding", vectors.get(i));
+                    data.add(item);
+                }
+            }
+            int billedTokens = estInputTokens;
+            if (raw.get("meta") instanceof Map<?, ?> meta && meta.get("billed_units") instanceof Map<?, ?> bu && bu.get("input_tokens") instanceof Number n) {
+                billedTokens = n.intValue();
+            }
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("object", "list");
+            out.put("data", data);
+            out.put("model", aliasName);
+            out.put("usage", Map.of("prompt_tokens", billedTokens, "total_tokens", billedTokens));
+            return out;
+        }
+        Map<String, Object> out = new LinkedHashMap<>((Map<String, Object>) raw);
+        out.put("model", aliasName);
+        if (!out.containsKey("object")) out.put("object", "list");
+        return out;
+    }
+
+    public static RerankRequest validateRerankBody(Map<String, Object> map) {
+        for (String k : map.keySet()) {
+            if (!ALLOWED_RERANK_KEYS.contains(k)) {
+                throw new GatewayException(400, "unsupported_parameter", "不支持的重排序参数：" + k);
+            }
+        }
+        if (!(map.get("model") instanceof String model) || model.isBlank() || model.length() > 128) {
+            throw new GatewayException(400, "invalid_request", "model 必填");
+        }
+        if (!(map.get("query") instanceof String query) || query.isBlank() || query.length() > MAX_MESSAGE_CHARS) {
+            throw new GatewayException(400, "invalid_request", "query 必须是非空字符串");
+        }
+        if (!(map.get("documents") instanceof List<?> docList) || docList.isEmpty() || docList.size() > 256) {
+            throw new GatewayException(400, "invalid_request", "documents 必须是 1-256 个元素的非空数组");
+        }
+        List<String> docs = new ArrayList<>(docList.size());
+        for (Object item : docList) {
+            if (item instanceof String s && !s.isBlank()) {
+                docs.add(s);
+            } else if (item instanceof Map<?, ?> dm) {
+                Object txt = dm.get("text") != null ? dm.get("text") : dm.get("content");
+                if (!(txt instanceof String s) || s.isBlank()) {
+                    throw new GatewayException(400, "invalid_request", "documents 对象元素必须包含非空 text 字段");
+                }
+                docs.add(s);
+            } else {
+                throw new GatewayException(400, "invalid_request", "documents 元素必须是字符串或包含 text 的对象");
+            }
+        }
+        Object topNObj = map.get("top_n") != null ? map.get("top_n") : map.get("topN");
+        int topN = docs.size();
+        if (topNObj != null) {
+            if (!(topNObj instanceof Number n) || n.intValue() < 1) {
+                throw new GatewayException(400, "invalid_request", "top_n 必须是正整数");
+            }
+            topN = Math.min(docs.size(), n.intValue());
+        }
+        Object retDocObj = map.get("return_documents") != null ? map.get("return_documents") : map.get("returnDocuments");
+        boolean returnDocs = retDocObj == null || Boolean.TRUE.equals(retDocObj);
+        return new RerankRequest(model, query, docs, topN, returnDocs);
+    }
+
+    private byte[] buildRerankPayloadForProtocol(String protocol, RouteTarget target, RerankRequest req) throws Exception {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("model", target.upstreamModel());
+        payload.put("query", req.query());
+        payload.put("documents", req.documents());
+        payload.put("top_n", req.topN());
+        payload.put("return_documents", req.returnDocuments());
+        return mapper.writeValueAsBytes(payload);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> normalizeRerankResponse(
+        Map<?, ?> raw,
+        String aliasName,
+        String requestId,
+        RerankRequest req,
+        int estInputTokens
+    ) {
+        List<Map<String, Object>> normalizedResults = new ArrayList<>();
+        Object rawResults = raw.get("results") != null ? raw.get("results") : raw.get("data");
+        if (!(rawResults instanceof List<?> list)) {
+            throw new GatewayException(502, "upstream_invalid_response", "上游重排序响应缺少 results 列表。");
+        }
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> rm)) continue;
+            int idx = rm.get("index") instanceof Number n ? n.intValue() : 0;
+            double score = 0.0;
+            if (rm.get("relevance_score") instanceof Number n) score = n.doubleValue();
+            else if (rm.get("score") instanceof Number n) score = n.doubleValue();
+            Map<String, Object> entry = new LinkedHashMap<>();
+            entry.put("index", idx);
+            entry.put("relevance_score", score);
+            if (req.returnDocuments()) {
+                String docText = (idx >= 0 && idx < req.documents().size()) ? req.documents().get(idx) : "";
+                if (rm.get("document") instanceof Map<?, ?> dm && dm.get("text") instanceof String s) {
+                    docText = s;
+                } else if (rm.get("document") instanceof String s) {
+                    docText = s;
+                }
+                entry.put("document", Map.of("text", docText));
+            }
+            normalizedResults.add(entry);
+        }
+        normalizedResults.sort((a, b) -> Double.compare(
+            ((Number) b.get("relevance_score")).doubleValue(),
+            ((Number) a.get("relevance_score")).doubleValue()
+        ));
+        if (normalizedResults.size() > req.topN()) {
+            normalizedResults = new ArrayList<>(normalizedResults.subList(0, req.topN()));
+        }
+
+        int pTokens = estInputTokens;
+        if (raw.get("usage") instanceof Map<?, ?> uMap) {
+            if (uMap.get("total_tokens") instanceof Number n) pTokens = n.intValue();
+            else if (uMap.get("prompt_tokens") instanceof Number n) pTokens = n.intValue();
+        } else if (raw.get("meta") instanceof Map<?, ?> meta && meta.get("billed_units") instanceof Map<?, ?> bu) {
+            if (bu.get("total_tokens") instanceof Number n) pTokens = n.intValue();
+            else if (bu.get("search_units") instanceof Number n) pTokens = Math.max(estInputTokens, n.intValue() * 100);
+        }
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("id", "rerank_" + requestId);
+        out.put("model", aliasName);
+        out.put("results", normalizedResults);
+        out.put("usage", Map.of("prompt_tokens", pTokens, "total_tokens", pTokens));
+        return out;
+    }
+
+    public static ImageGenerationRequest validateImageGenerationBody(Map<String, Object> map) {
+        for (String k : map.keySet()) {
+            if (!ALLOWED_IMAGE_KEYS.contains(k)) {
+                throw new GatewayException(400, "unsupported_parameter", "不支持的生图参数：" + k);
+            }
+        }
+        if (!(map.get("model") instanceof String model) || model.isBlank() || model.length() > 128) {
+            throw new GatewayException(400, "invalid_request", "model 必填");
+        }
+        if (!(map.get("prompt") instanceof String prompt) || prompt.isBlank() || prompt.length() > MAX_MESSAGE_CHARS) {
+            throw new GatewayException(400, "invalid_request", "prompt 必须是非空字符串");
+        }
+        int n = 1;
+        if (map.get("n") != null) {
+            if (!(map.get("n") instanceof Number num) || num.intValue() < 1 || num.intValue() > 10) {
+                throw new GatewayException(400, "invalid_request", "n 必须是 1-10 的整数");
+            }
+            n = num.intValue();
+        }
+        String size = map.get("size") instanceof String s ? s.trim() : "1024x1024";
+        String quality = map.get("quality") instanceof String s ? s.trim() : null;
+        String style = map.get("style") instanceof String s ? s.trim() : null;
+        String responseFormat = map.get("response_format") instanceof String s ? s.trim() : null;
+        String negativePrompt = map.get("negative_prompt") instanceof String s ? s.trim() : null;
+        Long seed = map.get("seed") instanceof Number num ? num.longValue() : null;
+        return new ImageGenerationRequest(model, prompt, n, size, quality, style, responseFormat, negativePrompt, seed);
+    }
+
+    private byte[] buildImagePayloadForProtocol(String protocol, RouteTarget target, ImageGenerationRequest req) throws Exception {
+        if ("gemini".equals(protocol)) {
+            Map<String, Object> instance = new LinkedHashMap<>();
+            instance.put("prompt", req.prompt());
+            Map<String, Object> parameters = new LinkedHashMap<>();
+            parameters.put("sampleCount", req.n());
+            if ("1792x1024".equals(req.size()) || "1536x1024".equals(req.size())) {
+                parameters.put("aspectRatio", "16:9");
+            } else if ("1024x1792".equals(req.size()) || "1024x1536".equals(req.size())) {
+                parameters.put("aspectRatio", "9:16");
+            } else {
+                parameters.put("aspectRatio", "1:1");
+            }
+            if (req.negativePrompt() != null) {
+                parameters.put("negativePrompt", req.negativePrompt());
+            }
+            if (req.seed() != null) {
+                parameters.put("seed", req.seed());
+            }
+            return mapper.writeValueAsBytes(Map.of(
+                "instances", List.of(instance),
+                "parameters", parameters
+            ));
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("model", target.upstreamModel());
+        payload.put("prompt", req.prompt());
+        payload.put("n", req.n());
+        payload.put("size", req.size());
+        if (req.quality() != null) payload.put("quality", req.quality());
+        if (req.style() != null) payload.put("style", req.style());
+        if (req.responseFormat() != null) payload.put("response_format", req.responseFormat());
+        if (req.negativePrompt() != null) payload.put("negative_prompt", req.negativePrompt());
+        if (req.seed() != null) payload.put("seed", req.seed());
+        return mapper.writeValueAsBytes(payload);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> translateImageResponseToOpenAi(
+        String protocol,
+        Map<?, ?> raw,
+        String aliasName,
+        ImageGenerationRequest req,
+        int estInputTokens,
+        int estImageOutputTokens
+    ) {
+        if ("gemini".equals(protocol)) {
+            List<Map<String, Object>> data = new ArrayList<>();
+            if (raw.get("predictions") instanceof List<?> preds) {
+                for (Object pObj : preds) {
+                    if (pObj instanceof Map<?, ?> pm) {
+                        Map<String, Object> item = new LinkedHashMap<>();
+                        if (pm.get("bytesBase64Encoded") instanceof String b64) {
+                            item.put("b64_json", b64);
+                        } else if (pm.get("url") instanceof String url) {
+                            item.put("url", url);
+                        }
+                        item.put("revised_prompt", pm.get("prompt") instanceof String rp ? rp : req.prompt());
+                        data.add(item);
+                    }
+                }
+            }
+            if (data.isEmpty()) {
+                throw new GatewayException(502, "upstream_invalid_response", "Gemini Imagen 上游未返回有效图像数据。");
+            }
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("created", Instant.now().getEpochSecond());
+            out.put("model", aliasName);
+            out.put("data", data);
+            out.put("usage", Map.of(
+                "input_tokens", estInputTokens,
+                "output_tokens", estImageOutputTokens,
+                "total_tokens", estInputTokens + estImageOutputTokens
+            ));
+            return out;
+        }
+        if (!(raw.get("data") instanceof List<?> dataList) || dataList.isEmpty()) {
+            throw new GatewayException(502, "upstream_invalid_response", "上游生图响应缺少 data 列表。");
+        }
+        Map<String, Object> out = new LinkedHashMap<>((Map<String, Object>) raw);
+        if (!out.containsKey("created")) {
+            out.put("created", Instant.now().getEpochSecond());
+        }
+        out.put("model", aliasName);
+        if (!out.containsKey("usage")) {
+            out.put("usage", Map.of(
+                "input_tokens", estInputTokens,
+                "output_tokens", estImageOutputTokens,
+                "total_tokens", estInputTokens + estImageOutputTokens
+            ));
+        }
+        return out;
     }
 
     public String upstreamPayloadForProtocol(String protocol, RouteTarget target, ChatRequest body, int maxOutputTokens) throws Exception {

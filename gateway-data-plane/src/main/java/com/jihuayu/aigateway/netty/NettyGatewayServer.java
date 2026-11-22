@@ -194,6 +194,16 @@ public class NettyGatewayServer {
                         dataPlane.handleEmbeddings(authHeader, bodyBytes, requestId, sender);
                         return;
                     }
+                    if (HttpMethod.POST.equals(method) && ("/v1/rerank".equals(path) || "/v1/rank".equals(path))) {
+                        NettyResponseSender sender = new NettyResponseSender(ch, scopedNode);
+                        dataPlane.handleRerank(authHeader, bodyBytes, requestId, sender);
+                        return;
+                    }
+                    if (HttpMethod.POST.equals(method) && ("/v1/images/generations".equals(path) || "/v1/images/edits".equals(path))) {
+                        NettyResponseSender sender = new NettyResponseSender(ch, scopedNode);
+                        dataPlane.handleImageGenerations(authHeader, bodyBytes, requestId, sender);
+                        return;
+                    }
                     if (HttpMethod.POST.equals(method) && "/v1/messages".equals(path)) {
                         NettyResponseSender sender = new NettyResponseSender(ch, scopedNode);
                         dataPlane.handleAnthropicMessages(authHeader, xApiKeyHeader, bodyBytes, requestId, sender);

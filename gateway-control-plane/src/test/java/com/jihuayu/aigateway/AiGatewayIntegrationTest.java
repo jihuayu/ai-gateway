@@ -386,6 +386,93 @@ public class AiGatewayIntegrationTest {
             exchange.getResponseBody().write(out);
             exchange.close();
         });
+        mockUpstream.createContext("/v1beta/models", exchange -> {
+            String path = exchange.getRequestURI().getPath();
+            byte[] reqBytes = exchange.getRequestBody().readAllBytes();
+            Map<String, Object> reqJson = mapper.readValue(reqBytes, Map.class);
+            Map<String, Object> respJson = new LinkedHashMap<>();
+            if (path.endsWith(":batchEmbedContents")) {
+                List<?> reqs = (List<?>) reqJson.get("requests");
+                List<Map<String, Object>> embs = new ArrayList<>();
+                for (int i = 0; i < (reqs != null ? reqs.size() : 1); i++) {
+                    embs.add(Map.of("values", List.of(0.11, 0.22, 0.33, 0.44)));
+                }
+                respJson.put("embeddings", embs);
+            } else if (path.endsWith(":predict")) {
+                Map<?, ?> params = reqJson.get("parameters") instanceof Map<?, ?> m ? m : Map.of();
+                String ar = params.get("aspectRatio") != null ? String.valueOf(params.get("aspectRatio")) : "1:1";
+                respJson.put("predictions", List.of(Map.of(
+                    "bytesBase64Encoded", "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+                    "mimeType", "image/png",
+                    "prompt", "gemini-imagen-ar-" + ar
+                )));
+            }
+            byte[] out = mapper.writeValueAsBytes(respJson);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, out.length);
+            exchange.getResponseBody().write(out);
+            exchange.close();
+        });
+
+        mockUpstream.createContext("/v1/embed", exchange -> {
+            byte[] reqBytes = exchange.getRequestBody().readAllBytes();
+            Map<String, Object> reqJson = mapper.readValue(reqBytes, Map.class);
+            List<?> texts = (List<?>) reqJson.get("texts");
+            List<List<Double>> vecs = new ArrayList<>();
+            for (int i = 0; i < (texts != null ? texts.size() : 1); i++) {
+                vecs.add(List.of(0.55, -0.44, 0.33));
+            }
+            Map<String, Object> respJson = Map.of(
+                "id", "cohere_emb_1",
+                "embeddings", vecs,
+                "meta", Map.of("billed_units", Map.of("input_tokens", 42))
+            );
+            byte[] out = mapper.writeValueAsBytes(respJson);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, out.length);
+            exchange.getResponseBody().write(out);
+            exchange.close();
+        });
+
+        mockUpstream.createContext("/v1/rerank", exchange -> {
+            byte[] reqBytes = exchange.getRequestBody().readAllBytes();
+            Map<String, Object> reqJson = mapper.readValue(reqBytes, Map.class);
+            List<?> docs = (List<?>) reqJson.get("documents");
+            List<Map<String, Object>> results = new ArrayList<>();
+            for (int i = 0; i < (docs != null ? docs.size() : 0); i++) {
+                double score = (i == 1) ? 0.985 : 0.120;
+                results.add(Map.of("index", i, "relevance_score", score));
+            }
+            Map<String, Object> respJson = Map.of(
+                "model", reqJson.getOrDefault("model", "jina-reranker-v2"),
+                "results", results,
+                "usage", Map.of("total_tokens", 64, "prompt_tokens", 64)
+            );
+            byte[] out = mapper.writeValueAsBytes(respJson);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, out.length);
+            exchange.getResponseBody().write(out);
+            exchange.close();
+        });
+
+        mockUpstream.createContext("/v1/images/generations", exchange -> {
+            byte[] reqBytes = exchange.getRequestBody().readAllBytes();
+            Map<String, Object> reqJson = mapper.readValue(reqBytes, Map.class);
+            Map<String, Object> respJson = Map.of(
+                "created", 1700000000L,
+                "data", List.of(Map.of(
+                    "url", "https://images.example.com/generated-1.png",
+                    "revised_prompt", String.valueOf(reqJson.get("prompt"))
+                )),
+                "usage", Map.of("input_tokens", 20, "output_tokens", 1000, "total_tokens", 1020)
+            );
+            byte[] out = mapper.writeValueAsBytes(respJson);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, out.length);
+            exchange.getResponseBody().write(out);
+            exchange.close();
+        });
+
         mockUpstream.start();
     }
 
@@ -1894,6 +1981,200 @@ public class AiGatewayIntegrationTest {
         assertTrue(clusterKeys.projectTpm(projectId).contains(expectedTag));
 
         sendAdmin("DELETE", "/api/mcp-servers/" + mcpServerId, null, true);
+    }
+
+    @Test
+    @Order(13)
+    @SuppressWarnings("unchecked")
+    void testStage13P2Batch4ImageGenerationRerankAndMultiProtocolEmbeddings() throws Exception {
+        int nettyPort = nettyServer.getBoundPort();
+
+        // 1. Create Gemini, Cohere, and Jina providers
+        HttpResponse<String> geminiProvResp = sendAdmin("POST", "/api/providers", Map.of(
+            "name", "gemini-multimodal-prov",
+            "protocol", "gemini",
+            "base_url", "http://127.0.0.1:" + upstreamPort + "/v1beta",
+            "secret", "gemini-key-123"
+        ), true);
+        assertEquals(200, geminiProvResp.statusCode(), geminiProvResp.body());
+        String geminiProvId = String.valueOf(mapper.readValue(geminiProvResp.body(), Map.class).get("id"));
+
+        HttpResponse<String> cohereProvResp = sendAdmin("POST", "/api/providers", Map.of(
+            "name", "cohere-prov",
+            "protocol", "cohere",
+            "base_url", "http://127.0.0.1:" + upstreamPort + "/v1",
+            "secret", "cohere-key-123"
+        ), true);
+        assertEquals(200, cohereProvResp.statusCode(), cohereProvResp.body());
+        String cohereProvId = String.valueOf(mapper.readValue(cohereProvResp.body(), Map.class).get("id"));
+
+        HttpResponse<String> jinaProvResp = sendAdmin("POST", "/api/providers", Map.of(
+            "name", "jina-prov",
+            "protocol", "jina",
+            "base_url", "http://127.0.0.1:" + upstreamPort + "/v1",
+            "secret", "jina-key-123"
+        ), true);
+        assertEquals(200, jinaProvResp.statusCode(), jinaProvResp.body());
+        String jinaProvId = String.valueOf(mapper.readValue(jinaProvResp.body(), Map.class).get("id"));
+
+        // 2. Test Cross-Protocol Embeddings: POST /v1/embeddings -> Gemini :batchEmbedContents & Cohere /v1/embed
+        HttpResponse<String> geminiEmbTargetResp = sendAdmin("POST", "/api/providers/" + geminiProvId + "/targets", Map.of(
+            "upstream_model", "text-embedding-004",
+            "input_price", 100_000L,
+            "output_price", 0L,
+            "capabilities", List.of("embeddings")
+        ), true);
+        assertEquals(200, geminiEmbTargetResp.statusCode(), geminiEmbTargetResp.body());
+        String geminiEmbTargetId = String.valueOf(mapper.readValue(geminiEmbTargetResp.body(), Map.class).get("id"));
+
+        HttpResponse<String> cohereEmbTargetResp = sendAdmin("POST", "/api/providers/" + cohereProvId + "/targets", Map.of(
+            "upstream_model", "embed-multilingual-v3.0",
+            "input_price", 100_000L,
+            "output_price", 0L,
+            "capabilities", List.of("embeddings")
+        ), true);
+        assertEquals(200, cohereEmbTargetResp.statusCode(), cohereEmbTargetResp.body());
+        String cohereEmbTargetId = String.valueOf(mapper.readValue(cohereEmbTargetResp.body(), Map.class).get("id"));
+
+        HttpResponse<String> geminiEmbAliasResp = sendAdmin("POST", "/api/projects/" + projectId + "/aliases", Map.of(
+            "name", "gemini-embed",
+            "targets", List.of(geminiEmbTargetId),
+            "capabilities", List.of("embeddings")
+        ), true);
+        assertEquals(200, geminiEmbAliasResp.statusCode(), geminiEmbAliasResp.body());
+        String geminiEmbAliasId = String.valueOf(mapper.readValue(geminiEmbAliasResp.body(), Map.class).get("id"));
+        assertEquals(200, sendAdmin("POST", "/api/aliases/" + geminiEmbAliasId + "/publish", Map.of("expectedVersion", 1), true).statusCode());
+
+        HttpResponse<String> cohereEmbAliasResp = sendAdmin("POST", "/api/projects/" + projectId + "/aliases", Map.of(
+            "name", "cohere-embed",
+            "targets", List.of(cohereEmbTargetId),
+            "capabilities", List.of("embeddings")
+        ), true);
+        assertEquals(200, cohereEmbAliasResp.statusCode(), cohereEmbAliasResp.body());
+        String cohereEmbAliasId = String.valueOf(mapper.readValue(cohereEmbAliasResp.body(), Map.class).get("id"));
+        assertEquals(200, sendAdmin("POST", "/api/aliases/" + cohereEmbAliasId + "/publish", Map.of("expectedVersion", 1), true).statusCode());
+
+        // Create an unrestricted key for Stage 13 models
+        HttpResponse<String> allModelsKeyResp = sendAdmin("POST", "/api/keys", Map.of(
+            "project_id", projectId,
+            "name", "stage13-all-models-key",
+            "allowed_models", List.of()
+        ), true);
+        assertEquals(200, allModelsKeyResp.statusCode(), allModelsKeyResp.body());
+        String mmKeyPlain = String.valueOf(mapper.readValue(allModelsKeyResp.body(), Map.class).get("key"));
+
+        HttpResponse<String> callGeminiEmb = httpClient.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/embeddings"))
+                .header("Authorization", "Bearer " + mmKeyPlain)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"model\":\"gemini-embed\",\"input\":[\"first text\",\"second text\"],\"dimensions\":4,\"task_type\":\"RETRIEVAL_DOCUMENT\"}"))
+                .build(),
+            HttpResponse.BodyHandlers.ofString()
+        );
+        assertEquals(200, callGeminiEmb.statusCode(), callGeminiEmb.body());
+        Map<String, Object> gEmbJson = mapper.readValue(callGeminiEmb.body(), Map.class);
+        assertEquals("list", gEmbJson.get("object"));
+        assertEquals("gemini-embed", gEmbJson.get("model"));
+        assertEquals(2, ((List<?>) gEmbJson.get("data")).size());
+
+        HttpResponse<String> callCohereEmb = httpClient.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/embeddings"))
+                .header("Authorization", "Bearer " + mmKeyPlain)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"model\":\"cohere-embed\",\"input\":[\"cohere text\"],\"input_type\":\"search_query\"}"))
+                .build(),
+            HttpResponse.BodyHandlers.ofString()
+        );
+        assertEquals(200, callCohereEmb.statusCode(), callCohereEmb.body());
+        Map<String, Object> cEmbJson = mapper.readValue(callCohereEmb.body(), Map.class);
+        assertEquals("cohere-embed", cEmbJson.get("model"));
+        assertEquals(1, ((List<?>) cEmbJson.get("data")).size());
+
+        // 3. Test Rank / Rerank: POST /v1/rerank & POST /v1/rank
+        HttpResponse<String> rerankTargetResp = sendAdmin("POST", "/api/providers/" + jinaProvId + "/targets", Map.of(
+            "upstream_model", "jina-reranker-v2-base-multilingual",
+            "input_price", 200_000L,
+            "output_price", 0L,
+            "capabilities", List.of("rerank")
+        ), true);
+        assertEquals(200, rerankTargetResp.statusCode(), rerankTargetResp.body());
+        String rerankTargetId = String.valueOf(mapper.readValue(rerankTargetResp.body(), Map.class).get("id"));
+
+        HttpResponse<String> rerankAliasResp = sendAdmin("POST", "/api/projects/" + projectId + "/aliases", Map.of(
+            "name", "doc-rerank",
+            "targets", List.of(rerankTargetId),
+            "capabilities", List.of("rerank")
+        ), true);
+        assertEquals(200, rerankAliasResp.statusCode(), rerankAliasResp.body());
+        String rerankAliasId = String.valueOf(mapper.readValue(rerankAliasResp.body(), Map.class).get("id"));
+        assertEquals(200, sendAdmin("POST", "/api/aliases/" + rerankAliasId + "/publish", Map.of("expectedVersion", 1), true).statusCode());
+
+        HttpResponse<String> callRerank = httpClient.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/rerank"))
+                .header("Authorization", "Bearer " + mmKeyPlain)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"model\":\"doc-rerank\",\"query\":\"AI gateway billing\",\"documents\":[\"Unrelated cooking recipe\",\"Redis Lua 3-phase billing ledger\"],\"top_n\":1}"))
+                .build(),
+            HttpResponse.BodyHandlers.ofString()
+        );
+        assertEquals(200, callRerank.statusCode(), callRerank.body());
+        Map<String, Object> rerankJson = mapper.readValue(callRerank.body(), Map.class);
+        assertEquals("doc-rerank", rerankJson.get("model"));
+        List<Map<String, Object>> rerankResults = (List<Map<String, Object>>) rerankJson.get("results");
+        assertEquals(1, rerankResults.size());
+        assertEquals(1, ((Number) rerankResults.get(0).get("index")).intValue());
+        assertEquals(0.985, ((Number) rerankResults.get(0).get("relevance_score")).doubleValue(), 0.001);
+
+        // Also test POST /v1/rank with object array documents: [{"text": "..."}]
+        HttpResponse<String> callRankAlias = httpClient.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/rank"))
+                .header("Authorization", "Bearer " + mmKeyPlain)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"model\":\"doc-rerank\",\"query\":\"AI gateway\",\"documents\":[{\"text\":\"Doc 0\"},{\"text\":\"Doc 1\"}]}"))
+                .build(),
+            HttpResponse.BodyHandlers.ofString()
+        );
+        assertEquals(200, callRankAlias.statusCode(), callRankAlias.body());
+
+        // 4. Test Image Generation: POST /v1/images/generations -> Gemini Imagen :predict protocol translation
+        HttpResponse<String> imgTargetResp = sendAdmin("POST", "/api/providers/" + geminiProvId + "/targets", Map.of(
+            "upstream_model", "imagen-3.0-generate-002",
+            "input_price", 500_000L,
+            "output_price", 40_000_000L,
+            "capabilities", List.of("image_generation")
+        ), true);
+        assertEquals(200, imgTargetResp.statusCode(), imgTargetResp.body());
+        String imgTargetId = String.valueOf(mapper.readValue(imgTargetResp.body(), Map.class).get("id"));
+
+        HttpResponse<String> imgAliasResp = sendAdmin("POST", "/api/projects/" + projectId + "/aliases", Map.of(
+            "name", "studio-image",
+            "targets", List.of(imgTargetId),
+            "capabilities", List.of("image_generation")
+        ), true);
+        assertEquals(200, imgAliasResp.statusCode(), imgAliasResp.body());
+        String imgAliasId = String.valueOf(mapper.readValue(imgAliasResp.body(), Map.class).get("id"));
+        assertEquals(200, sendAdmin("POST", "/api/aliases/" + imgAliasId + "/publish", Map.of("expectedVersion", 1), true).statusCode());
+
+        HttpResponse<String> callImageGen = httpClient.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/images/generations"))
+                .header("Authorization", "Bearer " + mmKeyPlain)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"model\":\"studio-image\",\"prompt\":\"Futuristic neon skyline\",\"n\":1,\"size\":\"1792x1024\"}"))
+                .build(),
+            HttpResponse.BodyHandlers.ofString()
+        );
+        assertEquals(200, callImageGen.statusCode(), callImageGen.body());
+        Map<String, Object> imgJson = mapper.readValue(callImageGen.body(), Map.class);
+        assertEquals("studio-image", imgJson.get("model"));
+        List<Map<String, Object>> imgData = (List<Map<String, Object>>) imgJson.get("data");
+        assertEquals(1, imgData.size());
+        assertNotNull(imgData.get(0).get("b64_json"));
+        assertEquals("gemini-imagen-ar-16:9", imgData.get(0).get("revised_prompt"));
     }
 
     private HttpResponse<String> sendAdmin(String method, String path, Object body, boolean includeCsrf) throws Exception {
