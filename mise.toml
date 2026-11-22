@@ -2,6 +2,7 @@
 [tools]
 java = "graalvm-25"
 gradle = "9.1.0"
+node = "22"
 
 [env]
 JAVA_OPTS = "--enable-preview"
@@ -9,6 +10,14 @@ JAVA_OPTS = "--enable-preview"
 [tasks.build]
 description = "Build all gateway modules (:gateway-common, :gateway-data-plane, :gateway-control-plane)"
 run = "./gradlew build -x test"
+
+[tasks.console-build]
+description = "Build React 19 + @ui-sdk/react + StyleX static console bundle and sync to control-plane"
+run = "cd gateway-console && npm run build && rm -rf ../gateway-control-plane/src/main/resources/static/* && cp -R dist/* ../gateway-control-plane/src/main/resources/static/"
+
+[tasks.console-dev]
+description = "Start Vite 6 dev server for gateway-console"
+run = "cd gateway-console && npm run dev"
 
 [tasks.test]
 description = "Run full Testcontainers, Spring Modulith & Netty Cluster integration tests"

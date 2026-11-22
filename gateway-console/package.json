@@ -1,0 +1,28 @@
+{
+  "name": "gateway-console",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@stylexjs/stylex": "^0.19.2",
+    "@ui-sdk/core": "^0.1.0-beta.13",
+    "@ui-sdk/react": "^0.1.0-beta.13",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@stylexjs/babel-plugin": "^0.19.2",
+    "@stylexjs/postcss-plugin": "^0.19.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^4.7.0",
+    "postcss": "^8.5.33",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.6"
+  }
+}

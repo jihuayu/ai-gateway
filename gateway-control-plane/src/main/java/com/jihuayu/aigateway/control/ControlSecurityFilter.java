@@ -15,10 +15,10 @@ import java.util.Set;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.ResponseEntity;
+import org.springframework.stereotype.Component;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.filter.OncePerRequestFilter;
-import org.springframework.stereotype.Component;
 
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE)
@@ -52,7 +52,10 @@ public class ControlSecurityFilter extends OncePerRequestFilter {
         resp.setHeader("Referrer-Policy", "same-origin");
         resp.setHeader("X-Frame-Options", "DENY");
         resp.setHeader("Cache-Control", "no-store");
-        resp.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
+        resp.setHeader(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+        );
 
         String method = req.getMethod().toUpperCase();
         String path = req.getRequestURI();
