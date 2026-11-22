@@ -70,7 +70,7 @@ public class HotBilling {
         .maximumSize(65_536)
         .expireAfterAccess(Duration.ofMinutes(15))
         .build();
-    private final TokioMpscBatchChannel batchChannel;
+    private final MpscBatchChannel batchChannel;
     private final DistributedQuotaAndHaEngine haEngine = new DistributedQuotaAndHaEngine();
 
     private volatile String lua = "";
@@ -91,10 +91,10 @@ public class HotBilling {
         this.maxBacklog = maxBacklog;
         this.leaseMs = leaseMs;
         this.mapper = mapper;
-        this.batchChannel = new TokioMpscBatchChannel(redisConn);
+        this.batchChannel = new MpscBatchChannel(redisConn);
     }
 
-    public TokioMpscBatchChannel batchChannel() {
+    public MpscBatchChannel batchChannel() {
         return batchChannel;
     }
 
@@ -200,7 +200,7 @@ public class HotBilling {
     }
 
     /**
-     * P0 Single-RTT combined {@code admit + dispatch} atomic operation via Tokio MPSC Group-Commit channel.
+     * P0 Single-RTT combined {@code admit + dispatch} atomic operation via MPSC Batch Group-Commit channel.
      */
     public void admitAndDispatch(AdmitInput input) {
         admitInternal("admit_and_dispatch", input);

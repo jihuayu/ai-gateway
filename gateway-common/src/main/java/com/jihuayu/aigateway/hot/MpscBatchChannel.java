@@ -16,17 +16,17 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
 
 /**
- * Rust Tokio-inspired {@code mpsc::channel} + {@code oneshot::channel} Actor Group-Commit Pipeline
+ * Bounded MPSC Actor Group-Commit Pipeline
  * for Redis Lua execution.
  *
  * <p>When dozens of virtual threads concurrently invoke {@code admit}, {@code dispatch}, or {@code settle},
  * instead of contending on synchronous socket round-trips one by one, each caller pushes a command envelope
- * with a {@link CompletableFuture} (equivalent to {@code tokio::sync::oneshot::Sender}) into a bounded
+ * with a {@link CompletableFuture} into a bounded
  * MPSC queue ({@code capacity = 4096}). A dedicated Flusher Virtual Thread drains up to 128 ready commands
  * in a single micro-batch, disables Lettuce auto-flush, writes all {@code EVALSHA} commands into a single
  * TCP pipeline frame, flushes once, and completes each caller's oneshot future as responses arrive.
  */
-public final class TokioMpscBatchChannel implements AutoCloseable {
+public final class MpscBatchChannel implements AutoCloseable {
 
     public record EvalCommand(
         String sha,
@@ -49,15 +49,15 @@ public final class TokioMpscBatchChannel implements AutoCloseable {
     private final AtomicLong totalBatchesFlushed = new AtomicLong(0);
     private final AtomicLong maxObservedBatchSize = new AtomicLong(0);
 
-    public TokioMpscBatchChannel(StatefulRedisConnection<String, String> redisConn) {
+    public MpscBatchChannel(StatefulRedisConnection<String, String> redisConn) {
         this(redisConn, DEFAULT_CHANNEL_CAPACITY);
     }
 
-    public TokioMpscBatchChannel(StatefulRedisConnection<String, String> redisConn, int capacity) {
+    public MpscBatchChannel(StatefulRedisConnection<String, String> redisConn, int capacity) {
         this.redisConn = redisConn;
         this.mpscQueue = new ArrayBlockingQueue<>(Math.max(64, capacity));
         this.flusherThread = Thread.ofVirtual()
-            .name("tokio-mpsc-redis-flusher")
+            .name("mpsc-batch-redis-flusher")
             .start(this::actorFlusherLoop);
     }
 
@@ -77,7 +77,7 @@ public final class TokioMpscBatchChannel implements AutoCloseable {
         CompletableFuture<List<Object>> oneshot = new CompletableFuture<>();
         EvalCommand cmd = new EvalCommand(sha, fallbackLua, keys, argv, oneshot);
         if (!mpscQueue.offer(cmd)) {
-            throw new GatewayException(503, "event_backlog", "Tokio MPSC channel capacity exceeded (backpressure)");
+            throw new GatewayException(503, "event_backlog", "MPSC Batch channel capacity exceeded (backpressure)");
         }
         totalCommandsSubmitted.incrementAndGet();
         try {
