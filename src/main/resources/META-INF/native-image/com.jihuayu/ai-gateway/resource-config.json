@@ -1,0 +1,8 @@
+{
+  "resources": {
+    "includes": [
+      { "pattern": "\\Qlua/\\E.*\\.lua$" },
+      { "pattern": "\\Qmigrations/\\E.*\\.sql$" }
+    ]
+  }
+}

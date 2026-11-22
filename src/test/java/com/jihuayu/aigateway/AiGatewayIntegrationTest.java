@@ -1029,6 +1029,97 @@ public class AiGatewayIntegrationTest {
         }
     }
 
+
+    @Test
+    @Order(8)
+    void testStandaloneZeroSqlNettyGatewayAndOracleGraalVmNativeBinary() throws Exception {
+        String encKey = "0000000000000000000000000000000000000000000000000000000000000001";
+        // 1. Verify in-process zero-SQL standalone NettyGatewayMain attaches purely to Redis hot state
+        try (com.jihuayu.aigateway.netty.NettyGatewayMain.StandaloneGatewayHandle standalone =
+                 com.jihuayu.aigateway.netty.NettyGatewayMain.startStandalone(
+                     "redis://127.0.0.1:6379", encKey, "127.0.0.1", 0, true, "java_test_ns", "aof", 10_000
+                 )) {
+            int standalonePort = standalone.server().getBoundPort();
+            assertTrue(standalonePort > 0);
+
+            HttpResponse<String> health = httpClient.send(
+                HttpRequest.newBuilder().uri(URI.create("http://127.0.0.1:" + standalonePort + "/health/ready")).GET().build(),
+                HttpResponse.BodyHandlers.ofString()
+            );
+            assertEquals(200, health.statusCode());
+            assertTrue(health.body().contains("ready"));
+
+            HttpResponse<String> models = httpClient.send(
+                HttpRequest.newBuilder()
+                    .uri(URI.create("http://127.0.0.1:" + standalonePort + "/v1/models"))
+                    .header("Authorization", "Bearer " + activeKeyPlain)
+                    .GET().build(),
+                HttpResponse.BodyHandlers.ofString()
+            );
+            assertEquals(200, models.statusCode(), models.body());
+            assertTrue(models.body().contains("support-chat"));
+
+            HttpResponse<String> chat = httpClient.send(
+                HttpRequest.newBuilder()
+                    .uri(URI.create("http://127.0.0.1:" + standalonePort + "/v1/chat/completions"))
+                    .header("Authorization", "Bearer " + activeKeyPlain)
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString("{\"model\":\"support-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"Standalone Netty\"}],\"max_tokens\":32}"))
+                    .build(),
+                HttpResponse.BodyHandlers.ofString()
+            );
+            assertEquals(200, chat.statusCode(), chat.body());
+        }
+
+        // 2. If the Oracle GraalVM 25 native executable target/ai-gateway-netty exists, launch and test it end-to-end
+        java.io.File nativeBin = new java.io.File("target/ai-gateway-netty");
+        if (nativeBin.exists() && nativeBin.canExecute()) {
+            int nativePort = 13199;
+            ProcessBuilder pb = new ProcessBuilder(nativeBin.getAbsolutePath());
+            pb.environment().put("HOST", "127.0.0.1");
+            pb.environment().put("GATEWAY_PORT", String.valueOf(nativePort));
+            pb.environment().put("REDIS_URL", "redis://127.0.0.1:6379");
+            pb.environment().put("ENCRYPTION_KEY", encKey);
+            pb.environment().put("DATA_PLANE_NAMESPACE", "java_test_ns");
+            pb.environment().put("HOT_DURABILITY", "aof");
+            pb.environment().put("ALLOW_PRIVATE_UPSTREAM", "true");
+            pb.redirectErrorStream(true);
+            Process proc = pb.start();
+            try {
+                boolean ready = false;
+                for (int i = 0; i < 30; i++) {
+                    try {
+                        HttpResponse<String> h = httpClient.send(
+                            HttpRequest.newBuilder().uri(URI.create("http://127.0.0.1:" + nativePort + "/health/ready")).GET().build(),
+                            HttpResponse.BodyHandlers.ofString()
+                        );
+                        if (h.statusCode() == 200) {
+                            ready = true;
+                            break;
+                        }
+                    } catch (Exception ignored) {}
+                    Thread.sleep(50);
+                }
+                assertTrue(ready, "Oracle GraalVM Native binary ai-gateway-netty should start and pass /health");
+
+                HttpResponse<String> nativeChat = httpClient.send(
+                    HttpRequest.newBuilder()
+                        .uri(URI.create("http://127.0.0.1:" + nativePort + "/v1/chat/completions"))
+                        .header("Authorization", "Bearer " + activeKeyPlain)
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString("{\"model\":\"support-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello Native Image\"}],\"max_tokens\":32}"))
+                        .build(),
+                    HttpResponse.BodyHandlers.ofString()
+                );
+                assertEquals(200, nativeChat.statusCode(), nativeChat.body());
+            } finally {
+                proc.destroy();
+                proc.waitFor(3, java.util.concurrent.TimeUnit.SECONDS);
+                if (proc.isAlive()) proc.destroyForcibly();
+            }
+        }
+    }
+
     private HttpResponse<String> sendAdmin(String method, String path, Object body, boolean includeCsrf) throws Exception {
         HttpRequest.Builder b = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + adminPort + path));
