@@ -5,12 +5,13 @@
 [![GraalVM](https://img.shields.io/badge/Oracle_GraalVM-25_Native_Image-F80000.svg)](https://www.graalvm.org/)
 [![Netty](https://img.shields.io/badge/Data_Plane-Netty_4.2-009688.svg)](https://netty.io/)
 [![Spring Boot](https://img.shields.io/badge/Control_Plane-Spring_Boot_4.2-6DB33F.svg)](https://spring.io/projects/spring-boot)
+[![Release & GHCR](https://github.com/jihuayu/ai-gateway/actions/workflows/release.yml/badge.svg)](https://github.com/jihuayu/ai-gateway/actions/workflows/release.yml)
 
 > **“把每一次 Token 流转当成金融级账本对待，把每一毫秒网关开销压缩到物理极限。”**
 >
 > 当大模型推理从实验室走向大规模生产，AI 网关不再只是一层简单的反向代理——它是算力预算的守门人、多云模型路由的调度中枢、以及高并发 SSE 流式响应的高速通道。
 >
-> **AI Gateway** 采用**现代 Java 25 LTS 虚拟线程（Project Loom）**与**控制面 / 数据面彻底解耦**的双引擎架构：管理平台基于 **Spring Boot 4.2** 构建，提供直观的多租户与路由编排控制台；数据面网关直连 **纯 Netty 4.2 + Redis 原子热账本**，热路径 **Zero-SQL（零数据库访问）**，并原生支持通过 **Oracle GraalVM 25** 一键编译为独立原生二进制与超轻量 Distroless 容器镜像。
+> **AI Gateway** 采用**现代 Java 25 LTS 虚拟线程（Project Loom）**与**控制面 / 数据面彻底解耦**的双引擎架构：管理平台基于 **Spring Boot 4.2** 构建，提供直观的多租户与路由编排控制台；数据面网关直连 **纯 Netty 4.2 + Redis 原子热账本**，热路径 **Zero-SQL（零数据库访问）**，并原生支持通过 **Oracle GraalVM 25** 一键编译为独立原生二进制与超轻量容器镜像。
 
 ---
 
@@ -121,9 +122,9 @@ ENCRYPTION_KEY=0000000000000000000000000000000000000000000000000000000000000001 
 ./target/ai-gateway-netty
 ```
 
-### 独立构建网关原生 Docker 镜像
+### 独立构建网关原生 Docker 镜像与 GHCR 自动发版
 
-项目提供专门的数据面原生多阶段构建文件 [`Dockerfile.gateway-native`](Dockerfile.gateway-native)（基于 `container-registry.oracle.com/graalvm/native-image:25` 编译，运行时采用超轻量 `gcr.io/distroless/base-debian12:nonroot`）：
+项目提供全栈镜像构建文件 [`Dockerfile`](Dockerfile) 与专门的数据面原生多阶段构建文件 [`Dockerfile.gateway-native`](Dockerfile.gateway-native)（基于 `container-registry.oracle.com/graalvm/native-image:25` 编译）：
 
 ```bash
 # 单条指令构建独立原生网关镜像
@@ -132,6 +133,12 @@ docker build -f Dockerfile.gateway-native -t ai-gateway-netty:native .
 # 或通过 Docker Compose native profile 一键拉起独立原生网关容器
 docker compose --profile native up --build -d gateway-native
 ```
+
+当推送 `v*` 标签（如 `git tag v0.1.0 && git push origin v0.1.0`）时，GitHub Actions 工作流 [`.github/workflows/release.yml`](.github/workflows/release.yml) 会自动触发：
+1. 使用 **Oracle GraalVM 25** 编译全栈 JAR 与 `ai-gateway-netty` Linux x86_64 原生可执行文件，并自动创建附带 `SHA256SUMS.txt` 的 **GitHub Release**；
+2. 自动构建并推送两个容器镜像至 **GitHub Container Registry (GHCR)**：
+   - 全栈镜像（控制面 + 数据面）：`ghcr.io/jihuayu/ai-gateway:<version>` / `latest`
+   - 独立原生数据面网关镜像：`ghcr.io/jihuayu/ai-gateway-netty:<version>` / `native` / `latest`
 
 ---
 
