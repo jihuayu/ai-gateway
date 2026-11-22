@@ -54,6 +54,12 @@ public class DynamicJarPluginLoader {
         return discovered;
     }
 
+    public void registerAlias(String alias, GatewayPlugin plugin) {
+        if (alias != null && !alias.isBlank() && plugin != null) {
+            activePlugins.put(alias, plugin);
+        }
+    }
+
     public void registerPlugin(GatewayPlugin plugin) {
         if (plugin != null && plugin.id() != null && !plugin.id().isBlank()) {
             activePlugins.put(plugin.id(), plugin);

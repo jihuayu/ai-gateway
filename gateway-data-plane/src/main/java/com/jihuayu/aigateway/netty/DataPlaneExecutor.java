@@ -2267,6 +2267,10 @@ public class DataPlaneExecutor {
         Integer retryAfter = null;
         boolean timedOut = false;
 
+        boolean hedgeCandidate = pluginCtx != null
+            && Boolean.TRUE.equals(pluginCtx.attributes().get("route.hedge.enabled"))
+            && prepared.targets().size() >= 2;
+
         for (int index = 0; index < prepared.targets().size(); index++) {
             if (sender.isClientClosed()) {
                 lastError = new GatewayException(499, "client_cancelled", "客户端已取消请求。");
@@ -2287,17 +2291,136 @@ public class DataPlaneExecutor {
                     break;
                 }
             }
-            BufferedAttemptResult result = runBufferedAttempt(
-                requestId, prepared.route().aliasName(), prepared.body(), prepared.maxOutputTokens(),
-                target, prepared.priceEntries().get(index),
-                t, deadlineAt, activeStream, abortReason, sender
-            );
+
+            BufferedAttemptResult result = null;
+            if (index == 0 && hedgeCandidate) {
+                long hedgeDelayMs = pluginCtx.attributes().get("route.hedge.delay_ms") instanceof Number n ? n.longValue() : 50L;
+                double maxRatio = pluginCtx.attributes().get("route.hedge.max_ratio") instanceof Number n ? n.doubleValue() : 0.30;
+                final RouteTarget primaryTarget = target;
+                final RouteTarget secondaryTarget = prepared.targets().get(1);
+                final PriceEntry primaryPrice = prepared.priceEntries().get(0);
+                final PriceEntry secondaryPrice = prepared.priceEntries().get(1);
+
+                AtomicReference<AutoCloseable> primaryStream = new AtomicReference<>();
+                AtomicReference<String> primaryAbort = new AtomicReference<>();
+                var router = pluginPipeline.leastTtftRouterPlugin();
+                router.incrementInflight(primaryTarget.targetId());
+
+                CompletableFuture<BufferedAttemptResult> primaryFuture = CompletableFuture.supplyAsync(() -> {
+                    try {
+                        return runBufferedAttempt(
+                            requestId, prepared.route().aliasName(), prepared.body(), prepared.maxOutputTokens(),
+                            primaryTarget, primaryPrice, t, deadlineAt, primaryStream, primaryAbort, sender
+                        );
+                    } finally {
+                        router.decrementInflight(primaryTarget.targetId());
+                    }
+                }, Executors.newVirtualThreadPerTaskExecutor());
+
+                try {
+                    result = primaryFuture.get(hedgeDelayMs, TimeUnit.MILLISECONDS);
+                    router.recordPrimaryOnlyRequest();
+                } catch (TimeoutException te) {
+                    // Primary exceeded Peak-EWMA hedgeDelayMs threshold -> check hedge budget and launch Hedged Request on secondary!
+                    if (router.tryAcquireHedgePermit(maxRatio)) {
+                        AtomicReference<AutoCloseable> hedgeStream = new AtomicReference<>();
+                        AtomicReference<String> hedgeAbort = new AtomicReference<>();
+                        router.incrementInflight(secondaryTarget.targetId());
+                        CompletableFuture<BufferedAttemptResult> hedgeFuture = CompletableFuture.supplyAsync(() -> {
+                            try {
+                                return runBufferedAttempt(
+                                    requestId, prepared.route().aliasName(), prepared.body(), prepared.maxOutputTokens(),
+                                    secondaryTarget, secondaryPrice, t, deadlineAt, hedgeStream, hedgeAbort, sender
+                                );
+                            } finally {
+                                router.decrementInflight(secondaryTarget.targetId());
+                            }
+                        }, Executors.newVirtualThreadPerTaskExecutor());
+
+                        // Race primaryFuture vs hedgeFuture: first HTTP 200 "ok" wins!
+                        CompletableFuture<Object> any = CompletableFuture.anyOf(primaryFuture, hedgeFuture);
+                        try {
+                            any.get(Math.max(100L, deadlineAt - System.currentTimeMillis()), TimeUnit.MILLISECONDS);
+                        } catch (Exception ignored) {}
+
+                        if (hedgeFuture.isDone() && !hedgeFuture.isCompletedExceptionally()) {
+                            BufferedAttemptResult hRes = hedgeFuture.join();
+                            if ("ok".equals(hRes.record().status())) {
+                                // Secondary hedge won the race! Cancel slow primary stream immediately
+                                primaryAbort.set("hedged_cancelled");
+                                AutoCloseable pAc = primaryStream.get();
+                                if (pAc != null) { try { pAc.close(); } catch (Exception ignored) {} }
+                                primaryFuture.cancel(true);
+                                result = hRes;
+                                target = secondaryTarget;
+                                router.recordHedgeWin();
+                                router.recordTargetPenaltyOnError(prepared.targets().get(0).targetId(), hedgeDelayMs * 4L);
+                                pluginCtx.setResponseHeader("x-gateway-hedged", "WON_BY_SECONDARY:" + secondaryTarget.upstreamModel());
+                            }
+                        }
+                        if (result == null && primaryFuture.isDone() && !primaryFuture.isCompletedExceptionally()) {
+                            BufferedAttemptResult pRes = primaryFuture.join();
+                            if ("ok".equals(pRes.record().status())) {
+                                hedgeAbort.set("hedged_cancelled");
+                                AutoCloseable hAc = hedgeStream.get();
+                                if (hAc != null) { try { hAc.close(); } catch (Exception ignored) {} }
+                                hedgeFuture.cancel(true);
+                                result = pRes;
+                                pluginCtx.setResponseHeader("x-gateway-hedged", "WON_BY_PRIMARY:" + target.upstreamModel());
+                            }
+                        }
+                        if (result == null) {
+                            // Wait for whichever remaining future finishes with "ok"
+                            try {
+                                BufferedAttemptResult hRes = hedgeFuture.get(Math.max(50L, deadlineAt - System.currentTimeMillis()), TimeUnit.MILLISECONDS);
+                                if ("ok".equals(hRes.record().status())) {
+                                    primaryAbort.set("hedged_cancelled");
+                                    AutoCloseable pAc = primaryStream.get();
+                                    if (pAc != null) { try { pAc.close(); } catch (Exception ignored) {} }
+                                    primaryFuture.cancel(true);
+                                    result = hRes;
+                                    target = secondaryTarget;
+                                    router.recordHedgeWin();
+                                    pluginCtx.setResponseHeader("x-gateway-hedged", "WON_BY_SECONDARY:" + secondaryTarget.upstreamModel());
+                                }
+                            } catch (Exception ignored) {}
+                        }
+                        if (result == null) {
+                            try {
+                                result = primaryFuture.get(Math.max(50L, deadlineAt - System.currentTimeMillis()), TimeUnit.MILLISECONDS);
+                            } catch (Exception ignored) {}
+                        }
+                    } else {
+                        try {
+                            result = primaryFuture.get(Math.max(50L, deadlineAt - System.currentTimeMillis()), TimeUnit.MILLISECONDS);
+                        } catch (Exception ignored) {}
+                    }
+                } catch (Exception e) {
+                    try { result = primaryFuture.join(); } catch (Exception ignored) {}
+                }
+            }
+
+            if (result == null) {
+                var router = pluginPipeline.leastTtftRouterPlugin();
+                router.incrementInflight(target.targetId());
+                try {
+                    result = runBufferedAttempt(
+                        requestId, prepared.route().aliasName(), prepared.body(), prepared.maxOutputTokens(),
+                        target, prepared.priceEntries().get(index),
+                        t, deadlineAt, activeStream, abortReason, sender
+                    );
+                } finally {
+                    router.decrementInflight(target.targetId());
+                }
+            }
+
             AttemptRecord rec = result.record();
             if ("ok".equals(rec.status())) {
                 recordTargetSuccess(target.targetId());
                 pluginPipeline.leastTtftRouterPlugin().recordTargetLatencyMs(target.targetId(), Math.max(1L, rec.latency_ms()));
             } else if (rec.retry_safe()) {
                 recordTargetFailure(target.targetId());
+                pluginPipeline.leastTtftRouterPlugin().recordTargetPenaltyOnError(target.targetId(), Math.max(500L, rec.latency_ms()));
             }
             attempts.add(rec);
             if (!"ok".equals(rec.status())) {

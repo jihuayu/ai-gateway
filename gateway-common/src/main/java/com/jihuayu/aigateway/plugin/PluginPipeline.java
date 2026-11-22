@@ -129,6 +129,8 @@ public class PluginPipeline implements AutoCloseable {
         )) {
             this.jarLoader.registerPlugin(builtIn);
         }
+        this.jarLoader.registerAlias("builtin:router-peak-ewma-hedge", leastTtftRouterPlugin);
+        this.jarLoader.registerAlias("router-peak-ewma-hedge", leastTtftRouterPlugin);
 
         String pluginsDirEnv = System.getenv("PLUGINS_DIR");
         if (pluginsDirEnv != null && !pluginsDirEnv.isBlank()) {

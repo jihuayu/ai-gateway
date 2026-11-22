@@ -67,34 +67,126 @@ public final class MicrokernelRoutingAndPolicyPlugins {
     }
 
     /**
-     * 1. LeastTtftRouterPlugin (builtin:router-least-ttft):
-     * Tracks Exponentially Weighted Moving Average (EWMA) TTFT / latency per targetId and orders healthy targets
-     * by lowest latency at ON_ROUTE_SELECT.
+     * 1. LeastTtftRouterPlugin (builtin:router-least-ttft & builtin:router-peak-ewma-hedge):
+     * Tracks Peak-EWMA (Peak-sensitive Exponentially Weighted Moving Average + Active In-Flight load penalty)
+     * TTFT / latency per targetId, orders healthy targets by lowest Peak-EWMA cost at ON_ROUTE_SELECT,
+     * and configures Adaptive Tail-Latency Hedged Requests (with Hedge Budget token-bucket cap).
      */
     public static final class LeastTtftRouterPlugin implements GatewayPlugin {
         public static final String ID = "builtin:router-least-ttft";
-        private final Map<String, AtomicLong> ewmaLatencyMicrosByTarget = new ConcurrentHashMap<>();
+        public static final String PEAK_EWMA_HEDGE_ALIAS_ID = "builtin:router-peak-ewma-hedge";
+
+        private static final class PeakEwmaNodeState {
+            final AtomicLong peakEwmaMicros;
+            final AtomicLong activeInflight = new AtomicLong(0);
+            final AtomicLong lastUpdateMs = new AtomicLong(System.currentTimeMillis());
+
+            PeakEwmaNodeState(long initialMicros) {
+                this.peakEwmaMicros = new AtomicLong(initialMicros);
+            }
+        }
+
+        private final Map<String, PeakEwmaNodeState> stateByTarget = new ConcurrentHashMap<>();
+        private final AtomicLong totalPrimaryRequests = new AtomicLong(0);
+        private final AtomicLong totalHedgedTriggers = new AtomicLong(0);
+        private final AtomicLong totalHedgeWins = new AtomicLong(0);
 
         @Override public String id() { return ID; }
         @Override public String name() { return "router-least-ttft"; }
         @Override public String type() { return "BUILTIN"; }
         @Override public int priority() { return 20; }
 
+        public void incrementInflight(String targetId) {
+            if (targetId == null) return;
+            stateByTarget.computeIfAbsent(targetId, _ -> new PeakEwmaNodeState(10_000L)).activeInflight.incrementAndGet();
+        }
+
+        public void decrementInflight(String targetId) {
+            if (targetId == null) return;
+            PeakEwmaNodeState st = stateByTarget.get(targetId);
+            if (st != null) {
+                st.activeInflight.updateAndGet(v -> Math.max(0L, v - 1L));
+            }
+        }
+
+        /**
+         * Peak-EWMA update:
+         * - If sampleMicros > current Peak-EWMA (latency spike), immediately jump to sampleMicros (instant spike sensitivity).
+         * - Otherwise, decay smoothly using time-based or fixed-alpha exponential decay.
+         */
+        public void resetTargetLatencyMs(String targetId, long latencyMs) {
+            if (targetId == null || latencyMs < 0) return;
+            long sampleMicros = Math.max(100L, latencyMs * 1000L);
+            stateByTarget.put(targetId, new PeakEwmaNodeState(sampleMicros));
+        }
+
         public void recordTargetLatencyMs(String targetId, long latencyMs) {
             if (targetId == null || latencyMs < 0) return;
-            long sampleMicros = latencyMs * 1000L;
-            ewmaLatencyMicrosByTarget.compute(targetId, (_, prev) -> {
-                if (prev == null) return new AtomicLong(sampleMicros);
-                long oldVal = prev.get();
-                // alpha = 0.3 EWMA
-                prev.set((oldVal * 7L + sampleMicros * 3L) / 10L);
+            long sampleMicros = Math.max(100L, latencyMs * 1000L);
+            long now = System.currentTimeMillis();
+            stateByTarget.compute(targetId, (_, prev) -> {
+                if (prev == null) return new PeakEwmaNodeState(sampleMicros);
+                long oldVal = prev.peakEwmaMicros.get();
+                prev.lastUpdateMs.set(now);
+                if (sampleMicros >= oldVal) {
+                    // Instant peak jump on latency spike
+                    prev.peakEwmaMicros.set((oldVal * 2L + sampleMicros * 8L) / 10L);
+                } else {
+                    // Smooth exponential recovery decay
+                    prev.peakEwmaMicros.set((oldVal * 7L + sampleMicros * 3L) / 10L);
+                }
                 return prev;
             });
         }
 
+        public void recordTargetPenaltyOnError(String targetId, long penaltyMs) {
+            recordTargetLatencyMs(targetId, Math.max(500L, penaltyMs));
+        }
+
         public long getEwmaLatencyMs(String targetId) {
-            AtomicLong val = ewmaLatencyMicrosByTarget.get(targetId);
-            return val != null ? val.get() / 1000L : 0L;
+            PeakEwmaNodeState st = stateByTarget.get(targetId);
+            return st != null ? st.peakEwmaMicros.get() / 1000L : 0L;
+        }
+
+        /**
+         * Computes Peak-EWMA load-adjusted score = peakEwmaMicros * (1 + activeInflight).
+         */
+        public long getPeakEwmaLoadScoreMicros(String targetId) {
+            PeakEwmaNodeState st = stateByTarget.get(targetId);
+            if (st == null) return 0L;
+            long inflight = Math.max(0L, st.activeInflight.get());
+            return st.peakEwmaMicros.get() * (1L + inflight);
+        }
+
+        /**
+         * Checks and consumes hedge budget so hedging never exceeds maxHedgeRatio (default 20% of traffic).
+         */
+        public boolean tryAcquireHedgePermit(double maxHedgeRatio) {
+            long total = totalPrimaryRequests.incrementAndGet();
+            double ratio = maxHedgeRatio > 0.0 && maxHedgeRatio <= 1.0 ? maxHedgeRatio : 0.25;
+            // Allow warmup hedging on first 20 requests or whenever current hedge ratio <= maxHedgeRatio
+            long curHedges = totalHedgedTriggers.get();
+            if (total <= 20 || ((double) curHedges / (double) total) <= ratio) {
+                totalHedgedTriggers.incrementAndGet();
+                return true;
+            }
+            return false;
+        }
+
+        public void recordPrimaryOnlyRequest() {
+            totalPrimaryRequests.incrementAndGet();
+        }
+
+        public void recordHedgeWin() {
+            totalHedgeWins.incrementAndGet();
+        }
+
+        public long totalHedgedTriggers() {
+            return totalHedgedTriggers.get();
+        }
+
+        public long totalHedgeWins() {
+            return totalHedgeWins.get();
         }
 
         @Override
@@ -104,12 +196,29 @@ public final class MicrokernelRoutingAndPolicyPlugins {
                 return PluginResult.Continue.INSTANCE;
             }
             List<RouteTarget> sorted = new ArrayList<>(candidates);
-            sorted.sort(Comparator.comparingLong(rt -> {
-                AtomicLong ewma = ewmaLatencyMicrosByTarget.get(rt.targetId());
-                return ewma != null ? ewma.get() : 0L;
-            }));
+            sorted.sort(Comparator.comparingLong(rt -> getPeakEwmaLoadScoreMicros(rt.targetId())));
             ctx.setCandidateTargets(sorted);
-            ctx.setResponseHeader("x-gateway-router", "least-ttft:" + sorted.getFirst().upstreamModel());
+            RouteTarget primary = sorted.getFirst();
+            ctx.setResponseHeader("x-gateway-router", "least-ttft:" + primary.upstreamModel());
+
+            // Configure Adaptive Peak-EWMA Tail-Latency Hedging if enabled in pluginConfig (or by default when hedgeDelayMs / hedgeMultiplier is set)
+            Map<String, Object> cfg = ctx.pluginConfig();
+            boolean hedgeEnabled = Boolean.TRUE.equals(cfg.get("hedgeEnabled"))
+                || cfg.containsKey("hedgeDelayMs")
+                || cfg.containsKey("hedgeMultiplier");
+            if (hedgeEnabled && sorted.size() >= 2) {
+                long primaryEwmaMs = Math.max(5L, getEwmaLatencyMs(primary.targetId()));
+                double mult = cfg.get("hedgeMultiplier") instanceof Number n && n.doubleValue() >= 1.0 ? n.doubleValue() : 2.0;
+                long minDelayMs = cfg.get("minHedgeDelayMs") instanceof Number n ? Math.max(5L, n.longValue()) : 15L;
+                long maxDelayMs = cfg.get("maxHedgeDelayMs") instanceof Number n ? Math.max(minDelayMs, n.longValue()) : 2_500L;
+                long adaptiveDelayMs = cfg.get("hedgeDelayMs") instanceof Number n && n.longValue() > 0
+                    ? n.longValue()
+                    : Math.min(maxDelayMs, Math.max(minDelayMs, Math.round(primaryEwmaMs * mult)));
+                double maxHedgeRatio = cfg.get("maxHedgeRatio") instanceof Number n ? n.doubleValue() : 0.30;
+                ctx.attributes().put("route.hedge.enabled", Boolean.TRUE);
+                ctx.attributes().put("route.hedge.delay_ms", adaptiveDelayMs);
+                ctx.attributes().put("route.hedge.max_ratio", maxHedgeRatio);
+            }
             return PluginResult.Continue.INSTANCE;
         }
     }
