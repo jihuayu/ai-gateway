@@ -107,6 +107,37 @@ public class HotRuntime {
         return keys;
     }
 
+    
+    /**
+     * Zero-SQL data-plane initialization for standalone / GraalVM Native Netty Gateway nodes.
+     * Verifies Redis AOF durability and attaches to the active Redis financial epoch & run_id
+     * published by the Control Plane without requiring any PostgreSQL connection.
+     */
+    public void initializeFromRedisOnly() {
+        RedisCommands<String, String> redis = redisConn.sync();
+        if ("aof".equals(durability)) {
+            Map<String, String> cfg = redis.configGet("appendonly", "appendfsync", "maxmemory-policy");
+            if (!"yes".equals(cfg.get("appendonly"))
+                || !"always".equals(cfg.get("appendfsync"))
+                || !"noeviction".equals(cfg.get("maxmemory-policy"))) {
+                throw new IllegalStateException("Redis hot ledger requires appendonly=yes, appendfsync=always, maxmemory-policy=noeviction");
+            }
+        }
+        String existingEpoch = redis.hget(keys.runtime(), "epoch");
+        String existingRunId = redis.hget(keys.runtime(), "run_id");
+        String actualRunId = extractRunId(redis.info("server"));
+        if (actualRunId == null || actualRunId.isBlank()) {
+            throw new IllegalStateException("Redis identity unavailable");
+        }
+        if (existingEpoch == null || existingEpoch.isBlank()) {
+            throw new IllegalStateException("HOT_STATE_NOT_INITIALIZED: Redis runtime epoch not found; start Control Plane first to publish initial snapshot");
+        }
+        if (!actualRunId.equals(existingRunId)) {
+            throw new IllegalStateException("HOT_FENCED: Redis run_id mismatch; verify durable journal before attaching data-plane gateway");
+        }
+        this.epoch = existingEpoch;
+    }
+
     public void initialize() {
         RedisCommands<String, String> redis = redisConn.sync();
         if ("aof".equals(durability)) {

@@ -11,6 +11,7 @@ services:
       test: ["CMD-SHELL", "pg_isready -U gateway"]
       interval: 3s
       retries: 20
+
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--appendonly", "yes", "--appendfsync", "always", "--maxmemory-policy", "noeviction"]
@@ -20,6 +21,26 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       interval: 3s
       retries: 20
+
+  gateway-native:
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway-native
+    profiles: ["native"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports: ["127.0.0.1:3001:3001"]
+    environment:
+      HOST: 0.0.0.0
+      GATEWAY_PORT: 3001
+      REDIS_URL: redis://redis:6379
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000001}
+      DATA_PLANE_NAMESPACE: ${DATA_PLANE_NAMESPACE:-gateway}
+      HOT_DURABILITY: ${HOT_DURABILITY:-aof}
+      HOT_JOURNAL_CAPACITY: ${HOT_JOURNAL_CAPACITY:-10000}
+      ALLOW_PRIVATE_UPSTREAM: ${ALLOW_PRIVATE_UPSTREAM:-false}
+
   kafka:
     image: apache/kafka:3.9.1
     profiles: ["kafka"]
@@ -35,6 +56,7 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+
 volumes:
   pg-data:
   redis-data:
