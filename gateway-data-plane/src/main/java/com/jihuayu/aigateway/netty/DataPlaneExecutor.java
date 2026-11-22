@@ -785,7 +785,7 @@ public class DataPlaneExecutor {
                 prepared = prepareRequest(key, chatReq, route, pluginCtx.candidateTargets());
             }
 
-            // Single-RTT combined admit_and_dispatch via Tokio MPSC Group-Commit channel!
+            // Single-RTT combined admit_and_dispatch via MPSC Batch Group-Commit channel!
             admitAndDispatchRequest(requestId, prepared);
             admitted = true;
             dispatched = true;

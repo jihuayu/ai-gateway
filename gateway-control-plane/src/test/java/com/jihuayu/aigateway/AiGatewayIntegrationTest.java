@@ -2823,7 +2823,7 @@ public class AiGatewayIntegrationTest {
 
     @Test
     @Order(16)
-    void testStage16DistributedHaCaffeineNearCacheTokioMpscWorkStealingAndDegradedWalReplay() throws Exception {
+    void testStage16DistributedHaCaffeineNearCacheMpscBatchWorkStealingAndDegradedWalReplay() throws Exception {
         int nettyPort = nettyServer.getBoundPort();
 
         // 1. Verify Caffeine Near-Cache L1 Auth & Snapshot hits + SingleFlight request coalescing
@@ -2850,10 +2850,10 @@ public class AiGatewayIntegrationTest {
         assertEquals(1, loaderInvocations.get(), "SingleFlight must coalesce 32 concurrent misses into exactly 1 upstream load");
         assertTrue(nearCache.singleFlightCoalescedCount() >= 1);
 
-        // 2. Verify TokioMpscBatchChannel group-commit batching telemetry
+        // 2. Verify MpscBatchChannel group-commit batching telemetry
         var mpsc = hotBilling.batchChannel();
-        assertTrue(mpsc.totalCommandsSubmitted() > 0, "Tokio MPSC channel must process billing commands");
-        assertTrue(mpsc.totalBatchesFlushed() > 0, "Tokio MPSC channel must flush batches");
+        assertTrue(mpsc.totalCommandsSubmitted() > 0, "MPSC Batch channel must process billing commands");
+        assertTrue(mpsc.totalBatchesFlushed() > 0, "MPSC Batch channel must flush batches");
 
         // 3. Verify WorkStealingShardedQueue 16-shard partitioning & cross-shard work stealing
         var shardedQueue = new com.jihuayu.aigateway.hot.WorkStealingShardedQueue(

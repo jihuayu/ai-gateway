@@ -9,14 +9,14 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.zip.CRC32;
 
 /**
- * Rust Tokio-inspired Distributed Sharded Work-Stealing Queue built over partitioned Redis Streams.
+ * Bounded Distributed Sharded Work-Stealing Queue built over partitioned Redis Streams.
  *
  * <p>Partitions events across {@code N} deterministic shard streams ({@code journal:shard-0 .. N-1})
  * using {@code crc32(projectId) % N} so that all lifecycle events for a given project remain strictly
  * ordered within its home shard while eliminating single-stream lock contention.
  *
  * <p>Workers consume from their assigned primary shard first (fast-path cache locality). Whenever a worker's
- * primary shard is empty, it executes a Tokio-style Work-Stealing probe across sibling shards to steal
+ * primary shard is empty, it executes a randomized Work-Stealing probe across sibling shards to steal
  * backlogged or orphaned entries, guaranteeing lock-free horizontal scaling across distributed nodes.
  */
 public final class WorkStealingShardedQueue {
@@ -79,7 +79,7 @@ public final class WorkStealingShardedQueue {
             return new ShardedBatch(home, local, false);
         }
 
-        // Tokio Work-Stealing: probe all sibling shards starting from a random offset
+        // Work-Stealing: probe all sibling shards starting from a random offset
         int startOffset = ThreadLocalRandom.current().nextInt(shardCount);
         for (int i = 0; i < shardCount; i++) {
             int victim = (home + startOffset + i) % shardCount;
