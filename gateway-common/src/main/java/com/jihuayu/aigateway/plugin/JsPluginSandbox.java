@@ -106,10 +106,14 @@ public class JsPluginSandbox {
 
         public ExecutionOutcome executeWithMetrics(PluginStage stage, PluginExecutionContext ctx) {
             String hookName = switch (stage) {
+                case AUTHENTICATE -> "onAuthenticate";
                 case REQUEST_RECEIVED -> "onRequestReceived";
+                case RATE_LIMIT -> "onRateLimit";
                 case PRE_ADMIT -> "onPreAdmit";
                 case POST_ADMIT_PRE_DISPATCH -> "onPostAdmitPreDispatch";
+                case ROUTE_SELECT -> "onRouteSelect";
                 case PRE_UPSTREAM -> "onPreUpstream";
+                case STREAM_CHUNK -> "onStreamChunk";
                 case RESPONSE_CONTENT -> "onResponseContent";
                 case POST_SETTLE -> "onPostSettle";
             };
@@ -860,6 +864,8 @@ public class JsPluginSandbox {
                 case "responseStatus" -> {
                     if (val instanceof Number n) c.setResponseStatus(n.intValue());
                 }
+                case "streamChunk" -> c.setStreamChunk(val != null ? String.valueOf(val) : "");
+                case "endUserId" -> c.setEndUserId(val != null ? String.valueOf(val) : null);
                 default -> c.attributes().put(prop, val);
             }
         }
@@ -879,7 +885,7 @@ public class JsPluginSandbox {
                 case Expr.Literal lit -> lit.value();
                 case Expr.Ident id -> {
                     if (env.containsKey(id.name())) yield env.get(id.name());
-                    if ("PluginResult".equals(id.name()) || "JSON".equals(id.name()) || "Math".equals(id.name())) {
+                    if (Set.of("PluginResult", "JSON", "Math", "Crypto", "Base64", "RegExp").contains(id.name())) {
                         yield id.name();
                     }
                     yield null;
@@ -989,6 +995,12 @@ public class JsPluginSandbox {
                     case "actualMicros" -> c.settledActualMicros();
                     case "inputTokens" -> c.settledInputTokens();
                     case "outputTokens" -> c.settledOutputTokens();
+                    case "kv" -> c.kv();
+                    case "crypto" -> c.crypto();
+                    case "queryParams" -> c.queryParams();
+                    case "endUserId" -> c.endUserId();
+                    case "streamChunk" -> c.streamChunk();
+                    case "attributionTags" -> c.attributionTags();
                     default -> c.attributes().get(prop);
                 };
             }
@@ -1048,6 +1060,68 @@ public class JsPluginSandbox {
                 } catch (Exception e) {
                     return null;
                 }
+            }
+            if ("Crypto".equals(target) || target instanceof PluginExecutionContext.PluginCrypto) {
+                PluginExecutionContext.PluginCrypto pc = PluginExecutionContext.PluginCrypto.INSTANCE;
+                return switch (method) {
+                    case "sha256" -> !args.isEmpty() ? pc.sha256(String.valueOf(args.get(0))) : "";
+                    case "hmacSha256" -> args.size() >= 2 ? pc.hmacSha256(String.valueOf(args.get(0)), String.valueOf(args.get(1))) : "";
+                    case "base64Encode", "encode" -> !args.isEmpty() ? pc.base64Encode(String.valueOf(args.get(0))) : "";
+                    case "base64Decode", "decode" -> !args.isEmpty() ? pc.base64Decode(String.valueOf(args.get(0))) : "";
+                    case "constantTimeEquals" -> args.size() >= 2 && pc.constantTimeEquals(String.valueOf(args.get(0)), String.valueOf(args.get(1)));
+                    default -> null;
+                };
+            }
+            if ("Base64".equals(target)) {
+                PluginExecutionContext.PluginCrypto pc = PluginExecutionContext.PluginCrypto.INSTANCE;
+                return switch (method) {
+                    case "encode" -> !args.isEmpty() ? pc.base64Encode(String.valueOf(args.get(0))) : "";
+                    case "decode" -> !args.isEmpty() ? pc.base64Decode(String.valueOf(args.get(0))) : "";
+                    case "urlDecode" -> !args.isEmpty() ? pc.base64UrlDecode(String.valueOf(args.get(0))) : "";
+                    default -> null;
+                };
+            }
+            if ("RegExp".equals(target)) {
+                return switch (method) {
+                    case "test" -> args.size() >= 2 && args.get(0) != null && args.get(1) != null
+                        && Pattern.compile(String.valueOf(args.get(0))).matcher(String.valueOf(args.get(1))).find();
+                    case "replace" -> args.size() >= 3 && args.get(0) != null && args.get(1) != null && args.get(2) != null
+                        ? Pattern.compile(String.valueOf(args.get(0))).matcher(String.valueOf(args.get(1))).replaceAll(String.valueOf(args.get(2)))
+                        : (args.size() >= 2 ? String.valueOf(args.get(1)) : "");
+                    default -> null;
+                };
+            }
+            if (target instanceof PluginExecutionContext.PluginKvStore kv) {
+                return switch (method) {
+                    case "get" -> !args.isEmpty() && args.get(0) != null ? kv.get(String.valueOf(args.get(0))) : null;
+                    case "set" -> {
+                        if (args.size() >= 2 && args.get(0) != null) {
+                            long ttl = args.size() >= 3 && args.get(2) instanceof Number n ? n.longValue() : 300L;
+                            kv.set(String.valueOf(args.get(0)), String.valueOf(args.get(1)), ttl);
+                        }
+                        yield null;
+                    }
+                    case "setNx" -> {
+                        if (args.size() >= 2 && args.get(0) != null) {
+                            long ttl = args.size() >= 3 && args.get(2) instanceof Number n ? n.longValue() : 300L;
+                            yield kv.setNx(String.valueOf(args.get(0)), String.valueOf(args.get(1)), ttl);
+                        }
+                        yield false;
+                    }
+                    case "incr" -> {
+                        if (!args.isEmpty() && args.get(0) != null) {
+                            long delta = args.size() >= 2 && args.get(1) instanceof Number n ? n.longValue() : 1L;
+                            long ttl = args.size() >= 3 && args.get(2) instanceof Number n ? n.longValue() : 60L;
+                            yield kv.incr(String.valueOf(args.get(0)), delta, ttl);
+                        }
+                        yield 0L;
+                    }
+                    case "del" -> {
+                        if (!args.isEmpty() && args.get(0) != null) kv.del(String.valueOf(args.get(0)));
+                        yield null;
+                    }
+                    default -> null;
+                };
             }
             if ("Math".equals(target)) {
                 if ("max".equals(method) && args.size() >= 2 && args.get(0) instanceof Number a && args.get(1) instanceof Number b) {
@@ -1113,6 +1187,50 @@ public class JsPluginSandbox {
                             bodyStr = String.valueOf(rawBody);
                         }
                         yield PluginResult.shortCircuit(status, bodyStr, Map.of());
+                    }
+                    case "bindAuthenticatedKey", "bindAuthKey" -> {
+                        if (!args.isEmpty() && args.get(0) != null) {
+                            c.bindAuthenticatedKey(String.valueOf(args.get(0)));
+                        }
+                        yield null;
+                    }
+                    case "setEndUserId" -> {
+                        if (!args.isEmpty() && args.get(0) != null) {
+                            c.setEndUserId(String.valueOf(args.get(0)));
+                        }
+                        yield null;
+                    }
+                    case "setModelAlias" -> {
+                        if (!args.isEmpty() && args.get(0) != null) {
+                            c.setModelAlias(String.valueOf(args.get(0)));
+                        }
+                        yield null;
+                    }
+                    case "setStreamChunk" -> {
+                        if (!args.isEmpty() && args.get(0) != null) {
+                            c.setStreamChunk(String.valueOf(args.get(0)));
+                        }
+                        yield null;
+                    }
+                    case "putAttributionTag" -> {
+                        if (args.size() >= 2 && args.get(0) != null && args.get(1) != null) {
+                            c.putAttributionTag(String.valueOf(args.get(0)), String.valueOf(args.get(1)));
+                        }
+                        yield null;
+                    }
+                    case "reorderTargetsByIds", "setTargetOrder" -> {
+                        if (!args.isEmpty() && args.get(0) instanceof List<?> list) {
+                            c.reorderTargetsByIds(list.stream().map(String::valueOf).toList());
+                        }
+                        yield null;
+                    }
+                    case "jevDecide" -> {
+                        if (args.size() == 1 && args.get(0) instanceof Map<?, ?> qMap) {
+                            yield c.jevDecide(null, (Map<String, Object>) qMap);
+                        } else if (args.size() >= 2 && args.get(1) instanceof Map<?, ?> qMap) {
+                            yield c.jevDecide(args.get(0), (Map<String, Object>) qMap);
+                        }
+                        yield Map.of();
                     }
                     case "continueExecution" -> PluginResult.Continue.INSTANCE;
                     default -> null;

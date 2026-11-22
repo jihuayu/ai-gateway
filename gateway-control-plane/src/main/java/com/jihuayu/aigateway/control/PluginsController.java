@@ -38,7 +38,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * Control Plane Plugin Management API, Scoped Binding Registry, Dynamic JAR Loader & Online Dry-Run Debugger (#36, #41, #42, #37).
+ * Control Plane Plugin Management API, Scoped Binding Registry, Dynamic JAR Loader & Online Dry-Run Debugger (#36, #41, #42, #37, #51, #52, #53, #54).
  */
 @RestController
 public class PluginsController {
@@ -361,7 +361,7 @@ public class PluginsController {
         try (Connection conn = pool.getConnection();
              PreparedStatement ps = conn.prepareStatement("""
                  SELECT id::text, plugin_id::text, scope_type, scope_id, priority,
-                        config_override::text, enabled, created_at
+                        config_override::text, enabled, COALESCE(sample_rate, 1.0) AS sample_rate, created_at
                    FROM plugin_bindings
                   ORDER BY priority ASC, created_at ASC
                  """);
@@ -376,7 +376,8 @@ public class PluginsController {
                 String cfg = rs.getString(6);
                 row.put("configOverride", (cfg != null && !cfg.isBlank()) ? mapper.readValue(cfg, Map.class) : Map.of());
                 row.put("enabled", rs.getBoolean(7));
-                row.put("createdAt", rs.getTimestamp(8).toInstant().toString());
+                row.put("sampleRate", rs.getDouble(8));
+                row.put("createdAt", rs.getTimestamp(9).toInstant().toString());
                 items.add(row);
             }
         } catch (Exception e) {
@@ -402,6 +403,9 @@ public class PluginsController {
         String scopeId = body.get("scopeId") != null ? String.valueOf(body.get("scopeId")).trim() : "*";
         int priority = body.get("priority") instanceof Number n ? n.intValue() : 100;
         boolean enabled = !Boolean.FALSE.equals(body.get("enabled"));
+        double sampleRate = body.get("sampleRate") instanceof Number n
+            ? Math.max(0.0, Math.min(1.0, n.doubleValue()))
+            : 1.0;
         @SuppressWarnings("unchecked")
         Map<String, Object> configOverride = body.get("configOverride") instanceof Map<?, ?> m
             ? (Map<String, Object>) m
@@ -411,8 +415,8 @@ public class PluginsController {
         Map<String, Object> created = new LinkedHashMap<>();
         try (Connection conn = pool.getConnection();
              PreparedStatement ps = conn.prepareStatement("""
-                 INSERT INTO plugin_bindings(id, plugin_id, scope_type, scope_id, priority, config_override, enabled)
-                 VALUES(?::uuid, ?::uuid, ?, ?, ?, ?::jsonb, ?)
+                 INSERT INTO plugin_bindings(id, plugin_id, scope_type, scope_id, priority, config_override, enabled, sample_rate)
+                 VALUES(?::uuid, ?::uuid, ?, ?, ?, ?::jsonb, ?, ?)
                  """)) {
             ps.setString(1, id);
             ps.setString(2, pluginId);
@@ -421,6 +425,7 @@ public class PluginsController {
             ps.setInt(5, priority);
             ps.setString(6, mapper.writeValueAsString(configOverride));
             ps.setBoolean(7, enabled);
+            ps.setDouble(8, sampleRate);
             ps.executeUpdate();
             created.put("id", id);
             created.put("pluginId", pluginId);
@@ -429,6 +434,7 @@ public class PluginsController {
             created.put("priority", priority);
             created.put("configOverride", configOverride);
             created.put("enabled", enabled);
+            created.put("sampleRate", sampleRate);
         } catch (Exception e) {
             throw new GatewayException(500, "internal_error", "创建插件绑定失败: " + e.getMessage());
         }
@@ -485,7 +491,7 @@ public class PluginsController {
     }
 
     /**
-     * Online Dry-Run Debugger (#42): Executes any inline or registered plugin against a sample request/response
+     * Online Dry-Run Debugger (#42, #52): Executes any inline or registered plugin against a sample request/response
      * without affecting live production traffic or financial ledgers.
      */
     @PostMapping("/api/plugins/dry-run")
@@ -515,24 +521,30 @@ public class PluginsController {
             ? new LinkedHashMap<>((Map<String, Object>) rm)
             : new LinkedHashMap<>();
 
+        String rawQuery = body.get("rawQuery") instanceof String q ? q : "";
         String modelAlias = reqJson.get("model") instanceof String s ? s : "support-chat";
+        PluginPipeline pipeline = dataPlaneExecutor.pluginPipeline();
         PluginExecutionContext ctx = new PluginExecutionContext(
             "dryrun-" + UUID.randomUUID(),
             auth.workspaceId(),
             auth.workspaceId(),
             "dryrun-key",
             "/v1/chat/completions",
+            rawQuery,
             modelAlias,
             Boolean.TRUE.equals(reqJson.get("stream")),
             reqHeaders,
-            reqJson
+            reqJson,
+            pipeline.createKvStore()
         );
         if (body.get("responseBody") instanceof String respBody) {
             ctx.setResponseBody(respBody);
             ctx.setResponseStatus(200);
         }
+        if (body.get("streamChunk") instanceof String chunk) {
+            ctx.setStreamChunk(chunk);
+        }
 
-        PluginPipeline pipeline = dataPlaneExecutor.pluginPipeline();
         GatewayPlugin targetPlugin;
         String type = body.get("type") instanceof String s ? s.trim().toUpperCase() : "JS";
         if (body.get("sourceCode") instanceof String src && !src.isBlank()) {
@@ -560,10 +572,14 @@ public class PluginsController {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("stage", stage.name());
         out.put("executedStatements", executedStatements);
+        out.put("mutatedModelAlias", ctx.modelAlias());
+        out.put("boundApiKey", ctx.boundApiKeyPlain());
         out.put("mutatedRequestHeaders", ctx.requestHeaders());
         out.put("mutatedRequestBody", ctx.requestJson());
         out.put("mutatedResponseHeaders", ctx.responseHeaders());
         out.put("mutatedResponseBody", ctx.responseBody());
+        out.put("mutatedStreamChunk", ctx.streamChunk());
+        out.put("attributionTags", ctx.attributionTags());
         out.put("trace", ctx.traceLog());
 
         switch (result) {

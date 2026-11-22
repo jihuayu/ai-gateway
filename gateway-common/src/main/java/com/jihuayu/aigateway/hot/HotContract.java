@@ -264,8 +264,21 @@ public final class HotContract {
         String scopeId,
         int priority,
         Map<String, Object> configOverride,
-        boolean enabled
-    ) {}
+        boolean enabled,
+        Double sampleRate
+    ) {
+        public PluginBindingSnapshot(
+            String id,
+            String pluginId,
+            String scopeType,
+            String scopeId,
+            int priority,
+            Map<String, Object> configOverride,
+            boolean enabled
+        ) {
+            this(id, pluginId, scopeType, scopeId, priority, configOverride, enabled, 1.0);
+        }
+    }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record McpServerSnapshot(

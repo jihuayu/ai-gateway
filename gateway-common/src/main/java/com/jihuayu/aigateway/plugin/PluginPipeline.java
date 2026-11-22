@@ -7,6 +7,23 @@ import com.jihuayu.aigateway.hot.HotContract.Snapshot;
 import com.jihuayu.aigateway.plugin.JsPluginSandbox.CompiledJsPlugin;
 import com.jihuayu.aigateway.plugin.JsPluginSandbox.ExecutionOutcome;
 import com.jihuayu.aigateway.plugin.JsPluginSandbox.JsSandboxFuelExhaustedException;
+import com.jihuayu.aigateway.plugin.MicrokernelAuthAndRateLimitPlugins.CustomExtractorAuthPlugin;
+import com.jihuayu.aigateway.plugin.MicrokernelAuthAndRateLimitPlugins.EndUserRateLimitPlugin;
+import com.jihuayu.aigateway.plugin.MicrokernelAuthAndRateLimitPlugins.HmacSignatureAuthPlugin;
+import com.jihuayu.aigateway.plugin.MicrokernelAuthAndRateLimitPlugins.JwtOidcAuthPlugin;
+import com.jihuayu.aigateway.plugin.MicrokernelAuthAndRateLimitPlugins.SpendVelocityCircuitPlugin;
+import com.jihuayu.aigateway.plugin.MicrokernelBillingSinkPlugins.CostAttributionTagPlugin;
+import com.jihuayu.aigateway.plugin.MicrokernelBillingSinkPlugins.RedisStreamBillingSinkPlugin;
+import com.jihuayu.aigateway.plugin.MicrokernelBillingSinkPlugins.WebhookBillingSinkPlugin;
+import com.jihuayu.aigateway.plugin.MicrokernelRoutingAndPolicyPlugins.CanaryHeaderRouterPlugin;
+import com.jihuayu.aigateway.plugin.MicrokernelRoutingAndPolicyPlugins.JevCalibratedGuardrailPlugin;
+import com.jihuayu.aigateway.plugin.MicrokernelRoutingAndPolicyPlugins.JevSemanticRouterPlugin;
+import com.jihuayu.aigateway.plugin.MicrokernelRoutingAndPolicyPlugins.LeastTtftRouterPlugin;
+import com.jihuayu.aigateway.plugin.MicrokernelRoutingAndPolicyPlugins.McpToolArgumentPolicyPlugin;
+import com.jihuayu.aigateway.plugin.MicrokernelRoutingAndPolicyPlugins.ModelCapabilityPolicyPlugin;
+import com.jihuayu.aigateway.plugin.MicrokernelRoutingAndPolicyPlugins.PrefixCacheAffinityRouterPlugin;
+import com.jihuayu.aigateway.plugin.MicrokernelRoutingAndPolicyPlugins.PromptDecoratorTrimmerPlugin;
+import com.jihuayu.aigateway.plugin.MicrokernelRoutingAndPolicyPlugins.WeightedCircuitBreakerRouterPlugin;
 import io.lettuce.core.api.StatefulRedisConnection;
 import java.net.http.HttpClient;
 import java.nio.file.Path;
@@ -17,14 +34,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 5-Stage Unified AI Gateway Plugin Pipeline & Online Dry-Run Debugger (#36, #41, #42, #37).
- *
- * <p>Coordinates:
- * <ul>
- *   <li>Built-in native plugins ({@link PiiGuardrailPlugin}, {@link ExactCachePlugin}, {@link SemanticCachePlugin}, {@link ExtProcPlugin})</li>
- *   <li>Compile-time {@link java.util.ServiceLoader} &amp; JVM-mode dynamic {@code .jar} plugins ({@link DynamicJarPluginLoader})</li>
- *   <li>Runtime dynamic {@code .js} plugins via Control Plane Redis Snapshot &amp; local {@code PLUGINS_DIR/*.js} hot watcher ({@link DynamicJsPluginManager})</li>
- * </ul>
+ * 8-Stage Microkernel AI Gateway Plugin Pipeline & Online Dry-Run Debugger (#36, #41, #42, #37, #51, #52, #53, #54).
  */
 public class PluginPipeline implements AutoCloseable {
 
@@ -33,15 +43,40 @@ public class PluginPipeline implements AutoCloseable {
         PluginSnapshot metadata,
         Map<String, Object> mergedConfig,
         String failMode,
-        int effectivePriority
+        int effectivePriority,
+        double sampleRate
     ) {}
 
+    private final StatefulRedisConnection<String, String> redisConn;
+    private final String keyPrefix;
     private final DynamicJarPluginLoader jarLoader;
     private final DynamicJsPluginManager jsManager;
+
     private final PiiGuardrailPlugin piiGuardrailPlugin;
     private final ExactCachePlugin exactCachePlugin;
     private final SemanticCachePlugin semanticCachePlugin;
     private final ExtProcPlugin defaultExtProcPlugin;
+
+    private final CustomExtractorAuthPlugin customExtractorAuthPlugin;
+    private final HmacSignatureAuthPlugin hmacSignatureAuthPlugin;
+    private final JwtOidcAuthPlugin jwtOidcAuthPlugin;
+    private final EndUserRateLimitPlugin endUserRateLimitPlugin;
+    private final SpendVelocityCircuitPlugin spendVelocityCircuitPlugin;
+
+    private final WeightedCircuitBreakerRouterPlugin weightedCircuitBreakerRouterPlugin;
+    private final LeastTtftRouterPlugin leastTtftRouterPlugin;
+    private final PrefixCacheAffinityRouterPlugin prefixCacheAffinityRouterPlugin;
+    private final CanaryHeaderRouterPlugin canaryHeaderRouterPlugin;
+    private final JevSemanticRouterPlugin jevSemanticRouterPlugin;
+    private final JevCalibratedGuardrailPlugin jevCalibratedGuardrailPlugin;
+    private final ModelCapabilityPolicyPlugin modelCapabilityPolicyPlugin;
+    private final PromptDecoratorTrimmerPlugin promptDecoratorTrimmerPlugin;
+    private final McpToolArgumentPolicyPlugin mcpToolArgumentPolicyPlugin;
+
+    private final CostAttributionTagPlugin costAttributionTagPlugin;
+    private final WebhookBillingSinkPlugin webhookBillingSinkPlugin;
+    private final RedisStreamBillingSinkPlugin redisStreamBillingSinkPlugin;
+
     private final HttpClient httpClient;
     private final ObjectMapper mapper;
 
@@ -51,20 +86,49 @@ public class PluginPipeline implements AutoCloseable {
         HttpClient httpClient,
         ObjectMapper mapper
     ) {
+        this.redisConn = redisConn;
+        this.keyPrefix = keyPrefix != null ? keyPrefix : "gw:";
         this.httpClient = httpClient;
         this.mapper = mapper != null ? mapper : new ObjectMapper();
         this.jarLoader = new DynamicJarPluginLoader();
         this.jsManager = new DynamicJsPluginManager(this.jarLoader);
 
         this.piiGuardrailPlugin = new PiiGuardrailPlugin();
-        this.exactCachePlugin = new ExactCachePlugin(redisConn, keyPrefix, this.mapper);
+        this.exactCachePlugin = new ExactCachePlugin(redisConn, this.keyPrefix, this.mapper);
         this.semanticCachePlugin = new SemanticCachePlugin();
         this.defaultExtProcPlugin = new ExtProcPlugin(ExtProcPlugin.ID, "ext-proc", 30, httpClient, this.mapper);
 
-        this.jarLoader.registerPlugin(piiGuardrailPlugin);
-        this.jarLoader.registerPlugin(exactCachePlugin);
-        this.jarLoader.registerPlugin(semanticCachePlugin);
-        this.jarLoader.registerPlugin(defaultExtProcPlugin);
+        this.customExtractorAuthPlugin = new CustomExtractorAuthPlugin();
+        this.hmacSignatureAuthPlugin = new HmacSignatureAuthPlugin();
+        this.jwtOidcAuthPlugin = new JwtOidcAuthPlugin();
+        this.endUserRateLimitPlugin = new EndUserRateLimitPlugin();
+        this.spendVelocityCircuitPlugin = new SpendVelocityCircuitPlugin();
+
+        this.weightedCircuitBreakerRouterPlugin = new WeightedCircuitBreakerRouterPlugin();
+        this.leastTtftRouterPlugin = new LeastTtftRouterPlugin();
+        this.prefixCacheAffinityRouterPlugin = new PrefixCacheAffinityRouterPlugin();
+        this.canaryHeaderRouterPlugin = new CanaryHeaderRouterPlugin();
+        this.jevSemanticRouterPlugin = new JevSemanticRouterPlugin();
+        this.jevCalibratedGuardrailPlugin = new JevCalibratedGuardrailPlugin();
+        this.modelCapabilityPolicyPlugin = new ModelCapabilityPolicyPlugin();
+        this.promptDecoratorTrimmerPlugin = new PromptDecoratorTrimmerPlugin();
+        this.mcpToolArgumentPolicyPlugin = new McpToolArgumentPolicyPlugin();
+
+        this.costAttributionTagPlugin = new CostAttributionTagPlugin();
+        this.webhookBillingSinkPlugin = new WebhookBillingSinkPlugin(httpClient);
+        this.redisStreamBillingSinkPlugin = new RedisStreamBillingSinkPlugin(redisConn, this.keyPrefix);
+
+        for (GatewayPlugin builtIn : List.of(
+            piiGuardrailPlugin, exactCachePlugin, semanticCachePlugin, defaultExtProcPlugin,
+            customExtractorAuthPlugin, hmacSignatureAuthPlugin, jwtOidcAuthPlugin,
+            endUserRateLimitPlugin, spendVelocityCircuitPlugin,
+            weightedCircuitBreakerRouterPlugin, leastTtftRouterPlugin, prefixCacheAffinityRouterPlugin,
+            canaryHeaderRouterPlugin, jevSemanticRouterPlugin, jevCalibratedGuardrailPlugin,
+            modelCapabilityPolicyPlugin, promptDecoratorTrimmerPlugin, mcpToolArgumentPolicyPlugin,
+            costAttributionTagPlugin, webhookBillingSinkPlugin, redisStreamBillingSinkPlugin
+        )) {
+            this.jarLoader.registerPlugin(builtIn);
+        }
 
         String pluginsDirEnv = System.getenv("PLUGINS_DIR");
         if (pluginsDirEnv != null && !pluginsDirEnv.isBlank()) {
@@ -72,15 +136,18 @@ public class PluginPipeline implements AutoCloseable {
         }
     }
 
+    public PluginExecutionContext.PluginKvStore createKvStore() {
+        return new PluginExecutionContext.PluginKvStore(redisConn, keyPrefix);
+    }
+
     public DynamicJarPluginLoader jarLoader() { return jarLoader; }
     public DynamicJsPluginManager jsManager() { return jsManager; }
     public PiiGuardrailPlugin piiGuardrailPlugin() { return piiGuardrailPlugin; }
     public ExactCachePlugin exactCachePlugin() { return exactCachePlugin; }
     public SemanticCachePlugin semanticCachePlugin() { return semanticCachePlugin; }
+    public LeastTtftRouterPlugin leastTtftRouterPlugin() { return leastTtftRouterPlugin; }
+    public WebhookBillingSinkPlugin webhookBillingSinkPlugin() { return webhookBillingSinkPlugin; }
 
-    /**
-     * Resolves all active bound plugins for a request in a specific lifecycle stage, sorted by priority.
-     */
     public List<BoundPluginInvocation> resolveStagePlugins(
         Snapshot snapshot,
         PluginStage stage,
@@ -91,22 +158,24 @@ public class PluginPipeline implements AutoCloseable {
     ) {
         List<BoundPluginInvocation> invocations = new ArrayList<>();
 
-        // 1. Always include any hot-loaded local directory .js plugins (Channel B) that implement this stage
         String hookName = switch (stage) {
+            case AUTHENTICATE -> "onAuthenticate";
             case REQUEST_RECEIVED -> "onRequestReceived";
+            case RATE_LIMIT -> "onRateLimit";
             case PRE_ADMIT -> "onPreAdmit";
             case POST_ADMIT_PRE_DISPATCH -> "onPostAdmitPreDispatch";
+            case ROUTE_SELECT -> "onRouteSelect";
             case PRE_UPSTREAM -> "onPreUpstream";
+            case STREAM_CHUNK -> "onStreamChunk";
             case RESPONSE_CONTENT -> "onResponseContent";
             case POST_SETTLE -> "onPostSettle";
         };
         for (CompiledJsPlugin dirJs : jsManager.activeDirectoryJsPlugins().values()) {
             if (dirJs.hasHook(hookName)) {
-                invocations.add(new BoundPluginInvocation(dirJs, null, Map.of(), "FAIL_CLOSED", dirJs.priority()));
+                invocations.add(new BoundPluginInvocation(dirJs, null, Map.of(), "FAIL_CLOSED", dirJs.priority(), 1.0));
             }
         }
 
-        // 2. Include Control Plane / Redis Snapshot bound plugins (Channel A)
         if (snapshot != null && snapshot.plugins() != null && !snapshot.plugins().isEmpty()) {
             Map<String, PluginSnapshot> pluginsById = new LinkedHashMap<>();
             for (PluginSnapshot ps : snapshot.plugins()) {
@@ -132,7 +201,8 @@ public class PluginPipeline implements AutoCloseable {
 
                 int prio = b.priority() > 0 ? b.priority() : ps.priority();
                 String failMode = ps.failMode() != null ? ps.failMode() : "FAIL_CLOSED";
-                invocations.add(new BoundPluginInvocation(instance, ps, mergedCfg, failMode, prio));
+                double sampleRate = b.sampleRate() != null ? b.sampleRate() : 1.0;
+                invocations.add(new BoundPluginInvocation(instance, ps, mergedCfg, failMode, prio, sampleRate));
             }
         }
 
@@ -165,7 +235,7 @@ public class PluginPipeline implements AutoCloseable {
             return true;
         }
         return switch (scopeType.toUpperCase()) {
-            case "WORKSPACE" -> workspaceId != null && workspaceId.equals(scopeId);
+            case "WORKSPACE" -> workspaceId == null || workspaceId.isBlank() || workspaceId.equals(scopeId);
             case "PROJECT" -> projectId != null && projectId.equals(scopeId);
             case "ALIAS" -> aliasName != null && aliasName.equals(scopeId);
             case "API_KEY" -> keyId != null && keyId.equals(scopeId);
@@ -192,9 +262,6 @@ public class PluginPipeline implements AutoCloseable {
         };
     }
 
-    /**
-     * Executes all matching plugins for the given lifecycle stage in priority order.
-     */
     public PluginResult executeStage(
         Snapshot snapshot,
         PluginStage stage,
@@ -213,6 +280,13 @@ public class PluginPipeline implements AutoCloseable {
         }
 
         for (BoundPluginInvocation inv : bound) {
+            if (inv.sampleRate() <= 0.0) continue;
+            if (inv.sampleRate() < 1.0) {
+                int bucket = Math.floorMod((ctx.requestId() + ":" + inv.plugin().id()).hashCode(), 10_000);
+                if (bucket >= (int) Math.round(inv.sampleRate() * 10_000)) {
+                    continue;
+                }
+            }
             PluginResult res = invokeSingle(inv.plugin(), stage, ctx, inv.mergedConfig(), inv.failMode());
             if (!(res instanceof PluginResult.Continue)) {
                 return res;
@@ -231,6 +305,7 @@ public class PluginPipeline implements AutoCloseable {
         long startNanos = System.nanoTime();
         long statements = 0L;
         ctx.setPluginConfig(config);
+        ctx.kv().setActivePluginNamespace(plugin.id());
         try {
             PluginResult result;
             if (plugin instanceof CompiledJsPlugin jsPlugin) {

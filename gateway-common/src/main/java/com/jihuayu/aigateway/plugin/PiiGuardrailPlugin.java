@@ -91,6 +91,35 @@ public class PiiGuardrailPlugin implements GatewayPlugin {
     }
 
     @Override
+    public PluginResult onStreamChunk(PluginExecutionContext ctx) {
+        String chunk = ctx.streamChunk();
+        if (chunk == null || chunk.isEmpty()) {
+            return PluginResult.Continue.INSTANCE;
+        }
+        Map<String, Object> cfg = ctx.pluginConfig();
+        String mode = cfg.get("mode") != null ? String.valueOf(cfg.get("mode")).toUpperCase() : "MASK";
+        List<String> findings = detectFindings(chunk, cfg, false);
+        if (findings.isEmpty()) {
+            return PluginResult.Continue.INSTANCE;
+        }
+        if ("BLOCK".equals(mode) && Boolean.TRUE.equals(cfg.get("blockOnOutputPii"))) {
+            return PluginResult.reject(
+                400,
+                "guardrail_stream_blocked",
+                "Streaming output blocked by guardrail: " + String.join(", ", findings)
+            );
+        }
+        if ("MASK".equals(mode)) {
+            String redacted = redactText(chunk, cfg);
+            if (!redacted.equals(chunk)) {
+                ctx.setStreamChunk(redacted);
+                ctx.setResponseHeader("x-gateway-guardrail", "MASKED");
+            }
+        }
+        return PluginResult.Continue.INSTANCE;
+    }
+
+    @Override
     public PluginResult onResponseContent(PluginExecutionContext ctx) {
         String body = ctx.responseBody();
         if (body == null || body.isEmpty()) {
