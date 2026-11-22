@@ -324,7 +324,7 @@ public class DataPlaneExecutor {
         this.allowPrivateUpstream = allowPrivateUpstream;
         this.mapper = mapper;
         this.sharedHttpClient = buildHttpClient(Timings.DEFAULT.connectMs());
-        this.pluginPipeline = new PluginPipeline(null, runtime != null ? runtime.getKeys().prefix() : "gw:", this.sharedHttpClient, this.mapper);
+        this.pluginPipeline = new PluginPipeline(runtime != null ? runtime.getRedisConn() : null, runtime != null ? runtime.getKeys().prefix() : "gw:", this.sharedHttpClient, this.mapper);
     }
 
     public PluginPipeline pluginPipeline() {
@@ -412,6 +412,18 @@ public class DataPlaneExecutor {
         byte[] rawBody,
         String requestId
     ) {
+        return handleMcpProxy(serverAlias, authorizationHeader, Map.of(), "", rawBody, requestId);
+    }
+
+    @SuppressWarnings("unchecked")
+    public HttpResponsePayload handleMcpProxy(
+        String serverAlias,
+        String authorizationHeader,
+        Map<String, String> inHeaders,
+        String rawQuery,
+        byte[] rawBody,
+        String requestId
+    ) {
         String method = "unknown";
         try {
             if (rawBody == null || rawBody.length == 0 || rawBody.length > MAX_BODY_BYTES) {
@@ -455,13 +467,19 @@ public class DataPlaneExecutor {
                 }
             }
 
-            // Run PRE_ADMIT plugin stage on MCP payload so PiiGuardrailPlugin / JS plugins can inspect/redact tool calls
+            // Run RATE_LIMIT and PRE_ADMIT plugin stages on MCP payload (PiiGuardrailPlugin / McpToolArgumentPolicyPlugin / JS plugins)
             Snapshot snapshot = runtime.snapshotFor(key);
+            Map<String, String> mcpHeaders = inHeaders != null ? new LinkedHashMap<>(inHeaders) : new LinkedHashMap<>();
             PluginExecutionContext pluginCtx = new PluginExecutionContext(
                 requestId, key.projectId(), key.workspaceId(), key.keyId(),
-                "/mcp/" + serverAlias, serverAlias, false,
-                new LinkedHashMap<>(), rpcReq
+                "/mcp/" + serverAlias, rawQuery != null ? rawQuery : "", serverAlias, false,
+                mcpHeaders, rpcReq, pluginPipeline.createKvStore()
             );
+            PluginResult rateRes = pluginPipeline.executeStage(snapshot, PluginStage.RATE_LIMIT, pluginCtx);
+            if (rateRes instanceof PluginResult.Reject rej) {
+                GatewayTelemetry.global().recordMcpCall(serverAlias, method, "rate_limited");
+                throw new GatewayException(rej.httpStatus(), rej.errorCode(), rej.message());
+            }
             PluginResult preRes = pluginPipeline.executeStage(snapshot, PluginStage.PRE_ADMIT, pluginCtx);
             if (preRes instanceof PluginResult.Reject rej) {
                 GatewayTelemetry.global().recordMcpCall(serverAlias, method, "rejected");
@@ -565,6 +583,18 @@ public class DataPlaneExecutor {
     }
 
     public void handleChat(String authorizationHeader, byte[] rawBody, String requestId, ResponseSender sender) {
+        handleChat(authorizationHeader, Map.of(), "", rawBody, requestId, sender);
+    }
+
+    @SuppressWarnings("unchecked")
+    public void handleChat(
+        String authorizationHeader,
+        Map<String, String> inHeaders,
+        String rawQuery,
+        byte[] rawBody,
+        String requestId,
+        ResponseSender sender
+    ) {
         Timings t = this.timings;
         long deadlineAt = System.currentTimeMillis() + t.totalMs();
         List<AttemptRecord> attempts = new ArrayList<>();
@@ -583,8 +613,58 @@ public class DataPlaneExecutor {
             if (rawBody != null && rawBody.length > MAX_BODY_BYTES) {
                 throw new GatewayException(400, "invalid_request", "请求体超过大小上限。");
             }
-            KeyContext key = runtime.authenticateBearerHeader(authorizationHeader);
+
+            // Best-effort pre-parse for Stage 1 (AUTHENTICATE) so HMAC/JWT/JS auth plugins can inspect body/headers/query
+            Map<String, Object> preReqJsonMap = new LinkedHashMap<>();
+            if (rawBody != null && rawBody.length > 0) {
+                try {
+                    Object preParsed = mapper.readValue(rawBody, Object.class);
+                    if (preParsed instanceof Map<?, ?> m) {
+                        preReqJsonMap = new LinkedHashMap<>((Map<String, Object>) m);
+                    }
+                } catch (Exception ignored) {}
+            }
+            Map<String, String> reqHeadersMap = inHeaders != null ? new LinkedHashMap<>(inHeaders) : new LinkedHashMap<>();
+            if (authorizationHeader != null && !reqHeadersMap.containsKey("authorization")) {
+                reqHeadersMap.put("authorization", authorizationHeader);
+            }
+            pluginCtx = new PluginExecutionContext(
+                requestId,
+                "anon",
+                "anon",
+                "anon",
+                "/v1/chat/completions",
+                rawQuery != null ? rawQuery : "",
+                preReqJsonMap.get("model") instanceof String s ? s : "",
+                Boolean.TRUE.equals(preReqJsonMap.get("stream")),
+                reqHeadersMap,
+                preReqJsonMap,
+                pluginPipeline.createKvStore()
+            );
+
+            // Stage 1a: AUTHENTICATE (Pluggable Auth before API Key resolution)
+            Snapshot preAuthSnap = runtime.latestSnapshot();
+            PluginResult rAuth = pluginPipeline.executeStage(preAuthSnap, PluginStage.AUTHENTICATE, pluginCtx);
+            sender.addResponseHeaders(pluginCtx.responseHeaders());
+            if (rAuth instanceof PluginResult.Reject rej) {
+                sender.addResponseHeaders(rej.headers());
+                throw new GatewayException(rej.httpStatus(), rej.errorCode(), rej.message());
+            } else if (rAuth instanceof PluginResult.ShortCircuit sc) {
+                sender.addResponseHeaders(sc.headers());
+                sender.sendJson(sc.httpStatus(), requestId, sc.responseBody(), null);
+                return;
+            }
+
+            String effectiveAuth = (pluginCtx.boundApiKeyPlain() != null && !pluginCtx.boundApiKeyPlain().isBlank())
+                ? (pluginCtx.boundApiKeyPlain().regionMatches(true, 0, "Bearer ", 0, 7)
+                    ? pluginCtx.boundApiKeyPlain()
+                    : "Bearer " + pluginCtx.boundApiKeyPlain())
+                : authorizationHeader;
+
+            KeyContext key = runtime.authenticateBearerHeader(effectiveAuth);
             snapshot = runtime.snapshotFor(key);
+            pluginCtx.setIdentityContext(key.projectId(), key.workspaceId(), key.keyId());
+
             Object parsedBody;
             try {
                 if (rawBody == null || rawBody.length == 0) {
@@ -597,17 +677,14 @@ public class DataPlaneExecutor {
                 throw new GatewayException(400, "invalid_request", "请求体必须是合法 JSON。");
             }
             ChatRequest chatReq = validateChatBody(parsedBody, allowPrivateUpstream);
-            @SuppressWarnings("unchecked")
-            Map<String, Object> reqJsonMap = parsedBody instanceof Map<?, ?> m
-                ? new LinkedHashMap<>((Map<String, Object>) m)
-                : new LinkedHashMap<>();
-            pluginCtx = new PluginExecutionContext(
-                requestId, key.projectId(), key.workspaceId(), key.keyId(),
-                "/v1/chat/completions", chatReq.model(), chatReq.stream(),
-                new LinkedHashMap<>(), reqJsonMap
-            );
+            if (!pluginCtx.isRequestBodyMutated() && parsedBody instanceof Map<?, ?> m) {
+                pluginCtx.requestJson().clear();
+                pluginCtx.requestJson().putAll((Map<String, Object>) m);
+            }
+            pluginCtx.setModelAlias(chatReq.model());
+            pluginCtx.clearRequestBodyMutated();
 
-            // Stage 1: REQUEST_RECEIVED
+            // Stage 1b: REQUEST_RECEIVED
             PluginResult r1 = pluginPipeline.executeStage(snapshot, PluginStage.REQUEST_RECEIVED, pluginCtx);
             sender.addResponseHeaders(pluginCtx.responseHeaders());
             if (r1 instanceof PluginResult.Reject rej) {
@@ -619,7 +696,19 @@ public class DataPlaneExecutor {
                 return;
             }
 
-            // Stage 2: PRE_ADMIT (Before Redis Lua ADMIT -> rejections consume 0 budget/concurrency/TPM)
+            // Stage 2: RATE_LIMIT (End-User / Tenant Quota & Spend Velocity Circuit Breaker before Redis Lua ADMIT)
+            PluginResult rRate = pluginPipeline.executeStage(snapshot, PluginStage.RATE_LIMIT, pluginCtx);
+            sender.addResponseHeaders(pluginCtx.responseHeaders());
+            if (rRate instanceof PluginResult.Reject rej) {
+                sender.addResponseHeaders(rej.headers());
+                throw new GatewayException(rej.httpStatus(), rej.errorCode(), rej.message());
+            } else if (rRate instanceof PluginResult.ShortCircuit sc) {
+                sender.addResponseHeaders(sc.headers());
+                sender.sendJson(sc.httpStatus(), requestId, sc.responseBody(), null);
+                return;
+            }
+
+            // Stage 3: PRE_ADMIT (Guardrails, PII Redaction, Prompt Decorator/Trimmer, Jev Semantic Router & Policy before Redis Lua ADMIT)
             PluginResult r2 = pluginPipeline.executeStage(snapshot, PluginStage.PRE_ADMIT, pluginCtx);
             sender.addResponseHeaders(pluginCtx.responseHeaders());
             if (r2 instanceof PluginResult.Reject rej) {
@@ -645,11 +734,13 @@ public class DataPlaneExecutor {
                 throw new GatewayException(403, "model_not_permitted", "API Key 无权使用该模型。");
             }
             verifyCapabilities(route, chatReq.requiredCapabilities());
-            prepared = prepareRequest(key, chatReq, route, selectOrderedTargets(route));
+            List<RouteTarget> initialOrderedTargets = selectOrderedTargets(route);
+            pluginCtx.initCandidateTargets(initialOrderedTargets);
+            prepared = prepareRequest(key, chatReq, route, initialOrderedTargets);
             admitRequest(requestId, prepared);
             admitted = true;
 
-            // Stage 3: POST_ADMIT_PRE_DISPATCH (Exact Cache & Semantic Cache short-circuit at 0 micro-USD)
+            // Stage 4: POST_ADMIT_PRE_DISPATCH (Exact Cache & Semantic Cache short-circuit at 0 micro-USD, including stream SSE replay)
             PluginResult r3 = pluginPipeline.executeStage(snapshot, PluginStage.POST_ADMIT_PRE_DISPATCH, pluginCtx);
             sender.addResponseHeaders(pluginCtx.responseHeaders());
             if (r3 instanceof PluginResult.Reject rej) {
@@ -663,11 +754,32 @@ public class DataPlaneExecutor {
                 } catch (Exception ignored) {}
                 admitted = false; // already settled at 0 micro-USD
                 pluginCtx.setSettlementMetrics(0L, 0L, 0L, "completed");
+                pluginCtx.setSettledBillingEvent(new PluginExecutionContext.SettledBillingEvent(
+                    requestId, key.workspaceId(), key.projectId(), key.keyId(),
+                    "/v1/chat/completions", route.aliasName(), "cache",
+                    "completed", 0L, 0L, 0L, 0L, 0L, 0L,
+                    pluginCtx.attributionTags(), Instant.now().toString()
+                ));
                 try {
                     pluginPipeline.executeStage(snapshot, PluginStage.POST_SETTLE, pluginCtx);
                 } catch (Exception ignored) {}
-                sender.sendJson(sc.httpStatus(), requestId, sc.responseBody(), null);
+                if (chatReq.stream()) {
+                    replayCachedCompletionAsSse(requestId, route.aliasName(), sc.responseBody(), deadlineAt, sender);
+                } else {
+                    sender.sendJson(sc.httpStatus(), requestId, sc.responseBody(), null);
+                }
                 return;
+            }
+
+            // Stage 5: ROUTE_SELECT (Pluggable target ordering: Least-TTFT, Prefix-Cache Affinity, Weighted CB, or JS/Java ctx.setCandidateTargets)
+            PluginResult rRoute = pluginPipeline.executeStage(snapshot, PluginStage.ROUTE_SELECT, pluginCtx);
+            sender.addResponseHeaders(pluginCtx.responseHeaders());
+            if (rRoute instanceof PluginResult.Reject rej) {
+                sender.addResponseHeaders(rej.headers());
+                throw new GatewayException(rej.httpStatus(), rej.errorCode(), rej.message());
+            }
+            if (pluginCtx.isCandidateTargetsMutated() && !pluginCtx.candidateTargets().isEmpty()) {
+                prepared = prepareRequest(key, chatReq, route, pluginCtx.candidateTargets());
             }
 
             billing.dispatch(requestId);
@@ -697,7 +809,7 @@ public class DataPlaneExecutor {
         final PreparedRequest prep = prepared;
         try {
             if (prep.body().stream()) {
-                finalStatus = executeStreamFlow(requestId, prep, t, deadlineAt, attempts, persistedAttempts, activeStream, abortReason, sender);
+                finalStatus = executeStreamFlow(requestId, prep, t, deadlineAt, attempts, persistedAttempts, activeStream, abortReason, sender, snapshot, pluginCtx);
             } else {
                 finalStatus = executeBufferedFlow(requestId, prep, t, deadlineAt, attempts, persistedAttempts, activeStream, abortReason, sender, snapshot, pluginCtx);
             }
@@ -710,6 +822,45 @@ public class DataPlaneExecutor {
         } finally {
             finishRequest(requestId, admitted, dispatched, prep, finalStatus, attempts, persistedAttempts, heartbeatTask, snapshot, pluginCtx);
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void replayCachedCompletionAsSse(
+        String requestId,
+        String aliasName,
+        String cachedCompletionJson,
+        long deadlineAt,
+        ResponseSender sender
+    ) {
+        String content = "";
+        try {
+            Map<?, ?> parsed = mapper.readValue(cachedCompletionJson, Map.class);
+            if (parsed.get("choices") instanceof List<?> choices && !choices.isEmpty() && choices.get(0) instanceof Map<?, ?> c0) {
+                if (c0.get("message") instanceof Map<?, ?> msg && msg.get("content") instanceof String s) {
+                    content = s;
+                } else if (c0.get("delta") instanceof Map<?, ?> delta && delta.get("content") instanceof String s) {
+                    content = s;
+                }
+            }
+        } catch (Exception ignored) {}
+        try {
+            Map<String, Object> chunk = new LinkedHashMap<>();
+            chunk.put("id", "chatcmpl_" + requestId);
+            chunk.put("object", "chat.completion.chunk");
+            chunk.put("created", Instant.now().getEpochSecond());
+            chunk.put("model", aliasName);
+            chunk.put("choices", List.of(Map.of(
+                "index", 0,
+                "delta", Map.of("role", "assistant", "content", content),
+                "message", Map.of("role", "assistant", "content", content),
+                "finish_reason", "stop"
+            )));
+            chunk.put("usage", Map.of("prompt_tokens", 0, "completion_tokens", 0, "total_tokens", 0));
+            sender.startSse(requestId);
+            sender.writeSseFrame("data: " + mapper.writeValueAsString(chunk) + "\n\n", deadlineAt);
+            sender.writeSseFrame("data: [DONE]\n\n", deadlineAt);
+            sender.finishSse();
+        } catch (Exception ignored) {}
     }
 
     /** #34: Select targets ordered by health (circuit breaker state) and configured weights */
@@ -2069,12 +2220,31 @@ public class DataPlaneExecutor {
         } catch (Exception ignored) {}
         if (pluginCtx != null) {
             try {
-                pluginCtx.setSettlementMetrics(
-                    totals.actualMicros() != null ? totals.actualMicros() : 0L,
-                    totals.inputTokens() != null ? totals.inputTokens() : 0L,
-                    totals.outputTokens() != null ? totals.outputTokens() : 0L,
-                    status
-                );
+                long charged = totals.actualMicros() != null ? totals.actualMicros() : 0L;
+                long inTok = totals.inputTokens() != null ? totals.inputTokens() : 0L;
+                long outTok = totals.outputTokens() != null ? totals.outputTokens() : 0L;
+                long cachedTok = totals.cachedInputTokens() != null ? totals.cachedInputTokens() : 0L;
+                long reasonTok = totals.reasoningTokens() != null ? totals.reasoningTokens() : 0L;
+                String winTarget = attempts.isEmpty() ? "" : attempts.getLast().upstream_model();
+                pluginCtx.setSettlementMetrics(charged, inTok, outTok, status);
+                pluginCtx.setSettledBillingEvent(new PluginExecutionContext.SettledBillingEvent(
+                    requestId,
+                    prepared != null ? prepared.key().workspaceId() : pluginCtx.workspaceId(),
+                    prepared != null ? prepared.key().projectId() : pluginCtx.projectId(),
+                    prepared != null ? prepared.key().keyId() : pluginCtx.keyId(),
+                    pluginCtx.endpoint(),
+                    prepared != null ? prepared.route().aliasName() : pluginCtx.modelAlias(),
+                    winTarget,
+                    status,
+                    charged,
+                    inTok,
+                    outTok,
+                    cachedTok,
+                    reasonTok,
+                    totals.ttftMs(),
+                    pluginCtx.attributionTags(),
+                    Instant.now().toString()
+                ));
                 pluginPipeline.executeStage(snapshot, PluginStage.POST_SETTLE, pluginCtx);
             } catch (Exception ignored) {}
         }
@@ -2108,6 +2278,15 @@ public class DataPlaneExecutor {
                 break;
             }
             RouteTarget target = prepared.targets().get(index);
+            if (pluginCtx != null) {
+                PluginResult rPreUp = pluginPipeline.executeStage(snapshot, PluginStage.PRE_UPSTREAM, pluginCtx);
+                sender.addResponseHeaders(pluginCtx.responseHeaders());
+                if (rPreUp instanceof PluginResult.Reject rej) {
+                    sender.addResponseHeaders(rej.headers());
+                    lastError = new GatewayException(rej.httpStatus(), rej.errorCode(), rej.message());
+                    break;
+                }
+            }
             BufferedAttemptResult result = runBufferedAttempt(
                 requestId, prepared.route().aliasName(), prepared.body(), prepared.maxOutputTokens(),
                 target, prepared.priceEntries().get(index),
@@ -2116,6 +2295,7 @@ public class DataPlaneExecutor {
             AttemptRecord rec = result.record();
             if ("ok".equals(rec.status())) {
                 recordTargetSuccess(target.targetId());
+                pluginPipeline.leastTtftRouterPlugin().recordTargetLatencyMs(target.targetId(), Math.max(1L, rec.latency_ms()));
             } else if (rec.retry_safe()) {
                 recordTargetFailure(target.targetId());
             }
@@ -2178,7 +2358,9 @@ public class DataPlaneExecutor {
         Set<Integer> persistedAttempts,
         AtomicReference<AutoCloseable> activeStream,
         AtomicReference<String> abortReason,
-        ResponseSender sender
+        ResponseSender sender,
+        Snapshot snapshot,
+        PluginExecutionContext pluginCtx
     ) {
         GatewayException lastError = null;
         Integer retryAfter = null;
@@ -2192,14 +2374,25 @@ public class DataPlaneExecutor {
                 break;
             }
             RouteTarget target = prepared.targets().get(index);
+            if (pluginCtx != null) {
+                PluginResult rPreUp = pluginPipeline.executeStage(snapshot, PluginStage.PRE_UPSTREAM, pluginCtx);
+                sender.addResponseHeaders(pluginCtx.responseHeaders());
+                if (rPreUp instanceof PluginResult.Reject rej) {
+                    sender.addResponseHeaders(rej.headers());
+                    lastError = new GatewayException(rej.httpStatus(), rej.errorCode(), rej.message());
+                    break;
+                }
+            }
             StreamAttemptResult result = runStreamAttempt(
                 requestId, prepared.route().aliasName(), prepared.body(), prepared.maxOutputTokens(),
                 target, prepared.priceEntries().get(index),
-                t, deadlineAt, activeStream, abortReason, sender
+                t, deadlineAt, activeStream, abortReason, sender, snapshot, pluginCtx
             );
             AttemptRecord rec = result.record();
             if ("ok".equals(rec.status())) {
                 recordTargetSuccess(target.targetId());
+                long sampleLat = rec.ttft_ms() != null ? rec.ttft_ms() : Math.max(1L, rec.latency_ms());
+                pluginPipeline.leastTtftRouterPlugin().recordTargetLatencyMs(target.targetId(), sampleLat);
             } else if (rec.retry_safe()) {
                 recordTargetFailure(target.targetId());
             }
@@ -2477,7 +2670,9 @@ public class DataPlaneExecutor {
         long deadlineAt,
         AtomicReference<AutoCloseable> activeStream,
         AtomicReference<String> abortReason,
-        ResponseSender sender
+        ResponseSender sender,
+        Snapshot snapshot,
+        PluginExecutionContext pluginCtx
     ) {
         long started = System.currentTimeMillis();
         int attemptNo = entry.attempt_no();
@@ -2586,6 +2781,7 @@ public class DataPlaneExecutor {
             }
 
             SseParser parser = new SseParser();
+            StringBuilder streamedContentBuilder = new StringBuilder();
             try (InputStream in = resp.body()) {
                 byte[] buf = new byte[4096];
                 int n;
@@ -2628,6 +2824,34 @@ public class DataPlaneExecutor {
                             if (parsedObj.get("error") != null) {
                                 throw new UpstreamFailureException("upstream_stream_error", 502, "上游在流式响应中返回错误。", true, true, false);
                             }
+                            // Stage 7a: STREAM_CHUNK (real-time chunk PII redaction & JS/Java onStreamChunk hooks)
+                            if (parsedObj.get("choices") instanceof List<?> choices && !choices.isEmpty() && choices.get(0) instanceof Map<?, ?> c0) {
+                                Map<?, ?> deltaMap = c0.get("delta") instanceof Map<?, ?> dm ? dm
+                                    : (c0.get("message") instanceof Map<?, ?> mm ? mm : null);
+                                String deltaFieldKey = c0.get("delta") instanceof Map<?, ?> ? "delta"
+                                    : (c0.get("message") instanceof Map<?, ?> ? "message" : null);
+                                if (deltaMap != null && deltaFieldKey != null && deltaMap.get("content") instanceof String deltaTxt && !deltaTxt.isEmpty()) {
+                                    if (pluginCtx != null) {
+                                        pluginCtx.initStreamChunk(deltaTxt);
+                                        PluginResult rChunk = pluginPipeline.executeStage(snapshot, PluginStage.STREAM_CHUNK, pluginCtx);
+                                        sender.addResponseHeaders(pluginCtx.responseHeaders());
+                                        if (rChunk instanceof PluginResult.Reject rej) {
+                                            throw new UpstreamFailureException("upstream_stream_error", rej.httpStatus(), rej.message(), true, true, false);
+                                        }
+                                        if (pluginCtx.isStreamChunkMutated() && pluginCtx.streamChunk() != null) {
+                                            deltaTxt = pluginCtx.streamChunk();
+                                            Map<String, Object> mutDelta = new LinkedHashMap<>((Map<String, Object>) deltaMap);
+                                            mutDelta.put("content", deltaTxt);
+                                            Map<String, Object> mutC0 = new LinkedHashMap<>((Map<String, Object>) c0);
+                                            mutC0.put(deltaFieldKey, mutDelta);
+                                            List<Object> mutChoices = new ArrayList<>(choices);
+                                            mutChoices.set(0, mutC0);
+                                            parsedObj.put("choices", mutChoices);
+                                        }
+                                    }
+                                    streamedContentBuilder.append(deltaTxt);
+                                }
+                            }
                             sender.startSse(requestId);
                             sender.writeSseFrame(formatSseEvent(new SseEvent(ev.event(), mapper.writeValueAsString(parsedObj))), deadlineAt);
                         } else {
@@ -2655,6 +2879,30 @@ public class DataPlaneExecutor {
             }
             status = "ok";
             errorCode = null;
+            // Stage 7b: Backfill RESPONSE_CONTENT on completed stream so ExactCachePlugin / SemanticCachePlugin can cache streamed completions
+            if (pluginCtx != null && !streamedContentBuilder.isEmpty()) {
+                try {
+                    Map<String, Object> syntheticCompletion = new LinkedHashMap<>();
+                    syntheticCompletion.put("id", "chatcmpl_" + requestId);
+                    syntheticCompletion.put("object", "chat.completion");
+                    syntheticCompletion.put("created", Instant.now().getEpochSecond());
+                    syntheticCompletion.put("model", aliasName);
+                    syntheticCompletion.put("choices", List.of(Map.of(
+                        "index", 0,
+                        "message", Map.of("role", "assistant", "content", streamedContentBuilder.toString()),
+                        "finish_reason", "stop"
+                    )));
+                    syntheticCompletion.put("usage", Map.of(
+                        "prompt_tokens", inputTokens != null ? inputTokens : 0L,
+                        "completion_tokens", outputTokens != null ? outputTokens : 0L,
+                        "total_tokens", (inputTokens != null ? inputTokens : 0L) + (outputTokens != null ? outputTokens : 0L)
+                    ));
+                    pluginCtx.setResponseStatus(200);
+                    pluginCtx.setResponseJson(syntheticCompletion);
+                    pluginCtx.setResponseBody(mapper.writeValueAsString(syntheticCompletion));
+                    pluginPipeline.executeStage(snapshot, PluginStage.RESPONSE_CONTENT, pluginCtx);
+                } catch (Exception ignored) {}
+            }
         } catch (GatewayException ge) {
             if ("client_closed".equals(ge.getCode()) || "client_cancelled".equals(abortReason.get())) {
                 errorCode = "client_cancelled";

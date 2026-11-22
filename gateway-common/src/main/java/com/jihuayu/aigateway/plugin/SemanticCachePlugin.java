@@ -50,7 +50,7 @@ public class SemanticCachePlugin implements GatewayPlugin {
 
     @Override
     public PluginResult onPostAdmitPreDispatch(PluginExecutionContext ctx) {
-        if (ctx.stream()) {
+        if (ctx.stream() && Boolean.FALSE.equals(ctx.pluginConfig().get("cacheStreaming"))) {
             return PluginResult.Continue.INSTANCE;
         }
         String prompt = ctx.extractPromptText();
@@ -97,7 +97,7 @@ public class SemanticCachePlugin implements GatewayPlugin {
 
     @Override
     public PluginResult onResponseContent(PluginExecutionContext ctx) {
-        if (ctx.stream() || ctx.responseStatus() != 200) {
+        if (ctx.responseStatus() != 200 || (ctx.stream() && Boolean.FALSE.equals(ctx.pluginConfig().get("cacheStreaming")))) {
             return PluginResult.Continue.INSTANCE;
         }
         String body = ctx.responseBody();

@@ -35,6 +35,7 @@ import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.codec.http.LastHttpContent;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -141,10 +142,16 @@ public class NettyGatewayServer {
                 return;
             }
             String uri = req.uri();
-            String path = uri.contains("?") ? uri.substring(0, uri.indexOf('?')) : uri;
+            int qIdx = uri.indexOf('?');
+            String path = qIdx >= 0 ? uri.substring(0, qIdx) : uri;
+            String rawQuery = qIdx >= 0 ? uri.substring(qIdx + 1) : "";
             HttpMethod method = req.method();
             String authHeader = req.headers().get(HttpHeaderNames.AUTHORIZATION);
             String xApiKeyHeader = req.headers().get("x-api-key");
+            Map<String, String> inHeaders = new LinkedHashMap<>();
+            for (Map.Entry<String, String> h : req.headers()) {
+                inHeaders.put(h.getKey().toLowerCase(), h.getValue());
+            }
 
             ByteBuf content = req.content();
             byte[] bodyBytes = new byte[content.readableBytes()];
@@ -174,7 +181,7 @@ public class NettyGatewayServer {
                     }
                     if (HttpMethod.POST.equals(method) && path.startsWith("/mcp/") && path.length() > "/mcp/".length()) {
                         String serverAlias = path.substring("/mcp/".length()).trim();
-                        HttpResponsePayload payload = dataPlane.handleMcpProxy(serverAlias, authHeader, bodyBytes, requestId);
+                        HttpResponsePayload payload = dataPlane.handleMcpProxy(serverAlias, authHeader, inHeaders, rawQuery, bodyBytes, requestId);
                         sendJsonDirect(ch, payload.status(), requestId, scopedNode, payload.jsonBody(), null, payload.headers());
                         return;
                     }
@@ -186,7 +193,7 @@ public class NettyGatewayServer {
                     }
                     if (HttpMethod.POST.equals(method) && "/v1/chat/completions".equals(path)) {
                         NettyResponseSender sender = new NettyResponseSender(ch, scopedNode);
-                        dataPlane.handleChat(authHeader, bodyBytes, requestId, sender);
+                        dataPlane.handleChat(authHeader, inHeaders, rawQuery, bodyBytes, requestId, sender);
                         return;
                     }
                     if (HttpMethod.POST.equals(method) && "/v1/embeddings".equals(path)) {
@@ -205,10 +212,6 @@ public class NettyGatewayServer {
                         return;
                     }
                     if (HttpMethod.POST.equals(method) && ("/v1/systemone".equals(path) || "/jev/v1/systemone".equals(path))) {
-                        Map<String, String> inHeaders = new java.util.LinkedHashMap<>();
-                        for (Map.Entry<String, String> h : req.headers()) {
-                            inHeaders.put(h.getKey().toLowerCase(), h.getValue());
-                        }
                         NettyResponseSender sender = new NettyResponseSender(ch, scopedNode);
                         dataPlane.handleSystemOne(authHeader, inHeaders, bodyBytes, requestId, sender);
                         return;

@@ -110,6 +110,34 @@ public class HotRuntime {
         return keys;
     }
 
+    public StatefulRedisConnection<String, String> getRedisConn() {
+        return redisConn;
+    }
+
+    public Snapshot latestSnapshot() {
+        try {
+            String rev = redisConn.sync().hget(keys.config(), "revision");
+            if (rev != null && !rev.isBlank()) {
+                Snapshot s = cache.get(rev);
+                if (s != null) return s;
+                String json = redisConn.sync().get(keys.snapshot(rev));
+                if (json != null && !json.isBlank()) {
+                    s = mapper.readValue(json, Snapshot.class);
+                    cache.put(rev, s);
+                    return s;
+                }
+            }
+        } catch (Exception ignored) {}
+        synchronized (cache) {
+            if (!cache.isEmpty()) {
+                Snapshot last = null;
+                for (Snapshot s : cache.values()) last = s;
+                return last;
+            }
+        }
+        return null;
+    }
+
     public void initializeFromRedisOnly() {
         RedisCommands<String, String> redis = redisConn.sync();
         if ("aof".equals(durability)) {
@@ -737,14 +765,15 @@ public class HotRuntime {
 
     private List<PluginBindingSnapshot> loadPluginBindingsFromDb(Connection conn) {
         List<PluginBindingSnapshot> list = new ArrayList<>();
-        String sql = """
+        String sqlWithSampleRate = """
             SELECT id::text AS id, plugin_id::text AS plugin_id, scope_type, scope_id,
-                   priority, config_override::text AS config_override, enabled
+                   priority, config_override::text AS config_override, enabled,
+                   COALESCE(sample_rate, 1.0) AS sample_rate
               FROM plugin_bindings
              WHERE enabled = true
              ORDER BY priority ASC, created_at ASC, id ASC
             """;
-        try (PreparedStatement ps = conn.prepareStatement(sql);
+        try (PreparedStatement ps = conn.prepareStatement(sqlWithSampleRate);
              ResultSet rs = ps.executeQuery()) {
             while (rs.next()) {
                 String cfgRaw = rs.getString("config_override");
@@ -758,12 +787,41 @@ public class HotRuntime {
                     rs.getString("scope_id"),
                     rs.getInt("priority"),
                     cfg,
-                    rs.getBoolean("enabled")
+                    rs.getBoolean("enabled"),
+                    rs.getDouble("sample_rate")
                 ));
             }
+            return list;
         } catch (Exception ignored) {
-            // Table may not exist yet before V8 migration runs
+            // Fallback before V12 migration adds sample_rate column
         }
+
+        String fallbackSql = """
+            SELECT id::text AS id, plugin_id::text AS plugin_id, scope_type, scope_id,
+                   priority, config_override::text AS config_override, enabled
+              FROM plugin_bindings
+             WHERE enabled = true
+             ORDER BY priority ASC, created_at ASC, id ASC
+            """;
+        try (PreparedStatement ps = conn.prepareStatement(fallbackSql);
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                String cfgRaw = rs.getString("config_override");
+                Map<String, Object> cfg = (cfgRaw != null && !cfgRaw.isBlank())
+                    ? mapper.readValue(cfgRaw, new TypeReference<Map<String, Object>>() {})
+                    : Map.of();
+                list.add(new PluginBindingSnapshot(
+                    rs.getString("id"),
+                    rs.getString("plugin_id"),
+                    rs.getString("scope_type"),
+                    rs.getString("scope_id"),
+                    rs.getInt("priority"),
+                    cfg,
+                    rs.getBoolean("enabled"),
+                    1.0
+                ));
+            }
+        } catch (Exception ignored) {}
         return list;
     }
 
