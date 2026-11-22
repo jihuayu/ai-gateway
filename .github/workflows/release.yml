@@ -22,9 +22,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (e.g. v0.1.0)"
+        description: "Release tag (e.g. v0.2.0)"
         required: true
-        default: "v0.1.0"
+        default: "v0.2.0"
 
 permissions:
   contents: write
@@ -37,7 +37,7 @@ env:
 
 jobs:
   build-and-release:
-    name: Build Oracle GraalVM 25 Native Binary, JAR & GitHub Release
+    name: Build Oracle GraalVM 25 Native Binary, Control-Plane JAR & GitHub Release
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -49,7 +49,7 @@ jobs:
           java-version: "25"
           distribution: "graalvm"
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          cache: "maven"
+          cache: "gradle"
 
       - name: Resolve release version
         id: meta
@@ -63,23 +63,24 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
-      - name: Build Full-Stack Spring Boot + Netty JAR
-        run: mvn -B -DskipTests package
+      - name: Verify Spotless Code Formatting & Build Control-Plane Boot JAR
+        run: |
+          chmod +x ./gradlew
+          ./gradlew spotlessCheck :gateway-control-plane:bootJar -x test --no-daemon
 
-      - name: Build Standalone Netty Gateway Native Executable (Oracle GraalVM 25)
-        run: mvn -B -Pgateway-native -DskipTests native:compile
+      - name: Build Standalone Netty Data-Plane Native Executable (Oracle GraalVM 25)
+        run: ./gradlew :gateway-data-plane:nativeCompile -x test --no-daemon
 
       - name: Package Release Artifacts & Checksums
         run: |
           mkdir -p dist
-          cp target/ai-gateway-0.1.0-exec.jar "dist/ai-gateway-${{ steps.meta.outputs.tag }}.jar" 2>/dev/null || \
-            cp target/ai-gateway-0.1.0.jar "dist/ai-gateway-${{ steps.meta.outputs.tag }}.jar"
-          cp target/ai-gateway-netty "dist/ai-gateway-netty-linux-amd64"
+          cp gateway-control-plane/build/libs/gateway-control-plane-*.jar "dist/ai-gateway-control-plane-${{ steps.meta.outputs.tag }}.jar"
+          cp gateway-data-plane/build/native/nativeCompile/ai-gateway-netty "dist/ai-gateway-netty-linux-amd64"
           chmod +x "dist/ai-gateway-netty-linux-amd64"
           tar -czf "dist/ai-gateway-netty-${{ steps.meta.outputs.tag }}-linux-amd64.tar.gz" \
             -C dist ai-gateway-netty-linux-amd64 \
             -C "${GITHUB_WORKSPACE}" LICENSE README.md
-          (cd dist && sha256sum "ai-gateway-${{ steps.meta.outputs.tag }}.jar" "ai-gateway-netty-${{ steps.meta.outputs.tag }}-linux-amd64.tar.gz" > SHA256SUMS.txt)
+          (cd dist && sha256sum "ai-gateway-control-plane-${{ steps.meta.outputs.tag }}.jar" "ai-gateway-netty-${{ steps.meta.outputs.tag }}-linux-amd64.tar.gz" > SHA256SUMS.txt)
 
       - name: Create GitHub Release & Upload Artifacts
         uses: softprops/action-gh-release@v2
@@ -90,7 +91,7 @@ jobs:
           draft: false
           prerelease: ${{ contains(steps.meta.outputs.tag, '-') }}
           files: |
-            dist/ai-gateway-${{ steps.meta.outputs.tag }}.jar
+            dist/ai-gateway-control-plane-${{ steps.meta.outputs.tag }}.jar
             dist/ai-gateway-netty-${{ steps.meta.outputs.tag }}-linux-amd64.tar.gz
             dist/SHA256SUMS.txt
 
@@ -111,7 +112,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract Docker metadata for Full-Stack Image (ai-gateway)
+      - name: Extract Docker metadata for Control-Plane / Full-Stack Image (ai-gateway)
         id: meta-full
         uses: docker/metadata-action@v5
         with:
@@ -122,7 +123,7 @@ jobs:
             type=ref,event=tag
             type=raw,value=latest
 
-      - name: Build and push Full-Stack Image (ghcr.io/${{ github.repository }})
+      - name: Build and push Control-Plane Image (ghcr.io/${{ github.repository }})
         uses: docker/build-push-action@v6
         with:
           context: .

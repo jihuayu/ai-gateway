@@ -22,16 +22,58 @@ services:
       interval: 3s
       retries: 20
 
+  control-plane:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ["cluster"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports: ["127.0.0.1:3000:3000"]
+    environment:
+      HOST: 0.0.0.0
+      ADMIN_PORT: 3000
+      GATEWAY_PORT: -1
+      DATABASE_URL: postgresql://gateway:local-development-only@postgres:5432/gateway
+      REDIS_URL: redis://redis:6379
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000001}
+      DATA_PLANE_NAMESPACE: ${DATA_PLANE_NAMESPACE:-gateway}
+      HOT_DURABILITY: ${HOT_DURABILITY:-aof}
+
   gateway-native:
     build:
       context: .
       dockerfile: Dockerfile.gateway-native
-    profiles: ["native"]
+    profiles: ["native", "cluster"]
     depends_on:
       redis:
         condition: service_healthy
     ports: ["127.0.0.1:3001:3001"]
     environment:
+      GATEWAY_NODE_ID: gateway-node-1
+      HOST: 0.0.0.0
+      GATEWAY_PORT: 3001
+      REDIS_URL: redis://redis:6379
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000001}
+      DATA_PLANE_NAMESPACE: ${DATA_PLANE_NAMESPACE:-gateway}
+      HOT_DURABILITY: ${HOT_DURABILITY:-aof}
+      HOT_JOURNAL_CAPACITY: ${HOT_JOURNAL_CAPACITY:-10000}
+      ALLOW_PRIVATE_UPSTREAM: ${ALLOW_PRIVATE_UPSTREAM:-false}
+
+  gateway-native-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway-native
+    profiles: ["cluster"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports: ["127.0.0.1:3002:3001"]
+    environment:
+      GATEWAY_NODE_ID: gateway-node-2
       HOST: 0.0.0.0
       GATEWAY_PORT: 3001
       REDIS_URL: redis://redis:6379

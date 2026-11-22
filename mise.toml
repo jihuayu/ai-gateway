@@ -1,0 +1,23 @@
+# mise-en-place configuration for AI Gateway (https://mise.jdx.dev)
+[tools]
+java = "graalvm-25"
+gradle = "9.1.0"
+
+[env]
+JAVA_OPTS = "--enable-preview"
+
+[tasks.build]
+description = "Build all gateway modules (:gateway-common, :gateway-data-plane, :gateway-control-plane)"
+run = "./gradlew build -x test"
+
+[tasks.test]
+description = "Run full Testcontainers, Spring Modulith & Netty Cluster integration tests"
+run = "./gradlew test"
+
+[tasks.format]
+description = "Format all Java & Kotlin DSL files with Spotless"
+run = "./gradlew spotlessApply"
+
+[tasks.native-gateway]
+description = "Compile standalone Netty Data-Plane Gateway to Oracle GraalVM 25 native executable"
+run = "./gradlew :gateway-data-plane:nativeCompile"
