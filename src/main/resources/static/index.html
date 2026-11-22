@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="AI Gateway 管理控制台：连接模型供应商、发布模型别名、管理项目密钥并核验调用与会话用量。">
+  <title>AI Gateway 控制台</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
+
+  <div id="boot-screen" class="boot-screen" role="status" aria-live="polite">
+    <div class="boot-card">
+      <div class="brand-mark brand-mark--large" aria-hidden="true">AG</div>
+      <p class="boot-title">正在连接 AI Gateway</p>
+      <p class="boot-note">读取会话与项目权限…</p>
+      <div class="spinner" aria-hidden="true"></div>
+    </div>
+  </div>
+
+  <section id="auth-view" class="auth-view" aria-labelledby="auth-heading" hidden>
+    <div class="auth-intro">
+      <div class="brand brand--auth">
+        <span class="brand-mark" aria-hidden="true">AG</span>
+        <span class="brand-text">AI Gateway</span>
+      </div>
+      <h1 id="auth-heading">一个入口，管理模型调用、密钥与用量。</h1>
+      <p>连接兼容 OpenAI Chat Completions 的上游服务，为每个项目发布模型别名，用项目密钥完成受控调用。控制台不保存提示词或模型回答。</p>
+      <ul class="auth-points">
+        <li>供应商凭据只写入，不在浏览器中回显</li>
+        <li>项目密钥仅展示一次，可随时吊销</li>
+        <li>费用与未知用量分开呈现，不把未知当作零</li>
+      </ul>
+    </div>
+
+    <div class="auth-panel">
+      <div class="auth-card">
+        <div class="auth-tabs" role="tablist" aria-label="登录或初始化">
+          <button type="button" id="tab-bootstrap" class="auth-tab is-active" role="tab" aria-selected="true" aria-controls="bootstrap-panel">首次部署</button>
+          <button type="button" id="tab-login" class="auth-tab" role="tab" aria-selected="false" aria-controls="login-panel">已有账号登录</button>
+          <button type="button" id="tab-accept" class="auth-tab" role="tab" aria-selected="false" aria-controls="accept-panel">接受邀请</button>
+        </div>
+
+        <div id="bootstrap-panel" role="tabpanel" aria-labelledby="tab-bootstrap">
+          <h2>创建首个管理员</h2>
+          <p class="form-hint">只有在工作空间尚无用户时可用。创建后将同时建立第一个项目。</p>
+          <form id="bootstrap-form" novalidate>
+            <div class="field">
+              <label for="bootstrap-email">邮箱</label>
+              <input id="bootstrap-email" name="email" type="email" autocomplete="username" required maxlength="254" placeholder="admin@example.com">
+              <p class="field-error" id="bootstrap-email-error" data-error-for="email"></p>
+            </div>
+            <div class="field">
+              <label for="bootstrap-password">密码</label>
+              <input id="bootstrap-password" name="password" type="password" autocomplete="new-password" required minlength="10" maxlength="200" placeholder="至少 10 个字符">
+              <p class="field-hint">至少 10 个字符；使用唯一密码，控制台不会把密码写入浏览器存储。</p>
+              <p class="field-error" id="bootstrap-password-error" data-error-for="password"></p>
+            </div>
+            <div class="field">
+              <label for="bootstrap-project">项目名称</label>
+              <input id="bootstrap-project" name="projectName" type="text" required maxlength="80" placeholder="例如：客服助手">
+              <p class="field-error" id="bootstrap-projectName-error" data-error-for="projectName"></p>
+            </div>
+            <p id="bootstrap-error" class="form-error" role="alert" hidden></p>
+            <button type="submit" class="btn btn-primary btn-block" data-submit-label="创建管理员并进入">创建管理员并进入</button>
+          </form>
+        </div>
+
+        <div id="login-panel" role="tabpanel" aria-labelledby="tab-login" hidden>
+          <h2>登录控制台</h2>
+          <p class="form-hint">会话使用同源安全 Cookie，写入操作还会校验 CSRF 令牌。</p>
+          <form id="login-form" novalidate>
+            <div class="field">
+              <label for="login-email">邮箱</label>
+              <input id="login-email" name="email" type="email" autocomplete="username" required maxlength="254" placeholder="admin@example.com">
+              <p class="field-error" id="login-email-error" data-error-for="email"></p>
+            </div>
+            <div class="field">
+              <label for="login-password">密码</label>
+              <input id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="200">
+              <p class="field-error" id="login-password-error" data-error-for="password"></p>
+            </div>
+            <p id="login-error" class="form-error" role="alert" hidden></p>
+            <button type="submit" class="btn btn-primary btn-block" data-submit-label="登录">登录</button>
+          </form>
+        </div>
+        <div id="accept-panel" role="tabpanel" aria-labelledby="tab-accept" hidden>
+          <h2>接受成员邀请</h2>
+          <p class="form-hint">使用管理员发送的一次性令牌设置密码。邀请 7 天有效，接受后签发当前浏览器会话。</p>
+          <form id="accept-form" novalidate>
+            <div class="field">
+              <label for="accept-token">邀请令牌</label>
+              <input id="accept-token" name="token" type="text" required minlength="20" maxlength="300" autocomplete="off" placeholder="粘贴邀请令牌">
+              <p class="field-error" id="accept-token-error" data-error-for="token"></p>
+            </div>
+            <div class="field">
+              <label for="accept-password">设置密码</label>
+              <input id="accept-password" name="password" type="password" required minlength="10" maxlength="200" autocomplete="new-password" placeholder="至少 10 个字符">
+              <p class="field-error" id="accept-password-error" data-error-for="password"></p>
+            </div>
+            <div class="field">
+              <label for="accept-confirm">确认密码</label>
+              <input id="accept-confirm" name="confirm" type="password" required minlength="10" maxlength="200" autocomplete="new-password">
+              <p class="field-error" id="accept-confirm-error" data-error-for="confirm"></p>
+            </div>
+            <p id="accept-error" class="form-error" role="alert" hidden></p>
+            <button type="submit" class="btn btn-primary btn-block" data-submit-label="接受邀请并登录">接受邀请并登录</button>
+          </form>
+        </div>
+
+        <p class="auth-footnote">若工作空间已初始化，首次部署表单会返回明确错误。请改用“已有账号登录”。</p>
+      </div>
+    </div>
+  </section>
+
+  <div id="app-shell" class="app-shell" hidden>
+    <div id="sidebar-backdrop" class="sidebar-backdrop" hidden></div>
+    <aside id="sidebar" class="sidebar" aria-label="控制台主导航">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">AG</span>
+        <span class="brand-text">AI Gateway</span>
+      </div>
+      <div class="workspace-chip">
+        <span class="workspace-label">工作空间</span>
+        <strong id="workspace-name">当前部署</strong>
+      </div>
+
+      <nav class="nav" aria-label="功能">
+        <a class="nav-item" href="#/overview" data-nav="overview">
+          <span class="nav-icon" aria-hidden="true">▦</span><span>概览</span>
+        </a>
+        <a class="nav-item" href="#/providers" data-nav="providers">
+          <span class="nav-icon" aria-hidden="true">⇄</span><span>供应商</span>
+        </a>
+        <a class="nav-item" href="#/aliases" data-nav="aliases">
+          <span class="nav-icon" aria-hidden="true">◇</span><span>模型别名</span>
+        </a>
+        <a class="nav-item" href="#/keys" data-nav="keys">
+          <span class="nav-icon" aria-hidden="true">⌘</span><span>API Keys</span>
+        </a>
+        <a class="nav-item" href="#/requests" data-nav="requests">
+          <span class="nav-icon" aria-hidden="true">≡</span><span>请求日志</span>
+        </a>
+        <a class="nav-item" href="#/usage" data-nav="usage">
+          <span class="nav-icon" aria-hidden="true">◫</span><span>用量</span>
+        </a>
+        <a class="nav-item" href="#/guide" data-nav="guide">
+          <span class="nav-icon" aria-hidden="true">→</span><span>接入指南</span>
+        </a>
+        <a class="nav-item" href="#/settings" data-nav="settings">
+          <span class="nav-icon" aria-hidden="true">⚙</span><span>设置</span>
+        </a>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="sidebar-user">
+          <span id="user-avatar" class="avatar" aria-hidden="true">?</span>
+          <div class="sidebar-user-text">
+            <strong id="user-email">-</strong>
+            <span id="user-role">-</span>
+          </div>
+        </div>
+        <button type="button" id="logout-button" class="btn btn-quiet-dark btn-block">退出登录</button>
+        <p class="sidebar-note">会话写入受 CSRF 保护</p>
+      </div>
+    </aside>
+
+    <div class="main-shell">
+      <header class="topbar">
+        <button type="button" id="menu-button" class="icon-button menu-button" aria-label="打开导航" aria-expanded="false" aria-controls="sidebar">
+          <span aria-hidden="true">☰</span>
+        </button>
+        <div class="page-heading">
+          <p class="eyebrow" id="page-eyebrow">工作空间</p>
+          <h1 id="page-title">概览</h1>
+        </div>
+        <div class="topbar-actions">
+          <div class="project-picker">
+            <label for="project-select">当前项目</label>
+            <select id="project-select" aria-describedby="project-scope-hint"></select>
+          </div>
+          <button type="button" id="refresh-button" class="btn btn-secondary" aria-label="刷新当前页面">刷新</button>
+        </div>
+      </header>
+
+      <p id="project-scope-hint" class="scope-hint">项目级数据仅显示所选项目；供应商为工作空间全局配置。</p>
+      <div id="stale-banner" class="stale-banner" role="status" hidden></div>
+
+      <main id="main-content" tabindex="-1" class="content">
+        <section id="view-overview" class="view" data-view-panel="overview" aria-label="概览" hidden></section>
+        <section id="view-providers" class="view" data-view-panel="providers" aria-label="供应商" hidden></section>
+        <section id="view-aliases" class="view" data-view-panel="aliases" aria-label="模型别名" hidden></section>
+        <section id="view-keys" class="view" data-view-panel="keys" aria-label="API Keys" hidden></section>
+        <section id="view-requests" class="view" data-view-panel="requests" aria-label="请求日志" hidden></section>
+        <section id="view-usage" class="view" data-view-panel="usage" aria-label="用量" hidden></section>
+        <section id="view-guide" class="view" data-view-panel="guide" aria-label="接入指南" hidden></section>
+        <section id="view-settings" class="view" data-view-panel="settings" aria-label="设置" hidden></section>
+      </main>
+
+      <footer class="app-footer">
+        <span>AI Gateway 控制台</span>
+        <span id="footer-scope">项目范围：-</span>
+      </footer>
+    </div>
+  </div>
+
+  <div id="modal-backdrop" class="modal-backdrop" hidden>
+    <div id="modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabindex="-1">
+      <div class="modal-header">
+        <h2 id="modal-title">对话框</h2>
+        <button type="button" id="modal-close" class="icon-button" aria-label="关闭对话框">✕</button>
+      </div>
+      <div id="modal-body" class="modal-body"></div>
+      <div id="modal-footer" class="modal-footer"></div>
+    </div>
+  </div>
+
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="false"></div>
+  <div id="live-region" class="visually-hidden" aria-live="polite" aria-atomic="true"></div>
+
+  <noscript>
+    <div class="noscript">AI Gateway 控制台需要启用 JavaScript 才能读取项目数据与提交操作。</div>
+  </noscript>
+</body>
+</html>

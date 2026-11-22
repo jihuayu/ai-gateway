@@ -1,0 +1,25 @@
+server:
+  address: ${HOST:127.0.0.1}
+  port: ${PORT:3000}
+
+spring:
+  threads:
+    virtual:
+      enabled: true
+  web:
+    resources:
+      static-locations: classpath:/static/
+
+gateway:
+  database-url: ${DATABASE_URL:postgresql://gateway:local-development-only@127.0.0.1:5432/gateway}
+  redis-url: ${REDIS_URL:redis://127.0.0.1:6379}
+  encryption-key: ${ENCRYPTION_KEY:0000000000000000000000000000000000000000000000000000000000000001}
+  host: ${HOST:127.0.0.1}
+  admin-port: ${PORT:3000}
+  netty-port: ${GATEWAY_PORT:3001}
+  allow-private-upstream: ${ALLOW_PRIVATE_UPSTREAM:false}
+  kafka-brokers: ${KAFKA_BROKERS:}
+  data-plane-namespace: ${DATA_PLANE_NAMESPACE:gateway}
+  hot-durability: ${HOT_DURABILITY:aof}
+  hot-journal-capacity: ${HOT_JOURNAL_CAPACITY:10000}
+  background-workers: ${BACKGROUND_WORKERS:true}
