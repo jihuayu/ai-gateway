@@ -670,7 +670,7 @@ public class DataPlaneExecutor {
                 if (rawBody == null || rawBody.length == 0) {
                     throw new GatewayException(400, "invalid_request", "请求体必须是 JSON 对象。");
                 }
-                parsedBody = mapper.readValue(rawBody, Object.class);
+                parsedBody = !preReqJsonMap.isEmpty() ? preReqJsonMap : mapper.readValue(rawBody, Object.class);
             } catch (GatewayException ge) {
                 throw ge;
             } catch (Exception e) {
@@ -737,21 +737,24 @@ public class DataPlaneExecutor {
             List<RouteTarget> initialOrderedTargets = selectOrderedTargets(route);
             pluginCtx.initCandidateTargets(initialOrderedTargets);
             prepared = prepareRequest(key, chatReq, route, initialOrderedTargets);
-            admitRequest(requestId, prepared);
-            admitted = true;
 
-            // Stage 4: POST_ADMIT_PRE_DISPATCH (Exact Cache & Semantic Cache short-circuit at 0 micro-USD, including stream SSE replay)
+            // Stage 4: POST_ADMIT_PRE_DISPATCH (Exact Cache & Semantic Cache check before upstream dispatch)
             PluginResult r3 = pluginPipeline.executeStage(snapshot, PluginStage.POST_ADMIT_PRE_DISPATCH, pluginCtx);
             sender.addResponseHeaders(pluginCtx.responseHeaders());
             if (r3 instanceof PluginResult.Reject rej) {
+                admitRequest(requestId, prepared);
+                admitted = true;
                 sender.addResponseHeaders(rej.headers());
                 throw new GatewayException(rej.httpStatus(), rej.errorCode(), rej.message());
             } else if (r3 instanceof PluginResult.ShortCircuit sc) {
                 sender.addResponseHeaders(sc.headers());
-                try {
-                    billing.persistMetadata(requestId, route.aliasName(), "completed", List.of());
-                    billing.settle(requestId, new SettleInput(0L, 0L, 0L, 0L, 0L, "completed", List.of()));
-                } catch (Exception ignored) {}
+                // Fast-path cache short-circuit: if zero-ledger mode is enabled (default false for audit record), skip Redis write
+                if (!Boolean.TRUE.equals(pluginCtx.attributes().get("cache.skip_ledger_on_hit"))) {
+                    try {
+                        admitAndDispatchRequest(requestId, prepared);
+                        billing.settle(requestId, route.aliasName(), new SettleInput(0L, 0L, 0L, 0L, 0L, "completed", List.of()));
+                    } catch (Exception ignored) {}
+                }
                 admitted = false; // already settled at 0 micro-USD
                 pluginCtx.setSettlementMetrics(0L, 0L, 0L, "completed");
                 pluginCtx.setSettledBillingEvent(new PluginExecutionContext.SettledBillingEvent(
@@ -782,7 +785,9 @@ public class DataPlaneExecutor {
                 prepared = prepareRequest(key, chatReq, route, pluginCtx.candidateTargets());
             }
 
-            billing.dispatch(requestId);
+            // Single-RTT combined admit_and_dispatch via Tokio MPSC Group-Commit channel!
+            admitAndDispatchRequest(requestId, prepared);
+            admitted = true;
             dispatched = true;
         } catch (Exception e) {
             finishRequest(requestId, admitted, dispatched, prepared, "failed", attempts, persistedAttempts, heartbeatTask, snapshot, pluginCtx);
@@ -1003,9 +1008,8 @@ public class DataPlaneExecutor {
             ChatRequest syntheticChat = new ChatRequest(embReq.model(), List.of(), false, null, null, null, null, null, Set.of("embeddings"));
             prepared = new PreparedRequest(key, syntheticChat, route, targets, 0, estInputTokens, priceSnap, entries, totalReserved, period, routeVer);
 
-            admitRequest(requestId, prepared);
+            admitAndDispatchRequest(requestId, prepared);
             admitted = true;
-            billing.dispatch(requestId);
             dispatched = true;
 
             GatewayException lastErr = null;
@@ -1215,9 +1219,8 @@ public class DataPlaneExecutor {
             ChatRequest syntheticChat = new ChatRequest(rerankReq.model(), List.of(), false, null, null, null, null, null, Set.of("rerank"));
             prepared = new PreparedRequest(key, syntheticChat, route, targets, 0, estInputTokens, priceSnap, entries, totalReserved, period, routeVer);
 
-            admitRequest(requestId, prepared);
+            admitAndDispatchRequest(requestId, prepared);
             admitted = true;
-            billing.dispatch(requestId);
             dispatched = true;
 
             GatewayException lastErr = null;
@@ -1425,9 +1428,8 @@ public class DataPlaneExecutor {
             ChatRequest syntheticChat = new ChatRequest(imgReq.model(), List.of(), false, null, null, null, null, null, Set.of("image_generation"));
             prepared = new PreparedRequest(key, syntheticChat, route, targets, estImageOutputTokens, (long) estInputTokens + estImageOutputTokens, priceSnap, entries, totalReserved, period, routeVer);
 
-            admitRequest(requestId, prepared);
+            admitAndDispatchRequest(requestId, prepared);
             admitted = true;
-            billing.dispatch(requestId);
             dispatched = true;
 
             GatewayException lastErr = null;
@@ -1681,8 +1683,7 @@ public class DataPlaneExecutor {
             } else if (r3 instanceof PluginResult.ShortCircuit sc) {
                 sender.addResponseHeaders(sc.headers());
                 try {
-                    billing.persistMetadata(requestId, route.aliasName(), "completed", List.of());
-                    billing.settle(requestId, new SettleInput(0L, 0L, 0L, 0L, 0L, "completed", List.of()));
+                    billing.settle(requestId, route.aliasName(), new SettleInput(0L, 0L, 0L, 0L, 0L, "completed", List.of()));
                 } catch (Exception ignored) {}
                 admitted = false;
                 pluginCtx.setSettlementMetrics(0L, 0L, 0L, "completed");
@@ -2182,23 +2183,22 @@ public class DataPlaneExecutor {
             try { billing.cancelBeforeDispatch(requestId); } catch (Exception ignored) {}
             return;
         }
-        if (prepared != null) {
-            try {
-                billing.persistMetadata(requestId, prepared.route().aliasName(), status, attempts);
-            } catch (Exception ignored) {}
-        }
         AggregatedTotals totals = aggregateSettlement(attempts);
         try {
-            billing.settle(requestId, new SettleInput(
-                totals.actualMicros(),
-                totals.inputTokens(),
-                totals.outputTokens(),
-                totals.cachedInputTokens(),
-                totals.reasoningTokens(),
-                totals.ttftMs(),
-                status,
-                attempts
-            ));
+            billing.settle(
+                requestId,
+                prepared != null ? prepared.route().aliasName() : null,
+                new SettleInput(
+                    totals.actualMicros(),
+                    totals.inputTokens(),
+                    totals.outputTokens(),
+                    totals.cachedInputTokens(),
+                    totals.reasoningTokens(),
+                    totals.ttftMs(),
+                    status,
+                    attempts
+                )
+            );
         } catch (Exception ignored) {}
         try {
             long totalLat = attempts.stream().mapToLong(AttemptRecord::latency_ms).sum();
@@ -2218,7 +2218,7 @@ public class DataPlaneExecutor {
                 totals.actualMicros() != null ? totals.actualMicros() : 0L
             );
         } catch (Exception ignored) {}
-        if (pluginCtx != null) {
+        if (pluginCtx != null && !"POST_SETTLE_DONE".equals(pluginCtx.attributes().get("_post_settle_done"))) {
             try {
                 long charged = totals.actualMicros() != null ? totals.actualMicros() : 0L;
                 long inTok = totals.inputTokens() != null ? totals.inputTokens() : 0L;
@@ -2300,10 +2300,12 @@ public class DataPlaneExecutor {
                 recordTargetFailure(target.targetId());
             }
             attempts.add(rec);
-            try {
-                billing.persistMetadata(requestId, prepared.route().aliasName(), "ok".equals(rec.status()) ? "completed" : "failed", List.of(rec));
-                persistedAttempts.add(rec.attempt_no());
-            } catch (Exception ignored) {}
+            if (!"ok".equals(rec.status())) {
+                try {
+                    billing.persistMetadata(requestId, prepared.route().aliasName(), "failed", List.of(rec));
+                    persistedAttempts.add(rec.attempt_no());
+                } catch (Exception ignored) {}
+            }
             if (result.retryAfter() != null) retryAfter = result.retryAfter();
             if ("ok".equals(rec.status()) && result.completionJson() != null) {
                 String outBody = result.completionJson();
@@ -2331,6 +2333,38 @@ public class DataPlaneExecutor {
                     if (pluginCtx.isResponseBodyMutated() && pluginCtx.responseBody() != null) {
                         outBody = pluginCtx.responseBody();
                     }
+                }
+                if (pluginCtx != null && !"POST_SETTLE_DONE".equals(pluginCtx.attributes().get("_post_settle_done"))) {
+                    try {
+                        AggregatedTotals totals = aggregateSettlement(attempts);
+                        long charged = totals.actualMicros() != null ? totals.actualMicros() : 0L;
+                        long inTok = totals.inputTokens() != null ? totals.inputTokens() : 0L;
+                        long outTok = totals.outputTokens() != null ? totals.outputTokens() : 0L;
+                        long cachedTok = totals.cachedInputTokens() != null ? totals.cachedInputTokens() : 0L;
+                        long reasonTok = totals.reasoningTokens() != null ? totals.reasoningTokens() : 0L;
+                        String winTarget = attempts.isEmpty() ? "" : attempts.getLast().upstream_model();
+                        pluginCtx.setSettlementMetrics(charged, inTok, outTok, "completed");
+                        pluginCtx.setSettledBillingEvent(new PluginExecutionContext.SettledBillingEvent(
+                            requestId,
+                            prepared.key().workspaceId(),
+                            prepared.key().projectId(),
+                            prepared.key().keyId(),
+                            pluginCtx.endpoint(),
+                            prepared.route().aliasName(),
+                            winTarget,
+                            "completed",
+                            charged,
+                            inTok,
+                            outTok,
+                            cachedTok,
+                            reasonTok,
+                            totals.ttftMs(),
+                            pluginCtx.attributionTags(),
+                            Instant.now().toString()
+                        ));
+                        pluginPipeline.executeStage(snapshot, PluginStage.POST_SETTLE, pluginCtx);
+                        pluginCtx.attributes().put("_post_settle_done", "POST_SETTLE_DONE");
+                    } catch (Exception ignored) {}
                 }
                 sender.sendJson(200, requestId, outBody, null);
                 return "completed";
@@ -2397,10 +2431,12 @@ public class DataPlaneExecutor {
                 recordTargetFailure(target.targetId());
             }
             attempts.add(rec);
-            try {
-                billing.persistMetadata(requestId, prepared.route().aliasName(), "ok".equals(rec.status()) ? "completed" : "failed", List.of(rec));
-                persistedAttempts.add(rec.attempt_no());
-            } catch (Exception ignored) {}
+            if (!"ok".equals(rec.status())) {
+                try {
+                    billing.persistMetadata(requestId, prepared.route().aliasName(), "failed", List.of(rec));
+                    persistedAttempts.add(rec.attempt_no());
+                } catch (Exception ignored) {}
+            }
             if (result.retryAfter() != null) retryAfter = result.retryAfter();
             if ("ok".equals(rec.status())) {
                 sender.finishSse();
@@ -3503,8 +3539,8 @@ public class DataPlaneExecutor {
         return new PreparedRequest(key, body, route, targets, maxOutputTokens, reserveTokens, priceSnapshot, entries, total, period, routeVersion);
     }
 
-    private void admitRequest(String requestId, PreparedRequest prepared) {
-        billing.admit(new AdmitInput(
+    private void admitAndDispatchRequest(String requestId, PreparedRequest prepared) {
+        AdmitInput input = new AdmitInput(
             requestId,
             prepared.key().projectId(),
             prepared.key().keyId(),
@@ -3520,7 +3556,43 @@ public class DataPlaneExecutor {
             prepared.key().keyBudgetMicros(),
             prepared.routeVersion(),
             prepared.priceSnapshot()
-        ));
+        );
+        try {
+            billing.admitAndDispatch(input);
+        } catch (GatewayException ge) {
+            if ("configuration_changed".equals(ge.getCode()) && runtime != null) {
+                runtime.invalidateAuthKeyCache(prepared.key().runtimeKeyHash());
+            }
+            throw ge;
+        }
+    }
+
+    private void admitRequest(String requestId, PreparedRequest prepared) {
+        AdmitInput input = new AdmitInput(
+            requestId,
+            prepared.key().projectId(),
+            prepared.key().keyId(),
+            prepared.period(),
+            prepared.totalReservedMicros(),
+            prepared.key().projectRpm(),
+            prepared.key().keyRpm(),
+            prepared.key().projectTpm(),
+            prepared.key().keyTpm(),
+            prepared.reserveTokens(),
+            prepared.key().concurrency(),
+            prepared.key().budgetMicros(),
+            prepared.key().keyBudgetMicros(),
+            prepared.routeVersion(),
+            prepared.priceSnapshot()
+        );
+        try {
+            billing.admit(input);
+        } catch (GatewayException ge) {
+            if ("configuration_changed".equals(ge.getCode()) && runtime != null) {
+                runtime.invalidateAuthKeyCache(prepared.key().runtimeKeyHash());
+            }
+            throw ge;
+        }
     }
 
     public String providerToken(String encryptedSecret, String hexKey) {
@@ -3529,7 +3601,9 @@ public class DataPlaneExecutor {
 
     /** #34: Multi-Key Provider Credential Pool with automatic round-robin across JSON arrays or comma-separated keys */
     public String providerToken(String poolKeyId, String encryptedSecret, String hexKey) {
-        String plain = SecurityUtils.decrypt(encryptedSecret, hexKey).trim();
+        String plain = (runtime != null && runtime.nearCache() != null)
+            ? runtime.nearCache().getOrDecryptSecret(encryptedSecret + ":" + hexKey, () -> SecurityUtils.decrypt(encryptedSecret, hexKey).trim())
+            : SecurityUtils.decrypt(encryptedSecret, hexKey).trim();
         if (plain.startsWith("[")) {
             try {
                 List<?> list = mapper.readValue(plain, List.class);

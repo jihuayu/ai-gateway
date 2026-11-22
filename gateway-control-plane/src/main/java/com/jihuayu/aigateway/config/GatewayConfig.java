@@ -19,7 +19,7 @@ public class GatewayConfig {
     private String kafkaBrokers = "";
     private String dataPlaneNamespace = "gateway";
     private String hotDurability = "aof";
-    private int hotJournalCapacity = 10000;
+    private int hotJournalCapacity = 65536;
     private boolean backgroundWorkers = true;
 
     public void validate(boolean production) {

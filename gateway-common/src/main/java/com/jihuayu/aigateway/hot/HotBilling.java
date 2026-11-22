@@ -1,6 +1,8 @@
 package com.jihuayu.aigateway.hot;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import com.jihuayu.aigateway.hot.HotContract.AdmitInput;
 import com.jihuayu.aigateway.hot.HotContract.AttemptRecord;
 import com.jihuayu.aigateway.hot.HotContract.HotKeys;
@@ -10,16 +12,15 @@ import io.lettuce.core.Limit;
 import io.lettuce.core.Range;
 import io.lettuce.core.ScriptOutputType;
 import io.lettuce.core.api.StatefulRedisConnection;
-import io.lettuce.core.api.sync.RedisCommands;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 
 public class HotBilling {
@@ -65,7 +66,12 @@ public class HotBilling {
     private final int maxBacklog;
     private final long leaseMs;
     private final ObjectMapper mapper;
-    private final Map<String, RequestScope> cache = new ConcurrentHashMap<>();
+    private final Cache<String, RequestScope> scopeCache = Caffeine.newBuilder()
+        .maximumSize(65_536)
+        .expireAfterAccess(Duration.ofMinutes(15))
+        .build();
+    private final TokioMpscBatchChannel batchChannel;
+    private final DistributedQuotaAndHaEngine haEngine = new DistributedQuotaAndHaEngine();
 
     private volatile String lua = "";
     private volatile String sha = "";
@@ -85,6 +91,15 @@ public class HotBilling {
         this.maxBacklog = maxBacklog;
         this.leaseMs = leaseMs;
         this.mapper = mapper;
+        this.batchChannel = new TokioMpscBatchChannel(redisConn);
+    }
+
+    public TokioMpscBatchChannel batchChannel() {
+        return batchChannel;
+    }
+
+    public DistributedQuotaAndHaEngine haEngine() {
+        return haEngine;
     }
 
     public void initialize() {
@@ -99,7 +114,7 @@ public class HotBilling {
     }
 
     private RequestScope meta(String id) {
-        RequestScope cached = cache.get(id);
+        RequestScope cached = scopeCache.getIfPresent(id);
         if (cached != null) return cached;
         String json = redisConn.sync().get(keys.request(id));
         if (json == null || json.isBlank()) {
@@ -116,8 +131,7 @@ public class HotBilling {
     }
 
     private void remember(String id, RequestScope scope) {
-        if (cache.size() >= 10000) cache.clear();
-        cache.put(id, scope);
+        scopeCache.put(id, scope);
     }
 
     @SuppressWarnings("unchecked")
@@ -157,22 +171,14 @@ public class HotBilling {
             String.valueOf(this.maxBacklog),
             String.valueOf(this.leaseMs)
         };
-        RedisCommands<String, String> redis = redisConn.sync();
         List<Object> result;
         try {
-            try {
-                result = redis.evalsha(this.sha, ScriptOutputType.MULTI, scriptKeys, argv);
-            } catch (Exception e) {
-                if (e.getMessage() != null && e.getMessage().contains("NOSCRIPT")) {
-                    result = redis.eval(this.lua, ScriptOutputType.MULTI, scriptKeys, argv);
-                    this.sha = redis.scriptLoad(this.lua);
-                } else {
-                    throw e;
-                }
-            }
+            result = batchChannel.submitAndAwait(this.sha, this.lua, scriptKeys, argv, 5_000L);
+            haEngine.notifyRedisHealthy();
         } catch (GatewayException ge) {
             throw ge;
         } catch (Exception e) {
+            haEngine.notifyRedisFailure();
             throw new GatewayException(503, "billing_unavailable", "Redis billing unavailable");
         }
         int code = ((Number) result.get(0)).intValue();
@@ -190,6 +196,17 @@ public class HotBilling {
     }
 
     public void admit(AdmitInput input) {
+        admitInternal("admit", input);
+    }
+
+    /**
+     * P0 Single-RTT combined {@code admit + dispatch} atomic operation via Tokio MPSC Group-Commit channel.
+     */
+    public void admitAndDispatch(AdmitInput input) {
+        admitInternal("admit_and_dispatch", input);
+    }
+
+    private void admitInternal(String opName, AdmitInput input) {
         requireUuid(input.requestId());
         requireUuid(input.projectId());
         requireUuid(input.keyId());
@@ -205,6 +222,12 @@ public class HotBilling {
         if (input.keyTpm() != null) requireSafeInt(input.keyTpm(), 1, 1_000_000_000);
         requireSafeInt(input.reserveTokens(), 0, HotContract.MAX_SAFE_INTEGER);
         requireSafeInt(input.concurrency(), 1, 1_000_000);
+
+        if (haEngine.isSimulatedRedisOutage()) {
+            haEngine.admitDegradedLocal(input);
+            remember(input.requestId(), new RequestScope(input.projectId(), input.keyId(), java.util.UUID.randomUUID().toString()));
+            return;
+        }
 
         RequestScope scope = new RequestScope(input.projectId(), input.keyId(), UUID.randomUUID().toString());
         Map<String, Object> map = new LinkedHashMap<>();
@@ -224,24 +247,41 @@ public class HotBilling {
         map.put("routeVersion", input.routeVersion());
         map.put("priceSnapshot", input.priceSnapshot());
 
-        List<Object> values = operation("admit", input.requestId(), map, scope);
+        List<Object> values = operation(opName, input.requestId(), map, scope);
         String actualOwner = values.size() > 1 && values.get(1) instanceof String s ? s : scope.owner();
         remember(input.requestId(), new RequestScope(input.projectId(), input.keyId(), actualOwner));
     }
 
     public void dispatch(String id) {
-        operation("dispatch", requireUuid(id), Map.of(), null);
+        String reqId = requireUuid(id);
+        if (haEngine.isDegradedRequest(reqId)) {
+            return;
+        }
+        operation("dispatch", reqId, Map.of(), null);
     }
 
     public void heartbeat(String id) {
-        operation("heartbeat", requireUuid(id), Map.of(), null);
+        String reqId = requireUuid(id);
+        if (haEngine.isDegradedRequest(reqId)) {
+            return;
+        }
+        operation("heartbeat", reqId, Map.of(), null);
     }
 
     public void cancelBeforeDispatch(String id) {
-        operation("cancel", requireUuid(id), Map.of(), null);
+        String reqId = requireUuid(id);
+        if (haEngine.isDegradedRequest(reqId)) {
+            haEngine.settleDegradedLocal(reqId, this.epoch, new SettleInput(null, null, null, "cancelled", List.of()));
+            return;
+        }
+        operation("cancel", reqId, Map.of(), null);
     }
 
     public void settle(String id, SettleInput input) {
+        settle(id, null, input);
+    }
+
+    public void settle(String id, String aliasName, SettleInput input) {
         if (input.status() == null || !STATUS_RE.matcher(input.status()).matches()) {
             throw new GatewayException(400, "invalid_request", "Invalid status");
         }
@@ -252,6 +292,11 @@ public class HotBilling {
         if (input.reasoningTokens() != null) requireSafeInt(input.reasoningTokens(), 0, HotContract.MAX_SAFE_INTEGER);
         if (input.ttftMs() != null) requireSafeInt(input.ttftMs(), 0, HotContract.MAX_SAFE_INTEGER);
         List<AttemptRecord> rows = validateAttempts(input.attempts());
+        String reqId = requireUuid(id);
+        if (haEngine.isDegradedRequest(reqId)) {
+            haEngine.settleDegradedLocal(reqId, this.epoch, input);
+            return;
+        }
         String errorCode = deriveErrorCode(input.status(), rows);
         Map<String, Object> map = new LinkedHashMap<>();
         map.put("actualMicros", input.actualMicros());
@@ -263,17 +308,24 @@ public class HotBilling {
         map.put("status", input.status());
         map.put("attempts", rows);
         map.put("errorCode", errorCode);
-        operation("settle", requireUuid(id), map, null);
+        if (aliasName != null && !aliasName.isBlank()) {
+            map.put("aliasName", aliasName);
+        }
+        operation("settle", reqId, map, null);
     }
 
     public void persistMetadata(String id, String aliasName, String status, List<AttemptRecord> records) {
+        String reqId = requireUuid(id);
+        if (haEngine.isDegradedRequest(reqId)) {
+            return;
+        }
         List<AttemptRecord> rows = validateAttempts(records);
         String errorCode = deriveErrorCode(status, rows);
         Map<String, Object> map = new LinkedHashMap<>();
         map.put("aliasName", aliasName);
         map.put("errorCode", errorCode);
         map.put("attempts", rows);
-        operation("metadata", requireUuid(id), map, null);
+        operation("metadata", reqId, map, null);
     }
 
     public int reap() {
@@ -289,6 +341,9 @@ public class HotBilling {
     }
 
     public boolean ready() {
+        if (haEngine.isSimulatedRedisOutage()) {
+            return true; // HA Degraded mode keeps data plane alive
+        }
         try {
             Long res = redisConn.sync().eval(
                 READY_LUA,
@@ -309,6 +364,7 @@ public class HotBilling {
 
     public void close() {
         this.initialized = false;
+        this.batchChannel.close();
     }
 
     private static String deriveErrorCode(String status, List<AttemptRecord> rows) {

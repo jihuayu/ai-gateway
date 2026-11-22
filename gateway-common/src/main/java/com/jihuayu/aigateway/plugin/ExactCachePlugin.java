@@ -1,24 +1,21 @@
 package com.jihuayu.aigateway.plugin;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import com.jihuayu.aigateway.security.SecurityUtils;
 import io.lettuce.core.api.StatefulRedisConnection;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Built-in Exact Match Response Cache Plugin (#37).
- *
- * <p>Operates at:
- * <ul>
- *   <li><b>Stage 3 ({@code onPostAdmitPreDispatch})</b>: Checks Redis + L1 cache by deterministic SHA-256 key
- *       over {@code (projectId, endpoint, modelAlias, canonicalRequest)}. On cache HIT, returns
- *       {@link PluginResult.ShortCircuit} with {@code x-gateway-cache: HIT}, causing {@code DataPlaneExecutor}
- *       to settle immediately at {@code 0} micro-USD and refund 100% of reserved budget and TPM quota.</li>
- *   <li><b>Stage 4b ({@code onResponseContent})</b>: Stores HTTP 200 non-streaming upstream responses in Redis + L1
- *       with configurable TTL ({@code ttlSeconds}, default 300s).</li>
- * </ul>
+ * Built-in Exact Match Response Cache Plugin (#37) upgraded with Two-Tiered Caffeine W-TinyLFU L1 + Redis L2
+ * and SingleFlight request coalescing.
  */
 public class ExactCachePlugin implements GatewayPlugin {
 
@@ -30,7 +27,9 @@ public class ExactCachePlugin implements GatewayPlugin {
     private final StatefulRedisConnection<String, String> redisConn;
     private final String keyPrefix;
     private final ObjectMapper mapper;
-    private final Map<String, CacheEntry> l1Cache = new ConcurrentHashMap<>();
+    private final Cache<String, CacheEntry> caffeineL1;
+    private final Map<String, CompletableFuture<String>> singleFlightL2Loaders = new ConcurrentHashMap<>();
+    private final AtomicLong singleFlightCoalescedHits = new AtomicLong(0);
 
     public ExactCachePlugin(
         StatefulRedisConnection<String, String> redisConn,
@@ -40,6 +39,12 @@ public class ExactCachePlugin implements GatewayPlugin {
         this.redisConn = redisConn;
         this.keyPrefix = keyPrefix != null ? keyPrefix : "gw:";
         this.mapper = mapper != null ? mapper : new ObjectMapper();
+        this.caffeineL1 = Caffeine.newBuilder()
+            .maximumWeight(128L * 1024L * 1024L) // 128 MB W-TinyLFU window
+            .weigher((String k, CacheEntry v) -> k.length() + (v != null && v.body() != null ? v.body().getBytes(StandardCharsets.UTF_8).length : 0))
+            .expireAfterWrite(Duration.ofMinutes(15))
+            .recordStats()
+            .build();
     }
 
     @Override
@@ -76,6 +81,9 @@ public class ExactCachePlugin implements GatewayPlugin {
 
         String cachedBody = lookupCached(cacheKey);
         if (cachedBody != null && !cachedBody.isBlank()) {
+            if (!Boolean.FALSE.equals(ctx.pluginConfig().get("skipLedgerOnCacheHit"))) {
+                ctx.attributes().put("cache.skip_ledger_on_hit", Boolean.TRUE);
+            }
             return PluginResult.shortCircuit(
                 200,
                 cachedBody,
@@ -131,36 +139,56 @@ public class ExactCachePlugin implements GatewayPlugin {
 
     private String lookupCached(String cacheKey) {
         long now = System.currentTimeMillis();
-        CacheEntry l1 = l1Cache.get(cacheKey);
+        CacheEntry l1 = caffeineL1.getIfPresent(cacheKey);
         if (l1 != null) {
             if (l1.expiresAtMillis() > now) {
                 return l1.body();
             }
-            l1Cache.remove(cacheKey);
+            caffeineL1.invalidate(cacheKey);
         }
         if (redisConn != null) {
+            CompletableFuture<String> myFuture = new CompletableFuture<>();
+            CompletableFuture<String> prior = singleFlightL2Loaders.putIfAbsent(cacheKey, myFuture);
+            if (prior != null) {
+                singleFlightCoalescedHits.incrementAndGet();
+                try {
+                    return prior.join();
+                } catch (Exception ignored) {
+                    return null;
+                }
+            }
             try {
                 String redisVal = redisConn.sync().get(keyPrefix + "cache:exact:" + cacheKey);
                 if (redisVal != null && !redisVal.isBlank()) {
-                    l1Cache.put(cacheKey, new CacheEntry(redisVal, now + 60_000L));
+                    caffeineL1.put(cacheKey, new CacheEntry(redisVal, now + 60_000L));
+                    myFuture.complete(redisVal);
                     return redisVal;
                 }
-            } catch (Exception ignored) {}
+                myFuture.complete(null);
+            } catch (Exception e) {
+                myFuture.complete(null);
+            } finally {
+                singleFlightL2Loaders.remove(cacheKey, myFuture);
+            }
         }
         return null;
     }
 
     private void storeCached(String cacheKey, String body, long ttlSeconds) {
         long now = System.currentTimeMillis();
-        l1Cache.put(cacheKey, new CacheEntry(body, now + ttlSeconds * 1000L));
+        caffeineL1.put(cacheKey, new CacheEntry(body, now + ttlSeconds * 1000L));
         if (redisConn != null) {
             try {
-                redisConn.sync().setex(keyPrefix + "cache:exact:" + cacheKey, ttlSeconds, body);
+                redisConn.async().setex(keyPrefix + "cache:exact:" + cacheKey, ttlSeconds, body);
             } catch (Exception ignored) {}
         }
     }
 
+    public long singleFlightCoalescedHits() {
+        return singleFlightCoalescedHits.get();
+    }
+
     public void clearCache() {
-        l1Cache.clear();
+        caffeineL1.invalidateAll();
     }
 }
