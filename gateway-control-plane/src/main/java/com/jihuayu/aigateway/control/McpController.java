@@ -291,6 +291,18 @@ public class McpController {
         return Map.of("items", GatewayTelemetry.global().recentSpans());
     }
 
+    @GetMapping("/api/telemetry/access-logs")
+    public Map<String, Object> listRecentAccessLogs(HttpServletRequest req) {
+        authService.requireWorkspaceRole(req, List.of("admin", "developer", "viewer"));
+        return Map.of("items", GatewayTelemetry.global().recentAccessLogs());
+    }
+
+    @GetMapping("/api/telemetry/runtime")
+    public GatewayTelemetry.KernelEngineSnapshot inspectRuntimeTelemetry(HttpServletRequest req) {
+        authService.requireWorkspaceRole(req, List.of("admin", "developer", "viewer"));
+        return dataPlaneExecutor.captureKernelEngineSnapshot();
+    }
+
     private Map<String, Object> readMcpRow(ResultSet rs) throws Exception {
         Map<String, Object> row = new LinkedHashMap<>();
         row.put("id", rs.getString(1));

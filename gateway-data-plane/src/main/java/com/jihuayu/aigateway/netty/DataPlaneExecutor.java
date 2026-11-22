@@ -393,13 +393,54 @@ public class DataPlaneExecutor {
 
     public record HttpResponsePayload(int status, Map<String, String> headers, String jsonBody) {}
 
-    public String scrapePrometheusMetrics() {
+    public GatewayTelemetry.KernelEngineSnapshot captureKernelEngineSnapshot() {
         long now = System.currentTimeMillis();
         int openBreakers = 0;
         for (CircuitBreakerState st : circuitStates.values()) {
             if (st != null && st.isOpen(now)) openBreakers++;
         }
-        return GatewayTelemetry.global().scrapePrometheus(pooledRequestsDispatched.get(), openBreakers);
+        var nearCache = runtime != null ? runtime.nearCache() : null;
+        var authStats = nearCache != null ? nearCache.authStats() : null;
+        var respStats = pluginPipeline.exactCachePlugin().cacheStats();
+        long sfHits = (nearCache != null ? nearCache.singleFlightCoalescedCount() : 0L)
+            + pluginPipeline.exactCachePlugin().singleFlightCoalescedHits();
+        long staleHits = nearCache != null ? nearCache.staleFallbackHits() : 0L;
+
+        var mpsc = billing != null ? billing.batchChannel() : null;
+        var ha = billing != null ? billing.haEngine() : null;
+        int haCode = 0;
+        if (ha != null) {
+            haCode = switch (ha.currentState()) {
+                case NORMAL -> 0;
+                case DEGRADED_LOCAL_WAL -> 1;
+                case FENCED_SAFE_MODE -> 2;
+            };
+        }
+        var router = pluginPipeline.leastTtftRouterPlugin();
+        return new GatewayTelemetry.KernelEngineSnapshot(
+            pooledRequestsDispatched.get(),
+            openBreakers,
+            authStats != null ? authStats.hitCount() : 0L,
+            authStats != null ? authStats.missCount() : 0L,
+            authStats != null ? authStats.evictionCount() : 0L,
+            respStats != null ? respStats.hitCount() : 0L,
+            respStats != null ? respStats.missCount() : 0L,
+            respStats != null ? respStats.evictionCount() : 0L,
+            sfHits,
+            staleHits,
+            mpsc != null ? mpsc.totalCommandsSubmitted() : 0L,
+            mpsc != null ? mpsc.totalBatchesFlushed() : 0L,
+            mpsc != null ? mpsc.maxObservedBatchSize() : 0L,
+            haCode,
+            ha != null ? ha.pendingWalSize() : 0,
+            ha != null ? ha.walReplayedRecords() : 0L,
+            router.totalHedgedTriggers(),
+            router.totalHedgeWins()
+        );
+    }
+
+    public String scrapePrometheusMetrics() {
+        return GatewayTelemetry.global().scrapePrometheus(captureKernelEngineSnapshot());
     }
 
     /**
@@ -2467,23 +2508,28 @@ public class DataPlaneExecutor {
                         long reasonTok = totals.reasoningTokens() != null ? totals.reasoningTokens() : 0L;
                         String winTarget = attempts.isEmpty() ? "" : attempts.getLast().upstream_model();
                         pluginCtx.setSettlementMetrics(charged, inTok, outTok, "completed");
+                        long totalAttemptLat = attempts.stream().mapToLong(AttemptRecord::latency_ms).sum();
                         pluginCtx.setSettledBillingEvent(new PluginExecutionContext.SettledBillingEvent(
                             requestId,
-                            prepared.key().workspaceId(),
                             prepared.key().projectId(),
+                            prepared.key().workspaceId(),
                             prepared.key().keyId(),
+                            pluginCtx.endUserId() != null ? pluginCtx.endUserId() : "",
                             pluginCtx.endpoint(),
                             prepared.route().aliasName(),
                             winTarget,
                             "completed",
+                            prepared.totalReservedMicros(),
                             charged,
+                            0L,
                             inTok,
                             outTok,
                             cachedTok,
                             reasonTok,
                             totals.ttftMs(),
+                            totalAttemptLat,
                             pluginCtx.attributionTags(),
-                            Instant.now().toString()
+                            System.currentTimeMillis()
                         ));
                         pluginPipeline.executeStage(snapshot, PluginStage.POST_SETTLE, pluginCtx);
                         pluginCtx.attributes().put("_post_settle_done", "POST_SETTLE_DONE");

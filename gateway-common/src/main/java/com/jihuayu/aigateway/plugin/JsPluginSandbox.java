@@ -997,11 +997,20 @@ public class JsPluginSandbox {
                     case "outputTokens" -> c.settledOutputTokens();
                     case "kv" -> c.kv();
                     case "crypto" -> c.crypto();
+                    case "telemetry" -> c.telemetry();
                     case "queryParams" -> c.queryParams();
                     case "endUserId" -> c.endUserId();
                     case "streamChunk" -> c.streamChunk();
                     case "attributionTags" -> c.attributionTags();
                     default -> c.attributes().get(prop);
+                };
+            }
+            if (target instanceof PluginExecutionContext.PluginTelemetry tel) {
+                return switch (prop) {
+                    case "traceId" -> tel.traceId();
+                    case "spanId" -> tel.spanId();
+                    case "traceparent" -> tel.traceparent();
+                    default -> null;
                 };
             }
             if (target instanceof Map<?, ?> m) {
@@ -1014,6 +1023,17 @@ public class JsPluginSandbox {
                 return (long) s.length();
             }
             return null;
+        }
+
+        private static Map<String, String> extractStringMap(Object raw) {
+            if (!(raw instanceof Map<?, ?> m) || m.isEmpty()) return Map.of();
+            Map<String, String> out = new LinkedHashMap<>();
+            for (Map.Entry<?, ?> e : m.entrySet()) {
+                if (e.getKey() != null && e.getValue() != null) {
+                    out.put(String.valueOf(e.getKey()), String.valueOf(e.getValue()));
+                }
+            }
+            return out;
         }
 
         @SuppressWarnings("unchecked")
@@ -1088,6 +1108,56 @@ public class JsPluginSandbox {
                     case "replace" -> args.size() >= 3 && args.get(0) != null && args.get(1) != null && args.get(2) != null
                         ? Pattern.compile(String.valueOf(args.get(0))).matcher(String.valueOf(args.get(1))).replaceAll(String.valueOf(args.get(2)))
                         : (args.size() >= 2 ? String.valueOf(args.get(1)) : "");
+                    default -> null;
+                };
+            }
+            if (target instanceof PluginExecutionContext.PluginTelemetry tel) {
+                return switch (method) {
+                    case "incr" -> {
+                        if (!args.isEmpty() && args.get(0) != null) {
+                            long delta = args.size() >= 2 && args.get(1) instanceof Number n ? n.longValue() : 1L;
+                            Map<String, String> lbls = extractStringMap(args.size() >= 3 ? args.get(2) : null);
+                            tel.incr(String.valueOf(args.get(0)), delta, lbls);
+                        }
+                        yield null;
+                    }
+                    case "gauge" -> {
+                        if (args.size() >= 2 && args.get(0) != null && args.get(1) instanceof Number n) {
+                            Map<String, String> lbls = extractStringMap(args.size() >= 3 ? args.get(2) : null);
+                            tel.gauge(String.valueOf(args.get(0)), n.doubleValue(), lbls);
+                        }
+                        yield null;
+                    }
+                    case "observe" -> {
+                        if (args.size() >= 2 && args.get(0) != null && args.get(1) instanceof Number n) {
+                            Map<String, String> lbls = extractStringMap(args.size() >= 3 ? args.get(2) : null);
+                            tel.observe(String.valueOf(args.get(0)), n.doubleValue(), lbls);
+                        }
+                        yield null;
+                    }
+                    case "setSpanAttr" -> {
+                        if (args.size() >= 2 && args.get(0) != null) {
+                            tel.setSpanAttr(String.valueOf(args.get(0)), args.get(1));
+                        }
+                        yield null;
+                    }
+                    case "addSpanEvent" -> {
+                        if (!args.isEmpty() && args.get(0) != null) {
+                            Map<String, Object> evAttrs = new LinkedHashMap<>();
+                            if (args.size() >= 2 && args.get(1) instanceof Map<?, ?> m) {
+                                for (Map.Entry<?, ?> e : m.entrySet()) {
+                                    if (e.getKey() != null && e.getValue() != null) {
+                                        evAttrs.put(String.valueOf(e.getKey()), e.getValue());
+                                    }
+                                }
+                            }
+                            tel.addSpanEvent(String.valueOf(args.get(0)), evAttrs);
+                        }
+                        yield null;
+                    }
+                    case "traceId" -> tel.traceId();
+                    case "spanId" -> tel.spanId();
+                    case "traceparent" -> tel.traceparent();
                     default -> null;
                 };
             }
