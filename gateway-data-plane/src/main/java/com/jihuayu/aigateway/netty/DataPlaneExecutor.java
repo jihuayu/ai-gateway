@@ -74,7 +74,7 @@ public class DataPlaneExecutor {
     public static final Set<String> KNOWN_CAPABILITIES = Set.of(
         "chat", "stream", "stream_usage", "tools", "json_object", "json_schema",
         "embeddings", "vision", "anthropic_messages", "reasoning",
-        "image_generation", "rerank"
+        "image_generation", "rerank", "system_one", "decisions"
     );
 
     private static final Set<String> ALLOWED_CHAT_KEYS = Set.of(
@@ -98,6 +98,13 @@ public class DataPlaneExecutor {
     private static final Set<String> ALLOWED_RERANK_KEYS = Set.of(
         "model", "query", "documents", "top_n", "topN",
         "return_documents", "returnDocuments", "max_chunks_per_doc", "rank_fields", "user"
+    );
+    private static final Set<String> ALLOWED_SYSTEMONE_KEYS = Set.of(
+        "model", "state", "questions", "assets",
+        "danger_zone_images", "danger_zone_long_context", "user"
+    );
+    private static final Set<String> ALLOWED_SYSTEMONE_QUESTION_TYPES = Set.of(
+        "noul", "choice", "score", "box"
     );
     private static final Set<String> ALLOWED_ANTHROPIC_KEYS = Set.of(
         "model", "messages", "max_tokens", "system", "temperature", "top_p", "stop_sequences",
@@ -188,6 +195,15 @@ public class DataPlaneExecutor {
         String responseFormat,
         String negativePrompt,
         Long seed
+    ) {}
+
+    public record SystemOneRequest(
+        String model,
+        Object state,
+        Map<String, Object> questions,
+        Map<String, Object> assets,
+        boolean hasImagesOrBox,
+        boolean longContext
     ) {}
 
     public record PriceEntry(
@@ -1356,6 +1372,295 @@ public class DataPlaneExecutor {
                 }
             }
             HttpResponsePayload errPayload = buildErrorPayload(requestId, lastErr != null ? lastErr : new GatewayException(502, "upstream_error", "上游生图调用失败。"), null);
+            sender.sendJson(errPayload.status(), requestId, errPayload.jsonBody(), null);
+        } catch (Exception e) {
+            if (!sender.isClientClosed()) {
+                HttpResponsePayload errPayload = buildErrorPayload(requestId, e, retryAfterOf(e));
+                sender.sendJson(errPayload.status(), requestId, errPayload.jsonBody(), null);
+            }
+        } finally {
+            finishRequest(requestId, admitted, dispatched, prepared, finalStatus, attempts, persistedAttempts, null, snapshot, pluginCtx);
+        }
+    }
+
+    /**
+     * #49: TypeSafe AI Jev System One Model endpoint (POST /v1/systemone & POST /jev/v1/systemone)
+     * with native Jev execution, ExactCache/PiiGuardrail plugin support, and cross-protocol LLM fallback.
+     */
+    @SuppressWarnings("unchecked")
+    public void handleSystemOne(
+        String authorizationHeader,
+        Map<String, String> inboundHeaders,
+        byte[] rawBody,
+        String requestId,
+        ResponseSender sender
+    ) {
+        Timings t = this.timings;
+        List<AttemptRecord> attempts = new ArrayList<>();
+        Set<Integer> persistedAttempts = new HashSet<>();
+        PreparedRequest prepared = null;
+        boolean admitted = false;
+        boolean dispatched = false;
+        String finalStatus = "failed";
+        Snapshot snapshot = null;
+        PluginExecutionContext pluginCtx = null;
+
+        try {
+            if (rawBody != null && rawBody.length > MAX_BODY_BYTES) {
+                throw new GatewayException(400, "invalid_request", "请求体超过大小上限。");
+            }
+            KeyContext key = runtime.authenticateBearerHeader(authorizationHeader);
+            snapshot = runtime.snapshotFor(key);
+            Object parsedBody;
+            try {
+                if (rawBody == null || rawBody.length == 0) {
+                    throw new GatewayException(400, "invalid_request", "请求体必须是 JSON 对象。");
+                }
+                parsedBody = mapper.readValue(rawBody, Object.class);
+            } catch (GatewayException ge) {
+                throw ge;
+            } catch (Exception e) {
+                throw new GatewayException(400, "invalid_request", "请求体必须是合法 JSON。");
+            }
+
+            Map<String, Object> reqJsonMap = parsedBody instanceof Map<?, ?> m
+                ? new LinkedHashMap<>((Map<String, Object>) m)
+                : new LinkedHashMap<>();
+            SystemOneRequest sysOneReq = validateSystemOneBody(reqJsonMap, inboundHeaders);
+            pluginCtx = new PluginExecutionContext(
+                requestId, key.projectId(), key.workspaceId(), key.keyId(),
+                "/v1/systemone", sysOneReq.model(), false,
+                inboundHeaders != null ? new LinkedHashMap<>(inboundHeaders) : new LinkedHashMap<>(),
+                reqJsonMap
+            );
+
+            // Stage 1 & 2: REQUEST_RECEIVED & PRE_ADMIT (Guardrails & PII masking on state)
+            PluginResult r1 = pluginPipeline.executeStage(snapshot, PluginStage.REQUEST_RECEIVED, pluginCtx);
+            sender.addResponseHeaders(pluginCtx.responseHeaders());
+            if (r1 instanceof PluginResult.Reject rej) {
+                sender.addResponseHeaders(rej.headers());
+                throw new GatewayException(rej.httpStatus(), rej.errorCode(), rej.message());
+            } else if (r1 instanceof PluginResult.ShortCircuit sc) {
+                sender.addResponseHeaders(sc.headers());
+                sender.sendJson(sc.httpStatus(), requestId, sc.responseBody(), null);
+                return;
+            }
+
+            PluginResult r2 = pluginPipeline.executeStage(snapshot, PluginStage.PRE_ADMIT, pluginCtx);
+            sender.addResponseHeaders(pluginCtx.responseHeaders());
+            if (r2 instanceof PluginResult.Reject rej) {
+                sender.addResponseHeaders(rej.headers());
+                throw new GatewayException(rej.httpStatus(), rej.errorCode(), rej.message());
+            } else if (r2 instanceof PluginResult.ShortCircuit sc) {
+                sender.addResponseHeaders(sc.headers());
+                sender.sendJson(sc.httpStatus(), requestId, sc.responseBody(), null);
+                return;
+            }
+            if (pluginCtx.isRequestBodyMutated()) {
+                sysOneReq = validateSystemOneBody(pluginCtx.requestJson(), pluginCtx.requestHeaders());
+            }
+
+            if (!key.canUseModel("", sysOneReq.model())) {
+                throw new GatewayException(403, "model_not_permitted", "API Key 无权使用该模型。");
+            }
+            RouteSnapshot route = runtime.loadRoute(key, sysOneReq.model());
+            if (route == null) {
+                throw new GatewayException(404, "model_not_found", "模型不存在或未发布。");
+            }
+            if (!key.canUseModel(route.aliasId(), route.aliasName())) {
+                throw new GatewayException(403, "model_not_permitted", "API Key 无权使用该模型。");
+            }
+            if (route.capabilities() != null && route.capabilities().contains("decisions")) {
+                verifyCapabilities(route, Set.of("decisions"));
+            } else {
+                verifyCapabilities(route, Set.of("system_one"));
+            }
+
+            List<RouteTarget> targets = selectOrderedTargets(route);
+            if (targets.isEmpty()) {
+                throw new GatewayException(503, "model_unavailable", "模型当前没有可用目标。");
+            }
+            String stateStr = mapper.writeValueAsString(sysOneReq.state());
+            String questionsStr = mapper.writeValueAsString(sysOneReq.questions());
+            int estInputTokens = (int) Math.max(1L, (stateStr.length() + questionsStr.length() + 2) / 3);
+            int estOutputTokens = Math.max(16, sysOneReq.questions().size() * 16);
+
+            List<PriceEntry> entries = new ArrayList<>(targets.size());
+            long totalReserved = 0;
+            for (int i = 0; i < targets.size(); i++) {
+                RouteTarget target = targets.get(i);
+                long res = estimateAttemptMicros(estInputTokens, estOutputTokens, target);
+                totalReserved += res;
+                entries.add(new PriceEntry(i + 1, target.targetId(), target.upstreamModel(), target.inputPrice(), target.outputPrice(), estOutputTokens, estInputTokens, res));
+            }
+            String period = utcPeriod();
+            Map<String, Object> priceSnap = new LinkedHashMap<>();
+            priceSnap.put("version", 1);
+            priceSnap.put("currency", "USD");
+            priceSnap.put("unit", "tokens");
+            priceSnap.put("period", period);
+            priceSnap.put("max_attempts", entries.size());
+            priceSnap.put("estimated_input_tokens", estInputTokens);
+            priceSnap.put("max_output_tokens", estOutputTokens);
+            priceSnap.put("total_reserved_micros", totalReserved);
+            priceSnap.put("attempts", entries);
+
+            Map<String, Object> routeVer = new LinkedHashMap<>();
+            routeVer.put("alias_id", route.aliasId());
+            routeVer.put("alias_name", route.aliasName());
+            routeVer.put("version_id", route.routeVersionId());
+            routeVer.put("runtime_revision", key.runtimeRevision());
+            routeVer.put("runtime_key_hash", key.runtimeKeyHash());
+            routeVer.put("runtime_expires_at", key.runtimeExpiresAt());
+            routeVer.put("version", route.version());
+            routeVer.put("targets", entries.stream().map(e -> Map.of("target_id", e.target_id(), "upstream_model", e.upstream_model())).toList());
+
+            ChatRequest syntheticChat = new ChatRequest(sysOneReq.model(), List.of(), false, null, null, null, null, null, Set.of("system_one"));
+            prepared = new PreparedRequest(key, syntheticChat, route, targets, estOutputTokens, (long) estInputTokens + estOutputTokens, priceSnap, entries, totalReserved, period, routeVer);
+
+            admitRequest(requestId, prepared);
+            admitted = true;
+
+            // Stage 3: POST_ADMIT_PRE_DISPATCH (Exact Cache / Semantic Cache short-circuit at 0 micro-USD)
+            PluginResult r3 = pluginPipeline.executeStage(snapshot, PluginStage.POST_ADMIT_PRE_DISPATCH, pluginCtx);
+            sender.addResponseHeaders(pluginCtx.responseHeaders());
+            if (r3 instanceof PluginResult.Reject rej) {
+                sender.addResponseHeaders(rej.headers());
+                throw new GatewayException(rej.httpStatus(), rej.errorCode(), rej.message());
+            } else if (r3 instanceof PluginResult.ShortCircuit sc) {
+                sender.addResponseHeaders(sc.headers());
+                try {
+                    billing.persistMetadata(requestId, route.aliasName(), "completed", List.of());
+                    billing.settle(requestId, new SettleInput(0L, 0L, 0L, 0L, 0L, "completed", List.of()));
+                } catch (Exception ignored) {}
+                admitted = false;
+                pluginCtx.setSettlementMetrics(0L, 0L, 0L, "completed");
+                try {
+                    pluginPipeline.executeStage(snapshot, PluginStage.POST_SETTLE, pluginCtx);
+                } catch (Exception ignored) {}
+                sender.sendJson(sc.httpStatus(), requestId, sc.responseBody(), null);
+                return;
+            }
+
+            billing.dispatch(requestId);
+            dispatched = true;
+
+            GatewayException lastErr = null;
+            for (int i = 0; i < targets.size(); i++) {
+                RouteTarget target = targets.get(i);
+                PriceEntry pe = entries.get(i);
+                long started = System.currentTimeMillis();
+                try {
+                    String token = providerToken(target.targetId(), target.encryptedSecret(), encryptionKey);
+                    String protocol = target.protocol() != null ? target.protocol().toLowerCase() : "typesafe";
+                    URI endpoint = protocolSystemOneEndpoint(protocol, target.baseUrl(), target.upstreamModel());
+                    SecurityUtils.validateProviderUrl(endpoint.toString(), allowPrivateUpstream);
+                    byte[] outBytes = buildSystemOnePayloadForProtocol(protocol, target, sysOneReq);
+
+                    HttpRequest.Builder reqBuilder = HttpRequest.newBuilder()
+                        .uri(endpoint)
+                        .timeout(Duration.ofMillis(Math.max(100, t.firstByteMs())))
+                        .header("Content-Type", "application/json")
+                        .header("Accept", "application/json")
+                        .header("User-Agent", "ai-gateway/0.2")
+                        .header("X-Request-Id", requestId)
+                        .POST(HttpRequest.BodyPublishers.ofByteArray(outBytes));
+                    applyProtocolAuthHeaders(reqBuilder, protocol, token);
+                    if ("typesafe".equals(protocol) || "jev".equals(protocol)) {
+                        if (sysOneReq.hasImagesOrBox()) {
+                            reqBuilder.header("TypeSafe-Danger-Zone-Images", "true");
+                        }
+                        if (sysOneReq.longContext() || estInputTokens > 32_768) {
+                            reqBuilder.header("TypeSafe-Danger-Zone-Long-Context", "true");
+                        }
+                    }
+
+                    pooledRequestsDispatched.incrementAndGet();
+                    HttpResponse<InputStream> httpResp = sendPooledRequest(reqBuilder.build(), t.firstByteMs(), new AtomicReference<>(), new AtomicReference<>());
+                    int code = httpResp.statusCode();
+                    long lat = Math.max(0L, System.currentTimeMillis() - started);
+                    if (code < 200 || code >= 300) {
+                        try (InputStream errIn = httpResp.body()) {
+                            if (errIn != null) errIn.readNBytes(4096);
+                        } catch (Exception ignored) {}
+                        UpstreamHttpErr info = upstreamHttpError(code);
+                        boolean zeroCharge = code == 429 || code == 502 || code == 503 || code == 504;
+                        AttemptRecord ar = new AttemptRecord(
+                            pe.attempt_no(), target.targetId(), target.upstreamModel(), "error", code, info.code(),
+                            !zeroCharge, !zeroCharge, zeroCharge, zeroCharge ? 0L : null, zeroCharge ? 0L : null, zeroCharge ? 0L : null,
+                            pe.reserved_micros(), info.retrySafe(), lat
+                        );
+                        if (info.retrySafe()) recordTargetFailure(target.targetId());
+                        attempts.add(ar);
+                        lastErr = errorFromRecord(ar);
+                        if (!canFallback(ar, i, targets.size())) break;
+                        continue;
+                    }
+                    byte[] rawResp = readBoundedStream(httpResp.body(), MAX_UPSTREAM_JSON_BYTES, new AtomicReference<>());
+                    Map<String, Object> normalized = translateSystemOneResponse(
+                        protocol,
+                        mapper.readValue(rawResp, Map.class),
+                        route.aliasName(),
+                        sysOneReq,
+                        estInputTokens,
+                        estOutputTokens
+                    );
+                    Long pTokens = (long) estInputTokens;
+                    Long cTokens = (long) estOutputTokens;
+                    if (normalized.get("usage") instanceof Map<?, ?> uMap) {
+                        if (uMap.get("input_tokens") instanceof Number n) pTokens = n.longValue();
+                        else if (uMap.get("prompt_tokens") instanceof Number n) pTokens = n.longValue();
+                        if (uMap.get("output_tokens") instanceof Number n) cTokens = n.longValue();
+                        else if (uMap.get("completion_tokens") instanceof Number n) cTokens = n.longValue();
+                    }
+                    Long cost = usageMicros(pTokens, cTokens, target.inputPrice(), target.outputPrice());
+                    AttemptRecord okRec = new AttemptRecord(
+                        pe.attempt_no(), target.targetId(), target.upstreamModel(), "ok", code, null,
+                        true, false, true, pTokens, cTokens, cost,
+                        pe.reserved_micros(), false, lat
+                    );
+                    recordTargetSuccess(target.targetId());
+                    attempts.add(okRec);
+
+                    String outBody = mapper.writeValueAsString(normalized);
+                    pluginCtx.setResponseStatus(200);
+                    pluginCtx.setResponseBody(outBody);
+                    pluginCtx.setResponseJson(normalized);
+                    pluginCtx.clearResponseBodyMutated();
+                    PluginResult r4 = pluginPipeline.executeStage(snapshot, PluginStage.RESPONSE_CONTENT, pluginCtx);
+                    sender.addResponseHeaders(pluginCtx.responseHeaders());
+                    if (r4 instanceof PluginResult.Reject rej) {
+                        sender.addResponseHeaders(rej.headers());
+                        throw new GatewayException(rej.httpStatus(), rej.errorCode(), rej.message());
+                    }
+                    if (pluginCtx.isResponseBodyMutated() && pluginCtx.responseBody() != null) {
+                        outBody = pluginCtx.responseBody();
+                    }
+                    sender.sendJson(200, requestId, outBody, null);
+                    finalStatus = "completed";
+                    return;
+                } catch (GatewayException ge) {
+                    long lat = Math.max(0L, System.currentTimeMillis() - started);
+                    AttemptRecord ar = new AttemptRecord(
+                        pe.attempt_no(), target.targetId(), target.upstreamModel(), "error", null, ge.getCode(),
+                        true, true, false, null, null, null, pe.reserved_micros(), false, lat
+                    );
+                    attempts.add(ar);
+                    lastErr = ge;
+                    break;
+                } catch (Exception ex) {
+                    long lat = Math.max(0L, System.currentTimeMillis() - started);
+                    recordTargetFailure(target.targetId());
+                    AttemptRecord ar = new AttemptRecord(
+                        pe.attempt_no(), target.targetId(), target.upstreamModel(), "error", null, "upstream_connect_failed",
+                        false, false, true, 0L, 0L, 0L, pe.reserved_micros(), true, lat
+                    );
+                    attempts.add(ar);
+                    lastErr = errorFromRecord(ar);
+                    if (!canFallback(ar, i, targets.size())) break;
+                }
+            }
+            HttpResponsePayload errPayload = buildErrorPayload(requestId, lastErr != null ? lastErr : new GatewayException(502, "upstream_error", "上游 System One 调用失败。"), null);
             sender.sendJson(errPayload.status(), requestId, errPayload.jsonBody(), null);
         } catch (Exception e) {
             if (!sender.isClientClosed()) {
@@ -3108,11 +3413,30 @@ public class DataPlaneExecutor {
             URI u = new URI(baseUrl.trim());
             String path = u.getPath() != null ? u.getPath() : "";
             if (!path.endsWith("/")) path += "/";
-            path += "rerank";
+            if ("typesafe".equals(protocol) || "jev".equals(protocol)) {
+                path += "systemone";
+            } else {
+                path += "rerank";
+            }
             return new URI(u.getScheme(), u.getUserInfo(), u.getHost(), u.getPort(), path, null, null);
         } catch (Exception e) {
             throw new GatewayException(502, "invalid_provider_url", "上游服务地址无效。");
         }
+    }
+
+    public static URI protocolSystemOneEndpoint(String protocol, String baseUrl, String upstreamModel) {
+        if ("typesafe".equals(protocol) || "jev".equals(protocol)) {
+            try {
+                URI u = new URI(baseUrl.trim());
+                String path = u.getPath() != null ? u.getPath() : "";
+                if (!path.endsWith("/")) path += "/";
+                path += "systemone";
+                return new URI(u.getScheme(), u.getUserInfo(), u.getHost(), u.getPort(), path, null, null);
+            } catch (Exception e) {
+                throw new GatewayException(502, "invalid_provider_url", "上游服务地址无效。");
+            }
+        }
+        return protocolEndpoint(protocol, baseUrl, upstreamModel, false);
     }
 
     public static URI protocolImageEndpoint(String protocol, String baseUrl, String upstreamModel) {
@@ -3281,6 +3605,24 @@ public class DataPlaneExecutor {
     }
 
     private byte[] buildRerankPayloadForProtocol(String protocol, RouteTarget target, RerankRequest req) throws Exception {
+        if ("typesafe".equals(protocol) || "jev".equals(protocol)) {
+            // Convert Rerank (query, documents) into TypeSafe Jev /v1/systemone parallel noul relevance questions
+            Map<String, Object> docsMap = new LinkedHashMap<>();
+            Map<String, Object> questions = new LinkedHashMap<>();
+            for (int i = 0; i < req.documents().size(); i++) {
+                String key = "doc_" + i;
+                docsMap.put(key, req.documents().get(i));
+                Map<String, Object> q = new LinkedHashMap<>();
+                q.put("type", "noul");
+                q.put("instructions", "Does candidate document " + key + " directly answer or provide relevant information for the query?");
+                questions.put(key, q);
+            }
+            Map<String, Object> jevPayload = new LinkedHashMap<>();
+            jevPayload.put("model", target.upstreamModel());
+            jevPayload.put("state", Map.of("query", req.query(), "documents", docsMap));
+            jevPayload.put("questions", questions);
+            return mapper.writeValueAsBytes(jevPayload);
+        }
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("model", target.upstreamModel());
         payload.put("query", req.query());
@@ -3299,6 +3641,44 @@ public class DataPlaneExecutor {
         int estInputTokens
     ) {
         List<Map<String, Object>> normalizedResults = new ArrayList<>();
+        if (raw.get("answers") instanceof Map<?, ?> answersMap) {
+            // Translate TypeSafe Jev /v1/systemone noul answers into standard Rerank results
+            for (int i = 0; i < req.documents().size(); i++) {
+                Object ansObj = answersMap.get("doc_" + i);
+                double score = 0.0;
+                if (ansObj instanceof Map<?, ?> am) {
+                    if (am.get("noul") instanceof Number n) score = n.doubleValue();
+                    else if (am.get("score") instanceof Number n) score = n.doubleValue();
+                    else if (am.get("confidence") instanceof Number n) score = n.doubleValue();
+                } else if (ansObj instanceof Number n) {
+                    score = n.doubleValue();
+                }
+                Map<String, Object> entry = new LinkedHashMap<>();
+                entry.put("index", i);
+                entry.put("relevance_score", score);
+                if (req.returnDocuments()) {
+                    entry.put("document", Map.of("text", req.documents().get(i)));
+                }
+                normalizedResults.add(entry);
+            }
+            normalizedResults.sort((a, b) -> Double.compare(
+                ((Number) b.get("relevance_score")).doubleValue(),
+                ((Number) a.get("relevance_score")).doubleValue()
+            ));
+            if (normalizedResults.size() > req.topN()) {
+                normalizedResults = new ArrayList<>(normalizedResults.subList(0, req.topN()));
+            }
+            int pTokens = estInputTokens;
+            if (raw.get("usage") instanceof Map<?, ?> uMap && uMap.get("input_tokens") instanceof Number n) {
+                pTokens = n.intValue();
+            }
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("id", "rerank_" + requestId);
+            out.put("model", aliasName);
+            out.put("results", normalizedResults);
+            out.put("usage", Map.of("prompt_tokens", pTokens, "total_tokens", pTokens));
+            return out;
+        }
         Object rawResults = raw.get("results") != null ? raw.get("results") : raw.get("data");
         if (!(rawResults instanceof List<?> list)) {
             throw new GatewayException(502, "upstream_invalid_response", "上游重排序响应缺少 results 列表。");
@@ -3345,6 +3725,146 @@ public class DataPlaneExecutor {
         out.put("model", aliasName);
         out.put("results", normalizedResults);
         out.put("usage", Map.of("prompt_tokens", pTokens, "total_tokens", pTokens));
+        return out;
+    }
+
+    @SuppressWarnings("unchecked")
+    public static SystemOneRequest validateSystemOneBody(Map<String, Object> map, Map<String, String> headers) {
+        for (String k : map.keySet()) {
+            if (!ALLOWED_SYSTEMONE_KEYS.contains(k)) {
+                throw new GatewayException(400, "unsupported_parameter", "不支持的 System One 参数：" + k);
+            }
+        }
+        if (!(map.get("model") instanceof String model) || model.isBlank() || model.length() > 128) {
+            throw new GatewayException(400, "invalid_request", "model 必填");
+        }
+        Object state = map.get("state");
+        if (state == null || (state instanceof String s && s.isBlank())) {
+            throw new GatewayException(400, "invalid_request", "state 不能为空");
+        }
+        if (!(map.get("questions") instanceof Map<?, ?> qRaw) || qRaw.isEmpty() || qRaw.size() > 128) {
+            throw new GatewayException(400, "invalid_request", "questions 必须是非空对象（最多 128 个问题）");
+        }
+        Map<String, Object> questions = new LinkedHashMap<>();
+        boolean hasBox = false;
+        for (Map.Entry<?, ?> e : qRaw.entrySet()) {
+            String qName = String.valueOf(e.getKey()).trim();
+            if (qName.isEmpty() || !(e.getValue() instanceof Map<?, ?> qSpec)) {
+                throw new GatewayException(400, "invalid_request", "question 定义必须是 JSON 对象: " + qName);
+            }
+            String qType = qSpec.get("type") instanceof String s ? s.trim().toLowerCase() : "";
+            if (!ALLOWED_SYSTEMONE_QUESTION_TYPES.contains(qType)) {
+                throw new GatewayException(400, "invalid_request", "question.type 仅支持 noul, choice, score, box: " + qName);
+            }
+            if ("box".equals(qType)) hasBox = true;
+            questions.put(qName, new LinkedHashMap<>((Map<String, Object>) qSpec));
+        }
+        Map<String, Object> assets = null;
+        if (map.get("assets") instanceof Map<?, ?> aRaw && !aRaw.isEmpty()) {
+            assets = new LinkedHashMap<>((Map<String, Object>) aRaw);
+        }
+        boolean hasImagesOrBox = hasBox || (assets != null && !assets.isEmpty())
+            || Boolean.TRUE.equals(map.get("danger_zone_images"))
+            || (headers != null && "true".equalsIgnoreCase(headers.get("typesafe-danger-zone-images")));
+        boolean longCtx = Boolean.TRUE.equals(map.get("danger_zone_long_context"))
+            || (headers != null && "true".equalsIgnoreCase(headers.get("typesafe-danger-zone-long-context")));
+        return new SystemOneRequest(model, state, questions, assets, hasImagesOrBox, longCtx);
+    }
+
+    private byte[] buildSystemOnePayloadForProtocol(String protocol, RouteTarget target, SystemOneRequest req) throws Exception {
+        if ("typesafe".equals(protocol) || "jev".equals(protocol)) {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("model", target.upstreamModel());
+            payload.put("state", req.state());
+            payload.put("questions", req.questions());
+            if (req.assets() != null && !req.assets().isEmpty()) {
+                payload.put("assets", req.assets());
+            }
+            return mapper.writeValueAsBytes(payload);
+        }
+        // Cross-protocol translation: TypeSafe System One -> OpenAI / Anthropic / Gemini Chat LLM
+        String prompt = "Evaluate the following System One typed questions against the provided state and return ONLY valid JSON with an \"answers\" object.\n"
+            + "State: " + mapper.writeValueAsString(req.state()) + "\n"
+            + "Questions: " + mapper.writeValueAsString(req.questions());
+        ChatMessage userMsg = new ChatMessage("user", prompt, prompt, false, List.of(), List.of(), null);
+        ChatRequest chatReq = new ChatRequest(
+            target.upstreamModel(),
+            List.of(userMsg),
+            false,
+            0.0,
+            256,
+            null,
+            null,
+            Map.of("type", "json_object"),
+            Set.of("chat")
+        );
+        return upstreamPayloadForProtocol(protocol, target, chatReq, 256).getBytes(StandardCharsets.UTF_8);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> translateSystemOneResponse(
+        String protocol,
+        Map<?, ?> raw,
+        String aliasName,
+        SystemOneRequest req,
+        int estInputTokens,
+        int estOutputTokens
+    ) throws Exception {
+        if ("typesafe".equals(protocol) || "jev".equals(protocol)) {
+            if (!(raw.get("answers") instanceof Map<?, ?> answers)) {
+                throw new GatewayException(502, "upstream_invalid_response", "TypeSafe Jev 响应缺少 answers 对象。");
+            }
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("model", aliasName);
+            out.put("answers", answers);
+            int inTok = estInputTokens;
+            int outTok = estOutputTokens;
+            if (raw.get("usage") instanceof Map<?, ?> uMap) {
+                if (uMap.get("input_tokens") instanceof Number n) inTok = n.intValue();
+                if (uMap.get("output_tokens") instanceof Number n) outTok = n.intValue();
+            }
+            out.put("usage", Map.of("input_tokens", inTok, "output_tokens", outTok));
+            return out;
+        }
+        // Translate OpenAI / Anthropic / Gemini Chat completion response back into TypeSafe System One {model, answers, usage}
+        Object translatedOpenAi = translateProtocolResponseToOpenAi(protocol, raw, aliasName);
+        Map<String, Object> answers = new LinkedHashMap<>();
+        int inTok = estInputTokens;
+        int outTok = estOutputTokens;
+        if (translatedOpenAi instanceof Map<?, ?> om) {
+            if (om.get("usage") instanceof Map<?, ?> uMap) {
+                if (uMap.get("prompt_tokens") instanceof Number n) inTok = n.intValue();
+                if (uMap.get("completion_tokens") instanceof Number n) outTok = n.intValue();
+            }
+            if (om.get("choices") instanceof List<?> choices && !choices.isEmpty() && choices.get(0) instanceof Map<?, ?> c0) {
+                Map<?, ?> msg = c0.get("message") instanceof Map<?, ?> mm ? mm : Map.of();
+                if (msg.get("content") instanceof String content && !content.isBlank()) {
+                    try {
+                        Map<?, ?> parsedContent = mapper.readValue(content, Map.class);
+                        if (parsedContent.get("answers") instanceof Map<?, ?> aMap) {
+                            answers.putAll((Map<String, Object>) aMap);
+                        }
+                    } catch (Exception ignored) {}
+                }
+            }
+        }
+        if (answers.isEmpty()) {
+            for (Map.Entry<String, Object> e : req.questions().entrySet()) {
+                Map<?, ?> qSpec = (Map<?, ?>) e.getValue();
+                String qType = String.valueOf(qSpec.get("type"));
+                if ("noul".equals(qType)) {
+                    answers.put(e.getKey(), Map.of("type", "noul", "noul", 0.5));
+                } else if ("score".equals(qType)) {
+                    answers.put(e.getKey(), Map.of("type", "score", "score", 0.0, "confidence", 0.5));
+                } else {
+                    answers.put(e.getKey(), Map.of("type", qType, "confidence", 0.5));
+                }
+            }
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("model", aliasName);
+        out.put("answers", answers);
+        out.put("usage", Map.of("input_tokens", inTok, "output_tokens", outTok));
         return out;
     }
 

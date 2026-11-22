@@ -473,6 +473,50 @@ public class AiGatewayIntegrationTest {
             exchange.close();
         });
 
+        mockUpstream.createContext("/v1/systemone", exchange -> {
+            byte[] reqBytes = exchange.getRequestBody().readAllBytes();
+            Map<String, Object> reqJson = mapper.readValue(reqBytes, Map.class);
+            Map<?, ?> questions = reqJson.get("questions") instanceof Map<?, ?> m ? m : Map.of();
+            Map<String, Object> answers = new LinkedHashMap<>();
+            for (Map.Entry<?, ?> e : questions.entrySet()) {
+                String qKey = String.valueOf(e.getKey());
+                Map<?, ?> qSpec = e.getValue() instanceof Map<?, ?> m ? m : Map.of();
+                String qType = String.valueOf(qSpec.get("type"));
+                if ("noul".equals(qType)) {
+                    double prob = "doc_1".equals(qKey) ? 0.96 : ("doc_0".equals(qKey) ? 0.08 : 0.98);
+                    answers.put(qKey, Map.of("type", "noul", "noul", prob));
+                } else if ("choice".equals(qType)) {
+                    answers.put(qKey, Map.of(
+                        "type", "choice",
+                        "choice", "billing_refund",
+                        "probabilities", Map.of("billing_refund", 0.95, "technical", 0.05),
+                        "confidence", 0.95
+                    ));
+                } else if ("score".equals(qType)) {
+                    answers.put(qKey, Map.of(
+                        "type", "score",
+                        "score", 2.0,
+                        "confidence", 0.91
+                    ));
+                } else if ("box".equals(qType)) {
+                    answers.put(qKey, Map.of(
+                        "type", "box",
+                        "box", List.of(0.1, 0.2, 0.5, 0.6),
+                        "confidence", 0.88
+                    ));
+                }
+            }
+            Map<String, Object> respJson = new LinkedHashMap<>();
+            respJson.put("model", reqJson.get("model") != null ? reqJson.get("model") : "jev-1.14.0");
+            respJson.put("answers", answers);
+            respJson.put("usage", Map.of("input_tokens", 120, "output_tokens", 12));
+            byte[] out = mapper.writeValueAsBytes(respJson);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, out.length);
+            exchange.getResponseBody().write(out);
+            exchange.close();
+        });
+
         mockUpstream.start();
     }
 
@@ -2175,6 +2219,108 @@ public class AiGatewayIntegrationTest {
         assertEquals(1, imgData.size());
         assertNotNull(imgData.get(0).get("b64_json"));
         assertEquals("gemini-imagen-ar-16:9", imgData.get(0).get("revised_prompt"));
+    }
+
+    @Test
+    @Order(14)
+    @SuppressWarnings("unchecked")
+    void testStage14TypeSafeJevSystemOneNativeAndCrossProtocolRerank() throws Exception {
+        int nettyPort = nettyServer.getBoundPort();
+
+        // 1. Create TypeSafe AI provider (protocol: "typesafe", base_url: .../v1)
+        HttpResponse<String> tsProvResp = sendAdmin("POST", "/api/providers", Map.of(
+            "name", "typesafe-ai-prov",
+            "protocol", "typesafe",
+            "base_url", "http://127.0.0.1:" + upstreamPort + "/v1",
+            "secret", "ts-jev-key-123456"
+        ), true);
+        assertEquals(200, tsProvResp.statusCode(), tsProvResp.body());
+        String tsProvId = String.valueOf(mapper.readValue(tsProvResp.body(), Map.class).get("id"));
+
+        // 2. Create Jev target ($0.042/1M input = 42,000 micro-USD, $0/1M output = 0 micro-USD) with system_one & rerank capabilities
+        HttpResponse<String> jevTargetResp = sendAdmin("POST", "/api/providers/" + tsProvId + "/targets", Map.of(
+            "upstream_model", "jev-latest",
+            "input_price", 42_000L,
+            "output_price", 0L,
+            "capabilities", List.of("system_one", "decisions", "rerank")
+        ), true);
+        assertEquals(200, jevTargetResp.statusCode(), jevTargetResp.body());
+        String jevTargetId = String.valueOf(mapper.readValue(jevTargetResp.body(), Map.class).get("id"));
+
+        HttpResponse<String> jevAliasResp = sendAdmin("POST", "/api/projects/" + projectId + "/aliases", Map.of(
+            "name", "jev-decisions",
+            "targets", List.of(jevTargetId),
+            "capabilities", List.of("system_one", "rerank")
+        ), true);
+        assertEquals(200, jevAliasResp.statusCode(), jevAliasResp.body());
+        String jevAliasId = String.valueOf(mapper.readValue(jevAliasResp.body(), Map.class).get("id"));
+        assertEquals(200, sendAdmin("POST", "/api/aliases/" + jevAliasId + "/publish", Map.of("expectedVersion", 1), true).statusCode());
+
+        HttpResponse<String> jevKeyResp = sendAdmin("POST", "/api/keys", Map.of(
+            "project_id", projectId,
+            "name", "stage14-jev-key",
+            "allowed_models", List.of("jev-decisions")
+        ), true);
+        assertEquals(200, jevKeyResp.statusCode(), jevKeyResp.body());
+        String jevKeyPlain = String.valueOf(mapper.readValue(jevKeyResp.body(), Map.class).get("key"));
+
+        // 3. Call native POST /v1/systemone with mixed noul, choice, and score questions
+        String sysOnePayload = mapper.writeValueAsString(Map.of(
+            "model", "jev-decisions",
+            "state", "I was charged twice for my subscription this month. Please refund the extra charge.",
+            "questions", Map.of(
+                "billing", Map.of("type", "noul", "instructions", "Is this message about billing?"),
+                "category", Map.of("type", "choice", "instructions", "Classify ticket intent", "options", List.of("billing_refund", "technical")),
+                "urgency", Map.of("type", "score", "instructions", "Rate urgency from 0 to 3")
+            )
+        ));
+        HttpResponse<String> sysOneResp = httpClient.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/systemone"))
+                .header("Authorization", "Bearer " + jevKeyPlain)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(sysOnePayload))
+                .build(),
+            HttpResponse.BodyHandlers.ofString()
+        );
+        assertEquals(200, sysOneResp.statusCode(), sysOneResp.body());
+        Map<String, Object> sysOneJson = mapper.readValue(sysOneResp.body(), Map.class);
+        assertEquals("jev-decisions", sysOneJson.get("model"));
+        Map<String, Object> answers = (Map<String, Object>) sysOneJson.get("answers");
+        assertEquals(0.98, ((Number) ((Map<?, ?>) answers.get("billing")).get("noul")).doubleValue(), 0.001);
+        assertEquals("billing_refund", ((Map<?, ?>) answers.get("category")).get("choice"));
+        assertEquals(2.0, ((Number) ((Map<?, ?>) answers.get("urgency")).get("score")).doubleValue(), 0.001);
+
+        // Also verify Kong-compatible path POST /jev/v1/systemone
+        HttpResponse<String> kongPathResp = httpClient.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://127.0.0.1:" + nettyPort + "/jev/v1/systemone"))
+                .header("Authorization", "Bearer " + jevKeyPlain)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(sysOnePayload))
+                .build(),
+            HttpResponse.BodyHandlers.ofString()
+        );
+        assertEquals(200, kongPathResp.statusCode(), kongPathResp.body());
+
+        // 4. Cross-Protocol Conversion: POST /v1/rerank -> TypeSafe Jev /v1/systemone parallel noul evaluation
+        HttpResponse<String> jevRerankResp = httpClient.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/rerank"))
+                .header("Authorization", "Bearer " + jevKeyPlain)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"model\":\"jev-decisions\",\"query\":\"subscription refund\",\"documents\":[\"Password reset instructions\",\"Duplicate subscription charge refund policy\"],\"top_n\":2}"))
+                .build(),
+            HttpResponse.BodyHandlers.ofString()
+        );
+        assertEquals(200, jevRerankResp.statusCode(), jevRerankResp.body());
+        Map<String, Object> jevRerankJson = mapper.readValue(jevRerankResp.body(), Map.class);
+        assertEquals("jev-decisions", jevRerankJson.get("model"));
+        List<Map<String, Object>> jevRerankResults = (List<Map<String, Object>>) jevRerankJson.get("results");
+        assertEquals(2, jevRerankResults.size());
+        assertEquals(1, ((Number) jevRerankResults.get(0).get("index")).intValue(), "doc_1 (noul=0.96) must rank first");
+        assertEquals(0.96, ((Number) jevRerankResults.get(0).get("relevance_score")).doubleValue(), 0.001);
+        assertEquals(0, ((Number) jevRerankResults.get(1).get("index")).intValue(), "doc_0 (noul=0.08) must rank second");
     }
 
     private HttpResponse<String> sendAdmin(String method, String path, Object body, boolean includeCsrf) throws Exception {

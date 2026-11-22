@@ -37,7 +37,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 public class ProvidersController {
-    private static final Set<String> SUPPORTED_PROTOCOLS = Set.of("openai", "anthropic", "gemini", "cohere", "jina");
+    private static final Set<String> SUPPORTED_PROTOCOLS = Set.of("openai", "anthropic", "gemini", "cohere", "jina", "typesafe", "jev");
     private static final Map<String, String> TEST_MESSAGES = Map.of(
         "auth_failed", "Upstream rejected credentials",
         "endpoint_not_found", "Models endpoint not found",
@@ -101,7 +101,7 @@ public class ProvidersController {
         String secret = requireSecretOrKeyList(body);
         String protocol = body.get("protocol") != null ? String.valueOf(body.get("protocol")).trim().toLowerCase() : "openai";
         if (!SUPPORTED_PROTOCOLS.contains(protocol)) {
-            throw new GatewayException(400, "validation_error", "protocol: must be one of openai, anthropic, gemini, cohere, jina");
+            throw new GatewayException(400, "validation_error", "protocol: must be one of openai, anthropic, gemini, cohere, jina, typesafe, jev");
         }
         boolean enabled = body.get("enabled") == null || Boolean.TRUE.equals(body.get("enabled"));
 
@@ -160,7 +160,7 @@ public class ProvidersController {
             if (body.containsKey("protocol") && body.get("protocol") != null) {
                 String protocol = String.valueOf(body.get("protocol")).trim().toLowerCase();
                 if (!SUPPORTED_PROTOCOLS.contains(protocol)) {
-                    throw new GatewayException(400, "validation_error", "protocol: must be one of openai, anthropic, gemini, cohere, jina");
+                    throw new GatewayException(400, "validation_error", "protocol: must be one of openai, anthropic, gemini, cohere, jina, typesafe, jev");
                 }
                 sets.add("protocol = ?");
                 params.add(protocol);
