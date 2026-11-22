@@ -250,6 +250,7 @@ public class HotBilling {
         if (input.outputTokens() != null) requireSafeInt(input.outputTokens(), 0, HotContract.MAX_SAFE_INTEGER);
         if (input.cachedInputTokens() != null) requireSafeInt(input.cachedInputTokens(), 0, HotContract.MAX_SAFE_INTEGER);
         if (input.reasoningTokens() != null) requireSafeInt(input.reasoningTokens(), 0, HotContract.MAX_SAFE_INTEGER);
+        if (input.ttftMs() != null) requireSafeInt(input.ttftMs(), 0, HotContract.MAX_SAFE_INTEGER);
         List<AttemptRecord> rows = validateAttempts(input.attempts());
         String errorCode = deriveErrorCode(input.status(), rows);
         Map<String, Object> map = new LinkedHashMap<>();
@@ -258,6 +259,7 @@ public class HotBilling {
         map.put("outputTokens", input.outputTokens());
         map.put("cachedInputTokens", input.cachedInputTokens());
         map.put("reasoningTokens", input.reasoningTokens());
+        map.put("ttftMs", input.ttftMs());
         map.put("status", input.status());
         map.put("attempts", rows);
         map.put("errorCode", errorCode);

@@ -125,7 +125,8 @@ public class QueriesController {
         StringBuilder sql = new StringBuilder("""
             SELECT request_id::text, project_id::text, key_id::text, period, reserve_micros,
                    route_version::text, price_snapshot::text, status, alias_name, error_code,
-                   input_tokens, output_tokens, actual_micros, created_at, updated_at
+                   input_tokens, output_tokens, actual_micros, created_at, updated_at,
+                   cached_input_tokens, reasoning_tokens, ttft_ms
               FROM requests
              WHERE project_id = ?::uuid AND created_at >= ? AND created_at < ?
             """);
@@ -206,7 +207,8 @@ public class QueriesController {
             try (PreparedStatement ps = conn.prepareStatement("""
                 SELECT request_id::text, project_id::text, key_id::text, period, reserve_micros,
                        route_version::text, price_snapshot::text, status, alias_name, error_code,
-                       input_tokens, output_tokens, actual_micros, created_at, updated_at
+                       input_tokens, output_tokens, actual_micros, created_at, updated_at,
+                       cached_input_tokens, reasoning_tokens, ttft_ms
                   FROM requests WHERE request_id = ?::uuid
                 """)) {
                 ps.setString(1, id);
@@ -221,7 +223,8 @@ public class QueriesController {
             List<Map<String, Object>> attempts = new ArrayList<>();
             try (PreparedStatement ps = conn.prepareStatement("""
                 SELECT id::text, request_id::text, attempt_no, target_id::text, status, error_code,
-                       started_at, finished_at, input_tokens, output_tokens, cost_micros
+                       started_at, finished_at, input_tokens, output_tokens, cost_micros,
+                       cached_input_tokens, reasoning_tokens, ttft_ms
                   FROM attempts WHERE request_id = ?::uuid ORDER BY attempt_no
                 """)) {
                 ps.setString(1, id);
@@ -241,6 +244,9 @@ public class QueriesController {
                         long inTok = rs.getLong(9); a.put("input_tokens", rs.wasNull() ? null : inTok);
                         long outTok = rs.getLong(10); a.put("output_tokens", rs.wasNull() ? null : outTok);
                         long cost = rs.getLong(11); a.put("cost_micros", rs.wasNull() ? null : cost);
+                        long cIn = rs.getLong(12); a.put("cached_input_tokens", rs.wasNull() ? null : cIn);
+                        long rTok = rs.getLong(13); a.put("reasoning_tokens", rs.wasNull() ? null : rTok);
+                        long ttft = rs.getLong(14); a.put("ttft_ms", rs.wasNull() ? null : ttft);
                         attempts.add(a);
                     }
                 }
@@ -787,6 +793,9 @@ public class QueriesController {
         Timestamp uAt = rs.getTimestamp(15);
         row.put("created_at", cAt != null ? cAt.toInstant().toString() : null);
         row.put("updated_at", uAt != null ? uAt.toInstant().toString() : null);
+        long cIn = rs.getLong(16); row.put("cached_input_tokens", rs.wasNull() ? null : cIn);
+        long rTok = rs.getLong(17); row.put("reasoning_tokens", rs.wasNull() ? null : rTok);
+        long ttft = rs.getLong(18); row.put("ttft_ms", rs.wasNull() ? null : ttft);
         return row;
     }
 }

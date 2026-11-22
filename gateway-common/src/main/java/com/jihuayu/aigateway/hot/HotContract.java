@@ -61,6 +61,29 @@ public final class HotContract {
         public String configChannel() {
             return prefix + "config:notify";
         }
+
+        public String projectTpm(String projectId) {
+            return prefix + "tpm:project:" + projectId;
+        }
+
+        public String keyTpm(String keyId) {
+            return prefix + "tpm:key:" + keyId;
+        }
+
+        /** #39: Project-scoped Redis Cluster hash-tag key set ensuring all per-project Lua keys map to the same CRC16 slot */
+        public HotKeys forClusterProject(String projectId) {
+            String clusterPrefix = "gateway:{proj:" + projectId + "}:hot:v1:";
+            return new HotKeys(
+                namespace,
+                clusterPrefix,
+                clusterPrefix + "runtime",
+                clusterPrefix + "config",
+                clusterPrefix + "journal",
+                clusterPrefix + "slots",
+                clusterPrefix + "projects",
+                clusterPrefix + "active"
+            );
+        }
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
@@ -81,8 +104,36 @@ public final class HotContract {
         boolean retry_safe,
         long latency_ms,
         Long cached_input_tokens,
-        Long reasoning_tokens
+        Long reasoning_tokens,
+        Long ttft_ms
     ) {
+        public AttemptRecord(
+            int attempt_no,
+            String target_id,
+            String upstream_model,
+            String status,
+            Integer http_status,
+            String error_code,
+            boolean request_sent,
+            boolean execution_unknown,
+            boolean usage_known,
+            Long input_tokens,
+            Long output_tokens,
+            Long cost_micros,
+            long upper_bound_micros,
+            boolean retry_safe,
+            long latency_ms,
+            Long cached_input_tokens,
+            Long reasoning_tokens
+        ) {
+            this(
+                attempt_no, target_id, upstream_model, status, http_status, error_code,
+                request_sent, execution_unknown, usage_known, input_tokens, output_tokens,
+                cost_micros, upper_bound_micros, retry_safe, latency_ms,
+                cached_input_tokens, reasoning_tokens, null
+            );
+        }
+
         public AttemptRecord(
             int attempt_no,
             String target_id,
@@ -103,7 +154,7 @@ public final class HotContract {
             this(
                 attempt_no, target_id, upstream_model, status, http_status, error_code,
                 request_sent, execution_unknown, usage_known, input_tokens, output_tokens,
-                cost_micros, upper_bound_micros, retry_safe, latency_ms, null, null
+                cost_micros, upper_bound_micros, retry_safe, latency_ms, null, null, null
             );
         }
     }
@@ -128,6 +179,7 @@ public final class HotContract {
         Long outputTokens,
         Long cachedInputTokens,
         Long reasoningTokens,
+        Long ttftMs,
         String aliasName,
         String errorCode,
         List<AttemptRecord> attempts,
@@ -216,19 +268,48 @@ public final class HotContract {
     ) {}
 
     @JsonIgnoreProperties(ignoreUnknown = true)
+    public record McpServerSnapshot(
+        String id,
+        String workspaceId,
+        String alias,
+        String transport,
+        String endpointUrl,
+        String encryptedSecret,
+        List<String> allowedTools,
+        int timeoutMs,
+        boolean enabled
+    ) {
+        public boolean isToolAllowedByServer(String toolName) {
+            if (allowedTools == null || allowedTools.isEmpty()) return true;
+            return allowedTools.contains("*") || (toolName != null && allowedTools.contains(toolName));
+        }
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
     public record Snapshot(
         String epoch,
         Map<String, RouteSnapshot> routes,
         Map<String, List<Map<String, Object>>> models,
         List<PluginSnapshot> plugins,
-        List<PluginBindingSnapshot> pluginBindings
+        List<PluginBindingSnapshot> pluginBindings,
+        List<McpServerSnapshot> mcpServers
     ) {
+        public Snapshot(
+            String epoch,
+            Map<String, RouteSnapshot> routes,
+            Map<String, List<Map<String, Object>>> models,
+            List<PluginSnapshot> plugins,
+            List<PluginBindingSnapshot> pluginBindings
+        ) {
+            this(epoch, routes, models, plugins, pluginBindings, List.of());
+        }
+
         public Snapshot(
             String epoch,
             Map<String, RouteSnapshot> routes,
             Map<String, List<Map<String, Object>>> models
         ) {
-            this(epoch, routes, models, List.of(), List.of());
+            this(epoch, routes, models, List.of(), List.of(), List.of());
         }
     }
 
@@ -240,6 +321,7 @@ public final class HotContract {
         String projectId,
         String workspaceId,
         List<String> allowedModels,
+        List<String> allowedMcpTools,
         int projectRpm,
         int keyRpm,
         Integer projectTpm,
@@ -259,13 +341,37 @@ public final class HotContract {
             List<String> allowedModels,
             int projectRpm,
             int keyRpm,
+            Integer projectTpm,
+            Integer keyTpm,
+            int concurrency,
+            long budgetMicros,
+            long keyBudgetMicros,
+            Integer maxOutputTokens
+        ) {
+            this(
+                runtimeRevision, runtimeKeyHash, runtimeExpiresAt, keyId, projectId, workspaceId,
+                allowedModels, List.of(), projectRpm, keyRpm, projectTpm, keyTpm,
+                concurrency, budgetMicros, keyBudgetMicros, maxOutputTokens
+            );
+        }
+
+        public KeyContext(
+            String runtimeRevision,
+            String runtimeKeyHash,
+            Long runtimeExpiresAt,
+            String keyId,
+            String projectId,
+            String workspaceId,
+            List<String> allowedModels,
+            int projectRpm,
+            int keyRpm,
             int concurrency,
             long budgetMicros,
             Integer maxOutputTokens
         ) {
             this(
                 runtimeRevision, runtimeKeyHash, runtimeExpiresAt, keyId, projectId, workspaceId,
-                allowedModels, projectRpm, keyRpm, null, null, concurrency, budgetMicros, -1L, maxOutputTokens
+                allowedModels, List.of(), projectRpm, keyRpm, null, null, concurrency, budgetMicros, -1L, maxOutputTokens
             );
         }
 
@@ -273,6 +379,14 @@ public final class HotContract {
             if (allowedModels == null || allowedModels.isEmpty()) return true;
             return (aliasName != null && allowedModels.contains(aliasName))
                 || (aliasId != null && !aliasId.isEmpty() && allowedModels.contains(aliasId));
+        }
+
+        public boolean canUseMcpTool(String serverAlias, String toolName) {
+            if (allowedMcpTools == null || allowedMcpTools.isEmpty()) return true;
+            if (allowedMcpTools.contains("*")) return true;
+            if (serverAlias != null && allowedMcpTools.contains(serverAlias + ":*")) return true;
+            if (toolName != null && allowedMcpTools.contains(toolName)) return true;
+            return serverAlias != null && toolName != null && allowedMcpTools.contains(serverAlias + ":" + toolName);
         }
     }
 
@@ -320,6 +434,7 @@ public final class HotContract {
         Long outputTokens,
         Long cachedInputTokens,
         Long reasoningTokens,
+        Long ttftMs,
         String status,
         List<AttemptRecord> attempts
     ) {
@@ -327,10 +442,22 @@ public final class HotContract {
             Long actualMicros,
             Long inputTokens,
             Long outputTokens,
+            Long cachedInputTokens,
+            Long reasoningTokens,
             String status,
             List<AttemptRecord> attempts
         ) {
-            this(actualMicros, inputTokens, outputTokens, null, null, status, attempts);
+            this(actualMicros, inputTokens, outputTokens, cachedInputTokens, reasoningTokens, null, status, attempts);
+        }
+
+        public SettleInput(
+            Long actualMicros,
+            Long inputTokens,
+            Long outputTokens,
+            String status,
+            List<AttemptRecord> attempts
+        ) {
+            this(actualMicros, inputTokens, outputTokens, null, null, null, status, attempts);
         }
     }
 }

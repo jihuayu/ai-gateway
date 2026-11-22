@@ -167,6 +167,17 @@ public class NettyGatewayServer {
                             ready ? "{\"status\":\"ready\",\"node_id\":\"" + scopedNode + "\"}" : "{\"status\":\"unavailable\",\"node_id\":\"" + scopedNode + "\"}", null);
                         return;
                     }
+                    if (HttpMethod.GET.equals(method) && "/metrics".equals(path)) {
+                        String metricsText = dataPlane.scrapePrometheusMetrics();
+                        sendTextDirect(ch, 200, requestId, scopedNode, "text/plain; version=0.0.4; charset=utf-8", metricsText);
+                        return;
+                    }
+                    if (HttpMethod.POST.equals(method) && path.startsWith("/mcp/") && path.length() > "/mcp/".length()) {
+                        String serverAlias = path.substring("/mcp/".length()).trim();
+                        HttpResponsePayload payload = dataPlane.handleMcpProxy(serverAlias, authHeader, bodyBytes, requestId);
+                        sendJsonDirect(ch, payload.status(), requestId, scopedNode, payload.jsonBody(), null, payload.headers());
+                        return;
+                    }
                     if (HttpMethod.GET.equals(method) && "/v1/models".equals(path)) {
                         HttpResponsePayload payload = dataPlane.handleModels(authHeader, requestId);
                         String retry = payload.headers().get("retry-after");
@@ -206,6 +217,21 @@ public class NettyGatewayServer {
         resp.headers().set("Cache-Control", "no-store");
         resp.headers().set("x-gateway-node", nodeId);
         resp.headers().set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
+    }
+
+    private static void sendTextDirect(Channel ch, int status, String requestId, String nodeId, String contentType, String body) {
+        if (!ch.isActive()) return;
+        byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+        FullHttpResponse resp = new DefaultFullHttpResponse(
+            HttpVersion.HTTP_1_1,
+            HttpResponseStatus.valueOf(status),
+            Unpooled.wrappedBuffer(bytes)
+        );
+        addSecurityHeaders(resp, nodeId);
+        resp.headers().set(HttpHeaderNames.CONTENT_TYPE, contentType);
+        resp.headers().setInt(HttpHeaderNames.CONTENT_LENGTH, bytes.length);
+        resp.headers().set("x-request-id", requestId);
+        ch.writeAndFlush(resp);
     }
 
     private static void sendJsonDirect(Channel ch, int status, String requestId, String nodeId, String json, Integer retryAfterSec) {
