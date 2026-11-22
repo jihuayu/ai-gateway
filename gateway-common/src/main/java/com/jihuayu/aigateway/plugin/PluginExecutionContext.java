@@ -1,5 +1,6 @@
 package com.jihuayu.aigateway.plugin;
 
+import com.jihuayu.aigateway.hot.GatewayTelemetry;
 import com.jihuayu.aigateway.hot.HotContract.KeyContext;
 import com.jihuayu.aigateway.hot.HotContract.RouteTarget;
 import com.jihuayu.aigateway.security.SecurityUtils;
@@ -296,6 +297,76 @@ public class PluginExecutionContext {
         }
     }
 
+    /**
+     * Isomorphic Telemetry &amp; Distributed Tracing handle accessible via {@code ctx.telemetry()} in Java
+     * and {@code ctx.telemetry} in JS, protected by per-request operation quota (64 ops) and series cardinality caps.
+     */
+    public static final class PluginTelemetry {
+        private static final int MAX_OPS_PER_REQUEST = 64;
+
+        private final String traceId;
+        private final String spanId;
+        private final String parentSpanId;
+        private final Map<String, Object> customSpanAttrs = new LinkedHashMap<>();
+        private final List<GatewayTelemetry.SpanEvent> customSpanEvents = new ArrayList<>();
+        private int opsCount = 0;
+
+        public PluginTelemetry(String traceparentHeader) {
+            String[] parts = GatewayTelemetry.parseOrGenerateTraceparent(traceparentHeader);
+            this.traceId = parts[0];
+            this.spanId = parts[1];
+            this.parentSpanId = parts[2];
+        }
+
+        private void checkQuota() {
+            if (++opsCount > MAX_OPS_PER_REQUEST) {
+                throw new IllegalStateException("Plugin exceeded per-request telemetry operation quota (" + MAX_OPS_PER_REQUEST + ")");
+            }
+        }
+
+        public void incr(String metricName) {
+            incr(metricName, 1L, Map.of());
+        }
+
+        public void incr(String metricName, long delta, Map<String, String> labels) {
+            checkQuota();
+            GatewayTelemetry.global().recordCustomCounter(metricName, delta, labels);
+        }
+
+        public void gauge(String metricName, double value, Map<String, String> labels) {
+            checkQuota();
+            GatewayTelemetry.global().recordCustomGauge(metricName, value, labels);
+        }
+
+        public void observe(String metricName, double value, Map<String, String> labels) {
+            checkQuota();
+            GatewayTelemetry.global().recordCustomHistogram(metricName, value, labels);
+        }
+
+        public void setSpanAttr(String key, Object value) {
+            checkQuota();
+            if (key != null && !key.isBlank() && value != null && customSpanAttrs.size() < 32) {
+                customSpanAttrs.put(key.trim(), value);
+            }
+        }
+
+        public void addSpanEvent(String eventName, Map<String, Object> attributes) {
+            checkQuota();
+            if (eventName != null && !eventName.isBlank() && customSpanEvents.size() < 16) {
+                Map<String, Object> safeAttrs = attributes != null ? new LinkedHashMap<>(attributes) : Map.of();
+                customSpanEvents.add(new GatewayTelemetry.SpanEvent(eventName.trim(), System.currentTimeMillis(), safeAttrs));
+            }
+        }
+
+        public String traceId() { return traceId; }
+        public String spanId() { return spanId; }
+        public String parentSpanId() { return parentSpanId; }
+        public String traceparent() { return "00-" + traceId + "-" + spanId + "-01"; }
+
+        public Map<String, Object> customSpanAttrs() { return Collections.unmodifiableMap(customSpanAttrs); }
+        public List<GatewayTelemetry.SpanEvent> customSpanEvents() { return Collections.unmodifiableList(customSpanEvents); }
+    }
+
     private final String requestId;
     private String projectId;
     private String workspaceId;
@@ -314,6 +385,7 @@ public class PluginExecutionContext {
     private Map<String, Object> currentPluginConfig = Map.of();
 
     private final PluginKvStore kvStore;
+    private final PluginTelemetry telemetryHandle;
     private KeyContext authenticatedKey;
     private String boundApiKeyPlain;
     private String endUserId;
@@ -393,6 +465,7 @@ public class PluginExecutionContext {
         this.requestHeaders = requestHeaders != null ? new LinkedHashMap<>(requestHeaders) : new LinkedHashMap<>();
         this.requestJson = requestJson != null ? new LinkedHashMap<>(requestJson) : new LinkedHashMap<>();
         this.kvStore = kvStore != null ? kvStore : new PluginKvStore(null, "gw:");
+        this.telemetryHandle = new PluginTelemetry(this.requestHeaders.get("traceparent"));
     }
 
     public void setIdentityContext(String projectId, String workspaceId, String keyId) {
@@ -407,6 +480,7 @@ public class PluginExecutionContext {
 
     public PluginKvStore kv() { return kvStore; }
     public PluginCrypto crypto() { return PluginCrypto.INSTANCE; }
+    public PluginTelemetry telemetry() { return telemetryHandle; }
 
     public String requestId() { return requestId; }
     public String projectId() { return projectId; }

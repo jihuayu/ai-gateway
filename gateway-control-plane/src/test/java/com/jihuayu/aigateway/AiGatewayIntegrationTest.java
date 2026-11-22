@@ -3053,6 +3053,218 @@ public class AiGatewayIntegrationTest {
         }
     }
 
+    @Test
+    @Order(18)
+    @SuppressWarnings("unchecked")
+    void testStage18MicrokernelObservabilityPluginsAndIsomorphicCtxTelemetry() throws Exception {
+        int nettyPort = nettyServer.getBoundPort();
+
+        // Start a local mock OTLP Collector + Langfuse Ingestion + AccessLog HTTP Sink
+        List<String> otlpPayloads = java.util.Collections.synchronizedList(new ArrayList<>());
+        List<String> langfusePayloads = java.util.Collections.synchronizedList(new ArrayList<>());
+        List<String> langfuseAuthHeaders = java.util.Collections.synchronizedList(new ArrayList<>());
+        List<String> accessLogPayloads = java.util.Collections.synchronizedList(new ArrayList<>());
+
+        HttpServer obsMockServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        obsMockServer.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
+        obsMockServer.createContext("/v1/traces", ex -> {
+            otlpPayloads.add(new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            ex.sendResponseHeaders(200, 2);
+            ex.getResponseBody().write("{}".getBytes(StandardCharsets.UTF_8));
+            ex.close();
+        });
+        obsMockServer.createContext("/api/public/ingestion", ex -> {
+            String auth = ex.getRequestHeaders().getFirst("Authorization");
+            if (auth != null) langfuseAuthHeaders.add(auth);
+            langfusePayloads.add(new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            ex.sendResponseHeaders(200, 2);
+            ex.getResponseBody().write("{}".getBytes(StandardCharsets.UTF_8));
+            ex.close();
+        });
+        obsMockServer.createContext("/logs", ex -> {
+            accessLogPayloads.add(new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            ex.sendResponseHeaders(200, 2);
+            ex.getResponseBody().write("{}".getBytes(StandardCharsets.UTF_8));
+            ex.close();
+        });
+        obsMockServer.start();
+        int obsPort = obsMockServer.getAddress().getPort();
+
+        try {
+            // 1. Register Java SPI plugin exercising ctx.telemetry() (incr, gauge, observe, setSpanAttr, addSpanEvent)
+            dataPlaneExecutor.pluginPipeline().jarLoader().registerPlugin(new com.jihuayu.aigateway.plugin.GatewayPlugin() {
+                @Override public String id() { return "java:obs-telemetry-probe"; }
+                @Override public String name() { return "obs-telemetry-probe"; }
+                @Override public String type() { return "JAVA_SPI"; }
+                @Override public int priority() { return 12; }
+                @Override
+                public com.jihuayu.aigateway.plugin.PluginResult onPreAdmit(com.jihuayu.aigateway.plugin.PluginExecutionContext ctx) {
+                    ctx.telemetry().incr("java_guard_checks", 1L, Map.of("tier", "enterprise"));
+                    ctx.telemetry().gauge("java_active_tenants", 7.0, Map.of("region", "sg"));
+                    ctx.telemetry().observe("java_prompt_chars", ctx.extractPromptText().length(), Map.of("model", ctx.modelAlias()));
+                    ctx.telemetry().setSpanAttr("java.custom.verified", true);
+                    ctx.telemetry().addSpanEvent("java.policy.checked", Map.of("rule", "strict-v1"));
+                    return com.jihuayu.aigateway.plugin.PluginResult.Continue.INSTANCE;
+                }
+            });
+
+            List<String> obsBindings = new ArrayList<>();
+
+            // Bind Java telemetry probe
+            String jPid = String.valueOf(mapper.readValue(sendAdmin("POST", "/api/plugins", Map.of(
+                "name", "obs-telemetry-probe", "type", "JAVA_SPI", "className", "java:obs-telemetry-probe",
+                "priority", 12, "stages", List.of("PRE_ADMIT")
+            ), true).body(), Map.class).get("id"));
+            obsBindings.add(String.valueOf(mapper.readValue(sendAdmin("POST", "/api/plugins/bindings", Map.of(
+                "pluginId", jPid, "scopeType", "PROJECT", "scopeId", projectId, "priority", 12
+            ), true).body(), Map.class).get("id")));
+
+            // 2. Bind JS plugin exercising ctx.telemetry.*
+            String jsCode = "function onPreAdmit(ctx) { " +
+                "ctx.telemetry.incr('js_custom_hits', 2, { env: 'prod' }); " +
+                "ctx.telemetry.observe('js_score_dist', 0.95, { kind: 'safety' }); " +
+                "ctx.telemetry.setSpanAttr('js.plugin.tag', 'verified-js'); " +
+                "ctx.telemetry.addSpanEvent('js.evaluated', { score: 95 }); " +
+                "ctx.setResponseHeader('x-js-trace-id', ctx.telemetry.traceId()); " +
+                "return { action: 'CONTINUE' }; }";
+            String jsPid = String.valueOf(mapper.readValue(sendAdmin("POST", "/api/plugins", Map.of(
+                "name", "js-telemetry-probe", "type", "JS", "priority", 14,
+                "stages", List.of("PRE_ADMIT"), "sourceCode", jsCode, "maxStatements", 2000
+            ), true).body(), Map.class).get("id"));
+            obsBindings.add(String.valueOf(mapper.readValue(sendAdmin("POST", "/api/plugins/bindings", Map.of(
+                "pluginId", jsPid, "scopeType", "PROJECT", "scopeId", projectId, "priority", 14
+            ), true).body(), Map.class).get("id")));
+
+            // 3. Bind all 4 Built-in Microkernel Observability Plugins
+            String promPid = String.valueOf(mapper.readValue(sendAdmin("POST", "/api/plugins", Map.of(
+                "name", "builtin:obs-prometheus-metrics", "type", "BUILTIN",
+                "className", "com.jihuayu.aigateway.plugin.MicrokernelObservabilityPlugins$PrometheusMetricsPlugin",
+                "priority", 40, "stages", List.of("POST_SETTLE"),
+                "config", Map.of("includeProjectLabel", true, "includeAttributionLabels", List.of("department"))
+            ), true).body(), Map.class).get("id"));
+            obsBindings.add(String.valueOf(mapper.readValue(sendAdmin("POST", "/api/plugins/bindings", Map.of(
+                "pluginId", promPid, "scopeType", "PROJECT", "scopeId", projectId, "priority", 40
+            ), true).body(), Map.class).get("id")));
+
+            String otelPid = String.valueOf(mapper.readValue(sendAdmin("POST", "/api/plugins", Map.of(
+                "name", "builtin:obs-otel-genai", "type", "BUILTIN",
+                "className", "com.jihuayu.aigateway.plugin.MicrokernelObservabilityPlugins$OpenTelemetryGenAiTracingPlugin",
+                "priority", 42, "stages", List.of("REQUEST_RECEIVED", "POST_SETTLE"),
+                "config", Map.of(
+                    "otlpEndpoint", "http://127.0.0.1:" + obsPort + "/v1/traces",
+                    "serviceName", "ai-gateway-prod",
+                    "capturePrompt", true
+                )
+            ), true).body(), Map.class).get("id"));
+            obsBindings.add(String.valueOf(mapper.readValue(sendAdmin("POST", "/api/plugins/bindings", Map.of(
+                "pluginId", otelPid, "scopeType", "PROJECT", "scopeId", projectId, "priority", 42
+            ), true).body(), Map.class).get("id")));
+
+            String lfPid = String.valueOf(mapper.readValue(sendAdmin("POST", "/api/plugins", Map.of(
+                "name", "builtin:obs-langfuse-sink", "type", "BUILTIN",
+                "className", "com.jihuayu.aigateway.plugin.MicrokernelObservabilityPlugins$LangfuseLlmOpsSinkPlugin",
+                "priority", 45, "stages", List.of("POST_SETTLE"),
+                "config", Map.of(
+                    "endpointUrl", "http://127.0.0.1:" + obsPort + "/api/public/ingestion",
+                    "publicKey", "pk-lf-test",
+                    "secretKey", "sk-lf-test",
+                    "captureInputOutput", true
+                )
+            ), true).body(), Map.class).get("id"));
+            obsBindings.add(String.valueOf(mapper.readValue(sendAdmin("POST", "/api/plugins/bindings", Map.of(
+                "pluginId", lfPid, "scopeType", "PROJECT", "scopeId", projectId, "priority", 45
+            ), true).body(), Map.class).get("id")));
+
+            String logPid = String.valueOf(mapper.readValue(sendAdmin("POST", "/api/plugins", Map.of(
+                "name", "builtin:obs-access-log", "type", "BUILTIN",
+                "className", "com.jihuayu.aigateway.plugin.MicrokernelObservabilityPlugins$StructuredAccessLogPlugin",
+                "priority", 48, "stages", List.of("POST_SETTLE"),
+                "config", Map.of(
+                    "slowThresholdMs", 0,
+                    "errorsOnly", false,
+                    "httpSinkUrl", "http://127.0.0.1:" + obsPort + "/logs",
+                    "includeHeaders", List.of("x-custom-client")
+                )
+            ), true).body(), Map.class).get("id"));
+            obsBindings.add(String.valueOf(mapper.readValue(sendAdmin("POST", "/api/plugins/bindings", Map.of(
+                "pluginId", logPid, "scopeType", "PROJECT", "scopeId", projectId, "priority", 48
+            ), true).body(), Map.class).get("id")));
+
+            // Send chat request with explicit W3C traceparent header
+            String incomingTraceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+            String traceparentIn = "00-" + incomingTraceId + "-00f067aa0ba902b7-01";
+            HttpResponse<String> chatResp = httpClient.send(
+                HttpRequest.newBuilder()
+                    .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
+                    .header("Authorization", "Bearer " + activeKeyPlain)
+                    .header("traceparent", traceparentIn)
+                    .header("x-custom-client", "cli-v4")
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString("{\"model\":\"support-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello Microkernel Observability\"}],\"max_tokens\":16}"))
+                    .build(),
+                HttpResponse.BodyHandlers.ofString()
+            );
+            assertEquals(200, chatResp.statusCode(), chatResp.body());
+            assertEquals(incomingTraceId, chatResp.headers().firstValue("x-trace-id").orElse(""));
+            assertEquals(incomingTraceId, chatResp.headers().firstValue("x-js-trace-id").orElse(""));
+
+            // Wait up to 1s for async OTLP / Langfuse / AccessLog HTTP exports
+            for (int w = 0; w < 50 && (otlpPayloads.isEmpty() || langfusePayloads.isEmpty() || accessLogPayloads.isEmpty()); w++) {
+                Thread.sleep(20);
+            }
+
+            // Verify OTLP HTTP JSON payload contains merged Java & JS custom span attributes & events
+            assertFalse(otlpPayloads.isEmpty(), "OTLP Collector must receive exported resourceSpans");
+            assertTrue(otlpPayloads.getFirst().contains(incomingTraceId));
+            assertTrue(otlpPayloads.getFirst().contains("java.custom.verified"));
+            assertTrue(otlpPayloads.getFirst().contains("verified-js"));
+            assertTrue(otlpPayloads.getFirst().contains("java.policy.checked"));
+            assertTrue(otlpPayloads.getFirst().contains("js.evaluated"));
+
+            // Verify Langfuse batch ingestion received trace-create + generation-create with Basic Auth
+            assertFalse(langfusePayloads.isEmpty(), "Langfuse sink must receive ingestion batch");
+            assertTrue(langfuseAuthHeaders.getFirst().startsWith("Basic "));
+            assertTrue(langfusePayloads.getFirst().contains("trace-create"));
+            assertTrue(langfusePayloads.getFirst().contains("generation-create"));
+
+            // Verify StructuredAccessLogPlugin HTTP sink & /api/telemetry/access-logs
+            assertFalse(accessLogPayloads.isEmpty(), "Structured access log sink must receive JSON log");
+            assertTrue(accessLogPayloads.getFirst().contains("cli-v4"));
+            HttpResponse<String> logsApi = sendAdmin("GET", "/api/telemetry/access-logs", null, false);
+            assertEquals(200, logsApi.statusCode());
+            assertTrue(logsApi.body().contains(incomingTraceId));
+
+            // Verify /api/telemetry/runtime JSON endpoint
+            HttpResponse<String> rtApi = sendAdmin("GET", "/api/telemetry/runtime", null, false);
+            assertEquals(200, rtApi.statusCode());
+            assertTrue(rtApi.body().contains("caffeineAuthHits"));
+
+            // Verify Prometheus /metrics exposes Layer 1 Kernel Probes + Histograms + Java/JS ctx.telemetry custom metrics
+            HttpResponse<String> promResp = httpClient.send(
+                HttpRequest.newBuilder().uri(URI.create("http://127.0.0.1:" + nettyPort + "/metrics")).GET().build(),
+                HttpResponse.BodyHandlers.ofString()
+            );
+            assertEquals(200, promResp.statusCode());
+            String metricsBody = promResp.body();
+            assertTrue(metricsBody.contains("ai_gateway_request_latency_ms_bucket{le=\"50\"}"), "Must expose latency histogram buckets");
+            assertTrue(metricsBody.contains("ai_gateway_caffeine_hits_total{cache=\"auth\"}"), "Must expose Caffeine L1 kernel probe");
+            assertTrue(metricsBody.contains("ai_gateway_mpsc_commands_total"), "Must expose MPSC batch channel probe");
+            assertTrue(metricsBody.contains("ai_gateway_ha_state"), "Must expose Distributed HA state gauge");
+            assertTrue(metricsBody.contains("ai_gateway_hedge_triggers_total"), "Must expose Peak-EWMA hedge counter");
+            assertTrue(metricsBody.contains("ai_gateway_plugin_executions_total{"), "Must expose per-plugin execution counter");
+            assertTrue(metricsBody.contains("ai_gateway_plugin_metric_java_guard_checks_total{tier=\"enterprise\"}"), "Must expose Java ctx.telemetry.incr metric");
+            assertTrue(metricsBody.contains("ai_gateway_plugin_metric_java_active_tenants{region=\"sg\"} 7"), "Must expose Java ctx.telemetry.gauge metric");
+            assertTrue(metricsBody.contains("ai_gateway_plugin_metric_js_custom_hits_total{env=\"prod\"} 2"), "Must expose JS ctx.telemetry.incr metric");
+            assertTrue(metricsBody.contains("ai_gateway_plugin_metric_js_score_dist_bucket{"), "Must expose JS ctx.telemetry.observe histogram");
+
+            for (String bid : obsBindings) {
+                sendAdmin("DELETE", "/api/plugins/bindings/" + bid, null, true);
+            }
+        } finally {
+            obsMockServer.stop(0);
+        }
+    }
+
     private HttpResponse<String> sendAdmin(String method, String path, Object body, boolean includeCsrf) throws Exception {
         HttpRequest.Builder b = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + adminPort + path));

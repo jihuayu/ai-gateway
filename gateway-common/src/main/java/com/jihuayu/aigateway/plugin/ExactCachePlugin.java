@@ -184,6 +184,10 @@ public class ExactCachePlugin implements GatewayPlugin {
         }
     }
 
+    public com.github.benmanes.caffeine.cache.stats.CacheStats cacheStats() {
+        return caffeineL1.stats();
+    }
+
     public long singleFlightCoalescedHits() {
         return singleFlightCoalescedHits.get();
     }
