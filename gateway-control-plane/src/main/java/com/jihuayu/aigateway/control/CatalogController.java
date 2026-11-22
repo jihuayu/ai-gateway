@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jihuayu.aigateway.control.ControlAuthService.ProjectAccess;
 import com.jihuayu.aigateway.control.ControlAuthService.SessionInfo;
 import com.jihuayu.aigateway.hot.GatewayException;
+import com.jihuayu.aigateway.hot.HotContract;
 import com.jihuayu.aigateway.hot.HotRuntime;
 import com.jihuayu.aigateway.security.SecurityUtils;
 import jakarta.servlet.http.HttpServletRequest;
@@ -51,10 +52,15 @@ public class CatalogController {
         String upstream_model,
         long input_price,
         long output_price,
+        Long cached_input_price,
+        Long cache_write_price,
+        Long reasoning_price,
         List<String> capabilities,
         boolean enabled,
         String provider_name
     ) {}
+
+    private record ParsedTargets(List<String> ids, Map<String, Integer> weights) {}
 
     private final DataSource pool;
     private final ControlAuthService authService;
@@ -97,14 +103,15 @@ public class CatalogController {
     public Map<String, Object> createAliasVersion(HttpServletRequest req, @PathVariable("id") String aliasId, @RequestBody(required = false) Map<String, Object> body) {
         requireUuidOr404(aliasId);
         if (body == null) throw new GatewayException(400, "validation_error", "Request body required");
-        List<String> targetIds = parseTargetIds(body.get("targets"));
+        ParsedTargets parsedTargets = parseTargetSpecs(body.get("targets"), body.get("weights"));
+        List<String> targetIds = parsedTargets.ids();
         List<String> capabilities = parseCapabilities(body.get("capabilities"));
 
         try (Connection conn = pool.getConnection()) {
             AliasAccess acc = aliasForAccess(req, conn, aliasId, true);
             List<TargetDetail> targets = loadTargets(conn, acc.workspaceId(), targetIds);
             requireCoverage(targets, capabilities);
-            Map<String, Object> snapshot = buildPriceSnapshot(targets);
+            Map<String, Object> snapshot = buildPriceSnapshot(targets, parsedTargets.weights());
             String versionId = UUID.randomUUID().toString();
             int version;
 
@@ -152,6 +159,7 @@ public class CatalogController {
             out.put("version", version);
             out.put("status", "draft");
             out.put("targets", targetIds);
+            out.put("weights", parsedTargets.weights());
             out.put("capabilities", capabilities);
             out.put("price_snapshot", snapshot);
             out.put("target_details", targets);
@@ -164,6 +172,7 @@ public class CatalogController {
     }
 
     @PostMapping("/api/aliases/{id}/publish")
+    @SuppressWarnings("unchecked")
     public Map<String, Object> publishAlias(HttpServletRequest req, @PathVariable("id") String aliasId, @RequestBody(required = false) Map<String, Object> body) {
         requireUuidOr404(aliasId);
         if (body == null || (!body.containsKey("expectedVersion") && !body.containsKey("expected_version"))) {
@@ -240,13 +249,13 @@ public class CatalogController {
                         }
                         draftId = rs.getString(1);
                         draftVersion = rs.getInt(2);
-                        draftTargets = mapper.readValue(rs.getString(3), List.class);
+                        draftTargets = parseJsonTargetIds(rs.getString(3));
                         draftCaps = mapper.readValue(rs.getString(4), List.class);
                         draftSnapshot = mapper.readValue(rs.getString(5), Map.class);
                     }
                 }
-                if (draftTargets.isEmpty() || draftTargets.size() > 2) {
-                    throw new GatewayException(409, "invalid_route", "A route requires one or two targets");
+                if (draftTargets.isEmpty() || draftTargets.size() > 8) {
+                    throw new GatewayException(409, "invalid_route", "A route requires 1 to 8 targets");
                 }
                 targets = loadTargets(conn, acc.workspaceId(), draftTargets);
                 requireCoverage(targets, draftCaps);
@@ -287,7 +296,6 @@ public class CatalogController {
         }
     }
 
-
     @PostMapping("/api/aliases/{id}/rollback")
     public Map<String, Object> rollbackAlias(HttpServletRequest req, @PathVariable("id") String aliasId, @RequestBody(required = false) Map<String, Object> body) {
         requireUuidOr404(aliasId);
@@ -300,6 +308,7 @@ public class CatalogController {
             AliasAccess acc = aliasForAccess(req, conn, aliasId, true);
             List<String> oldTargets;
             List<String> oldCaps;
+            Map<String, Integer> oldWeights = new LinkedHashMap<>();
             int newVersion;
             String newVersionId = UUID.randomUUID().toString();
             List<TargetDetail> targets;
@@ -312,20 +321,28 @@ public class CatalogController {
                     ps.setString(1, aliasId);
                     ps.executeQuery();
                 }
-                try (PreparedStatement ps = conn.prepareStatement("SELECT targets::text, capabilities::text FROM route_versions WHERE alias_id = ?::uuid AND version = ? AND status = 'published'")) {
+                try (PreparedStatement ps = conn.prepareStatement("SELECT targets::text, capabilities::text, price_snapshot::text FROM route_versions WHERE alias_id = ?::uuid AND version = ? AND status = 'published'")) {
                     ps.setString(1, aliasId);
                     ps.setInt(2, targetVersionNo);
                     try (ResultSet rs = ps.executeQuery()) {
                         if (!rs.next()) {
                             throw new GatewayException(404, "version_not_found", "Published target version not found");
                         }
-                        oldTargets = parseJsonList(rs.getString(1));
+                        oldTargets = parseJsonTargetIds(rs.getString(1));
                         oldCaps = parseJsonList(rs.getString(2));
+                        Map<String, Object> oldSnap = parseJsonMap(rs.getString(3));
+                        if (oldSnap.get("weights") instanceof Map<?, ?> wm) {
+                            for (Map.Entry<?, ?> e : wm.entrySet()) {
+                                if (e.getKey() != null && e.getValue() instanceof Number wn) {
+                                    oldWeights.put(String.valueOf(e.getKey()), wn.intValue());
+                                }
+                            }
+                        }
                     }
                 }
                 targets = loadTargets(conn, acc.workspaceId(), oldTargets);
                 requireCoverage(targets, oldCaps);
-                snapshot = buildPriceSnapshot(targets);
+                snapshot = buildPriceSnapshot(targets, oldWeights);
                 try (PreparedStatement ps = conn.prepareStatement("SELECT COALESCE(MAX(version), 0) + 1 FROM route_versions WHERE alias_id = ?::uuid")) {
                     ps.setString(1, aliasId);
                     try (ResultSet rs = ps.executeQuery()) {
@@ -450,6 +467,7 @@ public class CatalogController {
         }
     }
 
+    @SuppressWarnings("unchecked")
     private Map<String, Object> doListAliases(HttpServletRequest req, String projectId) {
         authService.requireProject(req, projectId, false);
         try (Connection conn = pool.getConnection()) {
@@ -466,7 +484,7 @@ public class CatalogController {
                         r.put("current_version_id", rs.getString("current_version_id"));
                         int cv = rs.getInt("current_version");
                         r.put("current_version", rs.wasNull() ? null : cv);
-                        List<String> ct = parseJsonList(rs.getString("current_targets"));
+                        List<String> ct = parseJsonTargetIds(rs.getString("current_targets"));
                         r.put("current_targets", ct);
                         allTargetIds.addAll(ct);
                         r.put("current_capabilities", parseJsonList(rs.getString("current_capabilities")));
@@ -474,7 +492,7 @@ public class CatalogController {
                         r.put("draft_id", rs.getString("draft_id"));
                         int dv = rs.getInt("draft_version");
                         r.put("draft_version", rs.wasNull() ? null : dv);
-                        List<String> dt = parseJsonList(rs.getString("draft_targets"));
+                        List<String> dt = parseJsonTargetIds(rs.getString("draft_targets"));
                         r.put("draft_targets", dt);
                         allTargetIds.addAll(dt);
                         r.put("draft_capabilities", parseJsonList(rs.getString("draft_capabilities")));
@@ -519,13 +537,14 @@ public class CatalogController {
         if (name.isEmpty() || name.length() > 100) {
             throw new GatewayException(400, "validation_error", "name is required");
         }
-        List<String> targetIds = parseTargetIds(body.get("targets"));
+        ParsedTargets parsedTargets = parseTargetSpecs(body.get("targets"), body.get("weights"));
+        List<String> targetIds = parsedTargets.ids();
         List<String> capabilities = parseCapabilities(body.get("capabilities"));
 
         try (Connection conn = pool.getConnection()) {
             List<TargetDetail> targets = loadTargets(conn, acc.auth().workspaceId(), targetIds);
             requireCoverage(targets, capabilities);
-            Map<String, Object> snapshot = buildPriceSnapshot(targets);
+            Map<String, Object> snapshot = buildPriceSnapshot(targets, parsedTargets.weights());
             String aliasId = UUID.randomUUID().toString();
             String versionId = UUID.randomUUID().toString();
 
@@ -565,7 +584,7 @@ public class CatalogController {
             }
 
             authService.audit(conn, acc.auth(), projectId, "alias.create", "alias", aliasId, Map.of(
-                "name", name, "targets", targetIds, "capabilities", capabilities
+                "name", name, "targets", targetIds, "weights", parsedTargets.weights(), "capabilities", capabilities
             ));
             hotRuntime.publish();
             Map<String, TargetDetail> detailMap = new LinkedHashMap<>();
@@ -586,7 +605,8 @@ public class CatalogController {
         List<Map<String, Object>> items = new ArrayList<>();
         try (Connection conn = pool.getConnection();
              PreparedStatement ps = conn.prepareStatement("""
-                 SELECT id::text, project_id::text, name, prefix, created_by::text, allowed_models::text, expires_at, revoked_at, key_rpm, created_at, last_used_at
+                 SELECT id::text, project_id::text, name, prefix, created_by::text, allowed_models::text,
+                        expires_at, revoked_at, key_rpm, key_tpm, budget_micros::text, created_at, last_used_at
                    FROM api_keys
                   WHERE project_id = ?::uuid
                   ORDER BY created_at DESC
@@ -607,9 +627,12 @@ public class CatalogController {
                     row.put("revoked_at", rAt != null ? rAt.toInstant().toString() : null);
                     int krpm = rs.getInt(9);
                     row.put("key_rpm", rs.wasNull() ? null : krpm);
-                    Timestamp cAt = rs.getTimestamp(10);
+                    int ktpm = rs.getInt(10);
+                    row.put("key_tpm", rs.wasNull() ? null : ktpm);
+                    row.put("budget_micros", rs.getString(11));
+                    Timestamp cAt = rs.getTimestamp(12);
                     row.put("created_at", cAt != null ? cAt.toInstant().toString() : null);
-                    Timestamp lAt = rs.getTimestamp(11);
+                    Timestamp lAt = rs.getTimestamp(13);
                     row.put("last_used_at", lAt != null ? lAt.toInstant().toString() : null);
                     items.add(row);
                 }
@@ -663,6 +686,21 @@ public class CatalogController {
             }
             keyRpm = n.intValue();
         }
+        Integer keyTpm = null;
+        if (body.containsKey("key_tpm") && body.get("key_tpm") != null) {
+            if (!(body.get("key_tpm") instanceof Number n) || n.doubleValue() != Math.floor(n.doubleValue()) || n.intValue() < 1 || n.intValue() > 1_000_000_000) {
+                throw new GatewayException(400, "validation_error", "key_tpm invalid");
+            }
+            keyTpm = n.intValue();
+        }
+        Long keyBudgetMicros = null;
+        Object kbRaw = body.containsKey("budget_micros") ? body.get("budget_micros") : body.get("key_budget_micros");
+        if (kbRaw != null) {
+            if (!(kbRaw instanceof Number n) || n.doubleValue() != Math.floor(n.doubleValue()) || n.longValue() < 0 || n.longValue() > HotContract.MAX_SAFE_INTEGER) {
+                throw new GatewayException(400, "validation_error", "budget_micros invalid");
+            }
+            keyBudgetMicros = n.longValue();
+        }
 
         String plaintext = "sk-" + SecurityUtils.randomBase64Url(24);
         String prefix = plaintext.substring(0, 12);
@@ -686,9 +724,9 @@ public class CatalogController {
 
             Map<String, Object> created = new LinkedHashMap<>();
             try (PreparedStatement ps = conn.prepareStatement("""
-                INSERT INTO api_keys (id, project_id, name, key_hash, prefix, created_by, allowed_models, expires_at, key_rpm)
-                VALUES (?::uuid, ?::uuid, ?, ?, ?, ?::uuid, ?::jsonb, ?, ?)
-                RETURNING id::text, project_id::text, name, prefix, created_by::text, allowed_models::text, expires_at, key_rpm, created_at
+                INSERT INTO api_keys (id, project_id, name, key_hash, prefix, created_by, allowed_models, expires_at, key_rpm, key_tpm, budget_micros)
+                VALUES (?::uuid, ?::uuid, ?, ?, ?, ?::uuid, ?::jsonb, ?, ?, ?, ?)
+                RETURNING id::text, project_id::text, name, prefix, created_by::text, allowed_models::text, expires_at, key_rpm, key_tpm, budget_micros::text, created_at
                 """)) {
                 ps.setString(1, id);
                 ps.setString(2, projectId);
@@ -700,6 +738,10 @@ public class CatalogController {
                 ps.setTimestamp(8, Timestamp.from(expiresAt));
                 if (keyRpm == null) ps.setNull(9, Types.INTEGER);
                 else ps.setInt(9, keyRpm);
+                if (keyTpm == null) ps.setNull(10, Types.INTEGER);
+                else ps.setInt(10, keyTpm);
+                if (keyBudgetMicros == null) ps.setNull(11, Types.BIGINT);
+                else ps.setLong(11, keyBudgetMicros);
                 try (ResultSet rs = ps.executeQuery()) {
                     rs.next();
                     created.put("id", rs.getString(1));
@@ -712,7 +754,10 @@ public class CatalogController {
                     created.put("expires_at", eAt != null ? eAt.toInstant().toString() : null);
                     int krpm = rs.getInt(8);
                     created.put("key_rpm", rs.wasNull() ? null : krpm);
-                    Timestamp cAt = rs.getTimestamp(9);
+                    int ktpm = rs.getInt(9);
+                    created.put("key_tpm", rs.wasNull() ? null : ktpm);
+                    created.put("budget_micros", rs.getString(10));
+                    Timestamp cAt = rs.getTimestamp(11);
                     created.put("created_at", cAt != null ? cAt.toInstant().toString() : null);
                 }
             }
@@ -765,6 +810,7 @@ public class CatalogController {
         Map<String, TargetDetail> byId = new LinkedHashMap<>();
         try (PreparedStatement ps = conn.prepareStatement("""
             SELECT mt.id::text, mt.provider_id::text, mt.upstream_model, mt.input_price, mt.output_price,
+                   mt.cached_input_price, mt.cache_write_price, mt.reasoning_price,
                    mt.capabilities::text, mt.enabled, p.name AS provider_name
               FROM model_targets mt JOIN providers p ON p.id = mt.provider_id
              WHERE mt.id = ANY(?::uuid[]) AND p.workspace_id = ?::uuid
@@ -773,15 +819,21 @@ public class CatalogController {
             ps.setString(2, workspaceId);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
+                    long cIn = rs.getLong(6); Long cInObj = rs.wasNull() ? null : cIn;
+                    long cWr = rs.getLong(7); Long cWrObj = rs.wasNull() ? null : cWr;
+                    long rPr = rs.getLong(8); Long rPrObj = rs.wasNull() ? null : rPr;
                     TargetDetail td = new TargetDetail(
                         rs.getString(1),
                         rs.getString(2),
                         rs.getString(3),
                         rs.getLong(4),
                         rs.getLong(5),
-                        parseJsonList(rs.getString(6)),
-                        rs.getBoolean(7),
-                        rs.getString(8)
+                        cInObj,
+                        cWrObj,
+                        rPrObj,
+                        parseJsonList(rs.getString(9)),
+                        rs.getBoolean(10),
+                        rs.getString(11)
                     );
                     byId.put(td.id(), td);
                 }
@@ -800,6 +852,7 @@ public class CatalogController {
         Map<String, TargetDetail> byId = new LinkedHashMap<>();
         try (PreparedStatement ps = conn.prepareStatement("""
             SELECT mt.id::text, mt.provider_id::text, mt.upstream_model, mt.input_price, mt.output_price,
+                   mt.cached_input_price, mt.cache_write_price, mt.reasoning_price,
                    mt.capabilities::text, mt.enabled, p.name AS provider_name
               FROM model_targets mt JOIN providers p ON p.id = mt.provider_id
              WHERE mt.id = ANY(?::uuid[])
@@ -807,15 +860,21 @@ public class CatalogController {
             ps.setArray(1, conn.createArrayOf("uuid", ids.toArray()));
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
+                    long cIn = rs.getLong(6); Long cInObj = rs.wasNull() ? null : cIn;
+                    long cWr = rs.getLong(7); Long cWrObj = rs.wasNull() ? null : cWr;
+                    long rPr = rs.getLong(8); Long rPrObj = rs.wasNull() ? null : rPr;
                     TargetDetail td = new TargetDetail(
                         rs.getString(1),
                         rs.getString(2),
                         rs.getString(3),
                         rs.getLong(4),
                         rs.getLong(5),
-                        parseJsonList(rs.getString(6)),
-                        rs.getBoolean(7),
-                        rs.getString(8)
+                        cInObj,
+                        cWrObj,
+                        rPrObj,
+                        parseJsonList(rs.getString(9)),
+                        rs.getBoolean(10),
+                        rs.getString(11)
                     );
                     byId.put(td.id(), td);
                 }
@@ -833,19 +892,24 @@ public class CatalogController {
         }
     }
 
-    private static Map<String, Object> buildPriceSnapshot(List<TargetDetail> targets) {
+    private static Map<String, Object> buildPriceSnapshot(List<TargetDetail> targets, Map<String, Integer> weights) {
         Map<String, Object> prices = new LinkedHashMap<>();
         for (TargetDetail t : targets) {
-            prices.put(t.id(), Map.of(
-                "upstream_model", t.upstream_model(),
-                "input_micros_per_million", String.valueOf(t.input_price()),
-                "output_micros_per_million", String.valueOf(t.output_price())
-            ));
+            Map<String, Object> tMap = new LinkedHashMap<>();
+            tMap.put("upstream_model", t.upstream_model());
+            tMap.put("input_micros_per_million", String.valueOf(t.input_price()));
+            tMap.put("output_micros_per_million", String.valueOf(t.output_price()));
+            if (t.cached_input_price() != null) tMap.put("cached_input_micros_per_million", String.valueOf(t.cached_input_price()));
+            if (t.cache_write_price() != null) tMap.put("cache_write_micros_per_million", String.valueOf(t.cache_write_price()));
+            if (t.reasoning_price() != null) tMap.put("reasoning_micros_per_million", String.valueOf(t.reasoning_price()));
+            tMap.put("weight", weights.getOrDefault(t.id(), 100));
+            prices.put(t.id(), tMap);
         }
         Map<String, Object> snap = new LinkedHashMap<>();
         snap.put("carrier", "USD");
         snap.put("unit", "micros_per_million_tokens");
         snap.put("targets", prices);
+        snap.put("weights", weights);
         return snap;
     }
 
@@ -919,6 +983,21 @@ public class CatalogController {
         }
     }
 
+    private List<String> parseJsonTargetIds(String json) {
+        if (json == null || json.isBlank()) return List.of();
+        try {
+            List<?> raw = mapper.readValue(json, List.class);
+            List<String> out = new ArrayList<>();
+            for (Object o : raw) {
+                if (o instanceof String s) out.add(s);
+                else if (o instanceof Map<?, ?> m && m.get("target_id") instanceof String ts) out.add(ts);
+            }
+            return out;
+        } catch (Exception e) {
+            return List.of();
+        }
+    }
+
     private Map<String, Object> parseJsonMap(String json) {
         if (json == null || json.isBlank()) return Map.of();
         try {
@@ -928,18 +1007,44 @@ public class CatalogController {
         }
     }
 
-    private static List<String> parseTargetIds(Object raw) {
-        if (!(raw instanceof List<?> list) || list.isEmpty() || list.size() > 2) {
-            throw new GatewayException(400, "validation_error", "targets must contain 1 or 2 UUIDs");
+    private static ParsedTargets parseTargetSpecs(Object rawTargets, Object rawWeights) {
+        if (!(rawTargets instanceof List<?> list) || list.isEmpty() || list.size() > 8) {
+            throw new GatewayException(400, "validation_error", "targets must contain 1 to 8 target entries");
         }
-        List<String> out = new ArrayList<>();
-        for (Object o : list) {
-            if (!(o instanceof String s) || !ControlAuthService.isUuid(s)) {
-                throw new GatewayException(400, "validation_error", "target must be a valid UUID");
+        Map<String, Integer> weights = new LinkedHashMap<>();
+        if (rawWeights instanceof Map<?, ?> wm) {
+            for (Map.Entry<?, ?> e : wm.entrySet()) {
+                if (e.getKey() instanceof String k && e.getValue() instanceof Number n) {
+                    int w = n.intValue();
+                    if (w < 0 || w > 10_000) throw new GatewayException(400, "validation_error", "weight must be between 0 and 10000");
+                    weights.put(k, w);
+                }
             }
-            out.add(s);
         }
-        return out;
+        List<String> ids = new ArrayList<>();
+        for (Object o : list) {
+            if (o instanceof String s && ControlAuthService.isUuid(s)) {
+                ids.add(s);
+                weights.putIfAbsent(s, 100);
+            } else if (o instanceof Map<?, ?> m) {
+                Object tidObj = m.get("target_id") != null ? m.get("target_id") : m.get("id");
+                if (!(tidObj instanceof String tid) || !ControlAuthService.isUuid(tid)) {
+                    throw new GatewayException(400, "validation_error", "target_id must be a valid UUID");
+                }
+                int w = 100;
+                if (m.get("weight") != null) {
+                    if (!(m.get("weight") instanceof Number wn) || wn.intValue() < 0 || wn.intValue() > 10_000) {
+                        throw new GatewayException(400, "validation_error", "weight must be between 0 and 10000");
+                    }
+                    w = wn.intValue();
+                }
+                ids.add(tid);
+                weights.put(tid, w);
+            } else {
+                throw new GatewayException(400, "validation_error", "target must be a valid UUID or {target_id, weight} object");
+            }
+        }
+        return new ParsedTargets(ids, weights);
     }
 
     private static List<String> parseCapabilities(Object val) {

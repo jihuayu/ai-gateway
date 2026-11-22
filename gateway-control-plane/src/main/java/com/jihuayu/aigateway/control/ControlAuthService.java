@@ -45,11 +45,26 @@ public class ControlAuthService {
         String name,
         String budget_micros,
         Integer rpm,
+        Integer tpm,
         Integer concurrency,
         Integer max_output_tokens,
         Instant created_at,
         Instant updated_at
-    ) {}
+    ) {
+        public ProjectRow(
+            String id,
+            String workspace_id,
+            String name,
+            String budget_micros,
+            Integer rpm,
+            Integer concurrency,
+            Integer max_output_tokens,
+            Instant created_at,
+            Instant updated_at
+        ) {
+            this(id, workspace_id, name, budget_micros, rpm, null, concurrency, max_output_tokens, created_at, updated_at);
+        }
+    }
 
     public record ProjectAccess(SessionInfo auth, ProjectRow project) {}
 
@@ -230,7 +245,7 @@ public class ControlAuthService {
         }
         try (Connection conn = pool.getConnection();
              PreparedStatement ps = conn.prepareStatement("""
-                 SELECT p.id::text, p.workspace_id::text, p.name, p.budget_micros::text, p.rpm, p.concurrency, p.max_output_tokens, p.created_at, p.updated_at
+                 SELECT p.id::text, p.workspace_id::text, p.name, p.budget_micros::text, p.rpm, p.tpm, p.concurrency, p.max_output_tokens, p.created_at, p.updated_at
                    FROM projects p
                   WHERE p.id = ?::uuid AND p.workspace_id = ?::uuid
                     AND (? = 'admin' OR EXISTS (SELECT 1 FROM project_members m WHERE m.project_id = p.id AND m.user_id = ?::uuid))
@@ -245,18 +260,21 @@ public class ControlAuthService {
                 }
                 int rpm = rs.getInt(5);
                 Integer rpmVal = rs.wasNull() ? null : rpm;
-                int conc = rs.getInt(6);
+                int tpm = rs.getInt(6);
+                Integer tpmVal = rs.wasNull() ? null : tpm;
+                int conc = rs.getInt(7);
                 Integer concVal = rs.wasNull() ? null : conc;
-                int maxOut = rs.getInt(7);
+                int maxOut = rs.getInt(8);
                 Integer maxOutVal = rs.wasNull() ? null : maxOut;
-                Timestamp cAt = rs.getTimestamp(8);
-                Timestamp uAt = rs.getTimestamp(9);
+                Timestamp cAt = rs.getTimestamp(9);
+                Timestamp uAt = rs.getTimestamp(10);
                 ProjectRow row = new ProjectRow(
                     rs.getString(1),
                     rs.getString(2),
                     rs.getString(3),
                     rs.getString(4),
                     rpmVal,
+                    tpmVal,
                     concVal,
                     maxOutVal,
                     cAt != null ? cAt.toInstant() : Instant.now(),

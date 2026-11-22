@@ -93,7 +93,7 @@ public class IdentityController {
                 try (PreparedStatement ps = conn.prepareStatement("""
                     INSERT INTO projects (id, workspace_id, name)
                     VALUES (?::uuid, ?::uuid, ?)
-                    RETURNING id::text, name, budget_micros::text, rpm, concurrency, max_output_tokens
+                    RETURNING id::text, name, budget_micros::text, rpm, tpm, concurrency, max_output_tokens
                     """)) {
                     ps.setString(1, projectId);
                     ps.setString(2, workspaceId);
@@ -104,8 +104,9 @@ public class IdentityController {
                             projMap.put("name", rs.getString(2));
                             projMap.put("budget_micros", rs.getString(3));
                             int rpm = rs.getInt(4); projMap.put("rpm", rs.wasNull() ? null : rpm);
-                            int conc = rs.getInt(5); projMap.put("concurrency", rs.wasNull() ? null : conc);
-                            int maxOut = rs.getInt(6); projMap.put("max_output_tokens", rs.wasNull() ? null : maxOut);
+                            int tpm = rs.getInt(5); projMap.put("tpm", rs.wasNull() ? null : tpm);
+                            int conc = rs.getInt(6); projMap.put("concurrency", rs.wasNull() ? null : conc);
+                            int maxOut = rs.getInt(7); projMap.put("max_output_tokens", rs.wasNull() ? null : maxOut);
                         }
                     }
                 }
@@ -225,7 +226,7 @@ public class IdentityController {
         List<Map<String, Object>> items = new ArrayList<>();
         try (Connection conn = pool.getConnection();
              PreparedStatement ps = conn.prepareStatement("""
-                 SELECT id::text, workspace_id::text, name, budget_micros::text, rpm, concurrency, max_output_tokens, created_at, updated_at
+                 SELECT id::text, workspace_id::text, name, budget_micros::text, rpm, tpm, concurrency, max_output_tokens, created_at, updated_at
                    FROM projects
                   WHERE workspace_id = ?::uuid
                     AND (? = 'admin' OR id = ANY(?::uuid[]))
@@ -252,6 +253,7 @@ public class IdentityController {
         String name = requireNonBlank(body.get("name"), "name", 100);
         Long budgetMicros = parseOptionalLong(body, "budget_micros", "budgetMicros", 0L, HotContract.MAX_SAFE_INTEGER);
         Integer rpm = parseOptionalInt(body, "rpm", null, 1, 1_000_000);
+        Integer tpm = parseOptionalInt(body, "tpm", null, 1, 1_000_000_000);
         Integer concurrency = parseOptionalInt(body, "concurrency", null, 1, 10_000);
         Integer maxOutput = parseOptionalInt(body, "max_output_tokens", "maxOutputTokens", 1, 1_000_000);
         String id = UUID.randomUUID().toString();
@@ -262,17 +264,18 @@ public class IdentityController {
             conn.setAutoCommit(false);
             try {
                 try (PreparedStatement ps = conn.prepareStatement("""
-                    INSERT INTO projects (id, workspace_id, name, budget_micros, rpm, concurrency, max_output_tokens)
-                    VALUES (?::uuid, ?::uuid, ?, ?, ?, ?, ?)
-                    RETURNING id::text, workspace_id::text, name, budget_micros::text, rpm, concurrency, max_output_tokens, created_at, updated_at
+                    INSERT INTO projects (id, workspace_id, name, budget_micros, rpm, tpm, concurrency, max_output_tokens)
+                    VALUES (?::uuid, ?::uuid, ?, ?, ?, ?, ?, ?)
+                    RETURNING id::text, workspace_id::text, name, budget_micros::text, rpm, tpm, concurrency, max_output_tokens, created_at, updated_at
                     """)) {
                     ps.setString(1, id);
                     ps.setString(2, auth.workspaceId());
                     ps.setString(3, name);
                     setNullableLong(ps, 4, budgetMicros);
                     setNullableInt(ps, 5, rpm);
-                    setNullableInt(ps, 6, concurrency);
-                    setNullableInt(ps, 7, maxOutput);
+                    setNullableInt(ps, 6, tpm);
+                    setNullableInt(ps, 7, concurrency);
+                    setNullableInt(ps, 8, maxOutput);
                     try (ResultSet rs = ps.executeQuery()) {
                         rs.next();
                         created = readProjectRow(rs);
@@ -287,6 +290,7 @@ public class IdentityController {
                 auditChanges.put("name", name);
                 auditChanges.put("budget_micros", budgetMicros);
                 auditChanges.put("rpm", rpm);
+                auditChanges.put("tpm", tpm);
                 auditChanges.put("concurrency", concurrency);
                 auditChanges.put("max_output_tokens", maxOutput);
                 authService.audit(conn, auth, id, "project.create", "project", id, auditChanges);
@@ -321,6 +325,7 @@ public class IdentityController {
         map.put("name", access.project().name());
         map.put("budget_micros", access.project().budget_micros());
         map.put("rpm", access.project().rpm());
+        map.put("tpm", access.project().tpm());
         map.put("concurrency", access.project().concurrency());
         map.put("max_output_tokens", access.project().max_output_tokens());
         map.put("created_at", access.project().created_at().toString());
@@ -359,6 +364,12 @@ public class IdentityController {
             params.add(rpm);
             changes.put("rpm", rpm);
         }
+        if (body.containsKey("tpm")) {
+            Integer tpm = parseOptionalInt(body, "tpm", null, 1, 1_000_000_000);
+            sets.add("tpm = ?");
+            params.add(tpm);
+            changes.put("tpm", tpm);
+        }
         if (body.containsKey("concurrency")) {
             Integer conc = parseOptionalInt(body, "concurrency", null, 1, 10_000);
             sets.add("concurrency = ?");
@@ -379,7 +390,7 @@ public class IdentityController {
         try (Connection conn = pool.getConnection();
              PreparedStatement ps = conn.prepareStatement(
                  "UPDATE projects SET " + String.join(", ", sets) + ", updated_at = now() WHERE id = ?::uuid " +
-                 "RETURNING id::text, workspace_id::text, name, budget_micros::text, rpm, concurrency, max_output_tokens, created_at, updated_at")) {
+                 "RETURNING id::text, workspace_id::text, name, budget_micros::text, rpm, tpm, concurrency, max_output_tokens, created_at, updated_at")) {
             for (int i = 0; i < params.size(); i++) {
                 Object val = params.get(i);
                 if (val == null) ps.setNull(i + 1, Types.NULL);
@@ -645,6 +656,7 @@ public class IdentityController {
     }
 
     @PostMapping("/api/invitations/accept")
+    @SuppressWarnings("unchecked")
     public Map<String, Object> acceptInvitation(@RequestBody(required = false) Map<String, Object> body, HttpServletResponse resp) {
         if (body == null) throw new GatewayException(400, "validation_error", "Request body required");
         String token = body.get("token") instanceof String s ? s.trim() : "";
@@ -840,10 +852,11 @@ public class IdentityController {
         row.put("name", rs.getString(3));
         row.put("budget_micros", rs.getString(4));
         int rpm = rs.getInt(5); row.put("rpm", rs.wasNull() ? null : rpm);
-        int conc = rs.getInt(6); row.put("concurrency", rs.wasNull() ? null : conc);
-        int maxOut = rs.getInt(7); row.put("max_output_tokens", rs.wasNull() ? null : maxOut);
-        Timestamp cAt = rs.getTimestamp(8);
-        Timestamp uAt = rs.getTimestamp(9);
+        int tpm = rs.getInt(6); row.put("tpm", rs.wasNull() ? null : tpm);
+        int conc = rs.getInt(7); row.put("concurrency", rs.wasNull() ? null : conc);
+        int maxOut = rs.getInt(8); row.put("max_output_tokens", rs.wasNull() ? null : maxOut);
+        Timestamp cAt = rs.getTimestamp(9);
+        Timestamp uAt = rs.getTimestamp(10);
         if (cAt != null) row.put("created_at", cAt.toInstant().toString());
         if (uAt != null) row.put("updated_at", uAt.toInstant().toString());
         return row;

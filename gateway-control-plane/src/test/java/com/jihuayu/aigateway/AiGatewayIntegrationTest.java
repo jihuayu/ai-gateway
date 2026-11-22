@@ -40,8 +40,10 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -81,6 +83,9 @@ public class AiGatewayIntegrationTest {
     private com.jihuayu.aigateway.netty.NettyGatewayServer nettyServer;
 
     @Autowired
+    private DataPlaneExecutor dataPlaneExecutor;
+
+    @Autowired
     private HikariDataSource primaryPool;
 
     @Autowired
@@ -118,8 +123,10 @@ public class AiGatewayIntegrationTest {
     private int upstreamPort;
     private final AtomicInteger primaryStatus = new AtomicInteger(200);
     private final AtomicBoolean forceInvalidJsonOutput = new AtomicBoolean(false);
+    private final AtomicBoolean returnCachedAndReasoningUsage = new AtomicBoolean(false);
     private final AtomicInteger primaryCalls = new AtomicInteger(0);
     private final AtomicInteger fallbackCalls = new AtomicInteger(0);
+    private final Set<String> observedAuthHeaders = ConcurrentHashMap.newKeySet();
 
     private HttpClient httpClient;
     private String sessionCookie;
@@ -153,6 +160,7 @@ public class AiGatewayIntegrationTest {
         hotBilling.setEpoch(hotRuntime.getEpoch());
         hotProjector.setExpectedEpoch(hotRuntime.getEpoch());
         hotBilling.initialize();
+        dataPlaneExecutor.resetCircuitBreakers();
 
         httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
@@ -195,6 +203,8 @@ public class AiGatewayIntegrationTest {
         });
 
         mockUpstream.createContext("/v1/chat/completions", (HttpExchange exchange) -> {
+            String authH = exchange.getRequestHeaders().getFirst("Authorization");
+            if (authH != null) observedAuthHeaders.add(authH);
             byte[] reqBytes = exchange.getRequestBody().readAllBytes();
             Map<?, ?> reqJson = mapper.readValue(reqBytes, Map.class);
             String model = String.valueOf(reqJson.get("model"));
@@ -206,7 +216,7 @@ public class AiGatewayIntegrationTest {
                 primaryCalls.incrementAndGet();
                 int st = primaryStatus.get();
                 if (st != 200) {
-                    byte[] err = "{\"error\":{\"message\":\"rate limited\"}}".getBytes(StandardCharsets.UTF_8);
+                    byte[] err = "{\"error\":{\"message\":\"upstream unavailable or rate limited\"}}".getBytes(StandardCharsets.UTF_8);
                     exchange.getResponseHeaders().set("Content-Type", "application/json");
                     exchange.getResponseHeaders().set("Retry-After", "2");
                     exchange.sendResponseHeaders(st, err.length);
@@ -286,6 +296,35 @@ public class AiGatewayIntegrationTest {
                       "usage": { "prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150 }
                     }
                     """.formatted(model, contentVal);
+                byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set("Content-Type", "application/json");
+                exchange.sendResponseHeaders(200, bytes.length);
+                try (OutputStream os = exchange.getResponseBody()) {
+                    os.write(bytes);
+                }
+            } else if (returnCachedAndReasoningUsage.get()) {
+                String json = """
+                    {
+                      "id": "up_cache_reason_1",
+                      "object": "chat.completion",
+                      "created": 1700000000,
+                      "model": "%s",
+                      "choices": [
+                        {
+                          "index": 0,
+                          "message": { "role": "assistant", "content": "Hello from %s" },
+                          "finish_reason": "stop"
+                        }
+                      ],
+                      "usage": {
+                        "prompt_tokens": 100,
+                        "completion_tokens": 50,
+                        "total_tokens": 150,
+                        "prompt_tokens_details": { "cached_tokens": 50 },
+                        "completion_tokens_details": { "reasoning_tokens": 25 }
+                      }
+                    }
+                    """.formatted(model, model);
                 byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
                 exchange.getResponseHeaders().set("Content-Type", "application/json");
                 exchange.sendResponseHeaders(200, bytes.length);
@@ -486,7 +525,7 @@ public class AiGatewayIntegrationTest {
             .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
             .header("Authorization", "Bearer " + apiKeyPlaintext)
             .header("Content-Type", "application/json")
-            .POST(HttpRequest.BodyPublishers.ofString("{\"model\":\"support-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"top_p\":0.9}"))
+            .POST(HttpRequest.BodyPublishers.ofString("{\"model\":\"support-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"unknown_custom_param\":0.9}"))
             .build();
         HttpResponse<String> badParamResp = httpClient.send(badParamReq, HttpResponse.BodyHandlers.ofString());
         assertEquals(400, badParamResp.statusCode());
@@ -523,6 +562,7 @@ public class AiGatewayIntegrationTest {
             assertTrue(fbResp.body().contains("Hello from gpt-fallback"));
         } finally {
             primaryStatus.set(200);
+            dataPlaneExecutor.resetCircuitBreakers();
         }
 
         // Verify PG still has 0 rows before HotProjector drains
@@ -614,7 +654,6 @@ public class AiGatewayIntegrationTest {
         hotProjector.drain(5_000L);
         eventWorker.tick();
 
-        // Check usage_hourly reflects 450 actual and 1000 estimated before correction
         try (Connection conn = primaryPool.getConnection();
              PreparedStatement ps = conn.prepareStatement("SELECT COALESCE(sum(actual_micros),0)::bigint, COALESCE(sum(estimated_micros),0)::bigint, COALESCE(sum(event_count),0)::bigint FROM usage_hourly WHERE project_id = ?::uuid")) {
             ps.setString(1, projectId);
@@ -626,7 +665,6 @@ public class AiGatewayIntegrationTest {
             }
         }
 
-        // Deliver actual usage correction (actualMicros = 350 -> net delta = -650, shifts from estimated to actual)
         AttemptRecord knownAttempt = new AttemptRecord(
             1, primaryTargetId, "gpt-primary", "ok", 200, null,
             true, false, true, 150L, 100L, 350L, 1000L, false, 15L
@@ -642,7 +680,6 @@ public class AiGatewayIntegrationTest {
         hotProjector.drain(5_000L);
         eventWorker.tick();
 
-        // Verify incremental usage_hourly transferred 1000 estimated -> 350 actual (total actual = 800, estimated = 0, event_count = 4)
         try (Connection conn = primaryPool.getConnection();
              PreparedStatement ps = conn.prepareStatement("SELECT COALESCE(sum(actual_micros),0)::bigint, COALESCE(sum(estimated_micros),0)::bigint, COALESCE(sum(event_count),0)::bigint FROM usage_hourly WHERE project_id = ?::uuid")) {
             ps.setString(1, projectId);
@@ -670,7 +707,6 @@ public class AiGatewayIntegrationTest {
     void testP1ProtocolExtensionsAndOperationalCapabilities() throws Exception {
         int nettyPort = nettyServer.getBoundPort();
 
-        // 1. P1-A: Calling tools on 'support-chat' (which only declared chat, stream) must be rejected with 400 capability_not_supported
         HttpRequest toolsOnBasicAlias = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
             .header("Authorization", "Bearer " + activeKeyPlain)
@@ -687,7 +723,6 @@ public class AiGatewayIntegrationTest {
         assertEquals(400, capRejResp.statusCode(), capRejResp.body());
         assertTrue(capRejResp.body().contains("capability_not_supported"));
 
-        // 2. Create a P1 target & alias declaring tools, json_object, json_schema, embeddings, vision, anthropic_messages
         HttpResponse<String> p1TargResp = sendAdmin("POST", "/api/providers/" + providerId + "/targets", Map.of(
             "upstream_model", "gpt-p1-full",
             "input_price", 1_000_000L,
@@ -710,7 +745,6 @@ public class AiGatewayIntegrationTest {
         HttpResponse<String> p1PubResp = sendAdmin("POST", "/api/aliases/" + p1AliasId + "/publish", Map.of("expectedVersion", 1), true);
         assertEquals(200, p1PubResp.statusCode(), p1PubResp.body());
 
-        // 3. P1-B: Tool Calling positive test on agent-pro (200 micro-USD)
         HttpRequest toolCallReq = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
             .header("Authorization", "Bearer " + activeKeyPlain)
@@ -728,7 +762,6 @@ public class AiGatewayIntegrationTest {
         assertTrue(toolCallResp.body().contains("get_weather"));
         assertTrue(toolCallResp.body().contains("tool_calls"));
 
-        // 4. P1-C: Structured Output json_schema positive & invalid-JSON negative test (200 micro-USD for valid, 200 micro-USD for invalid attempt that executed upstream)
         HttpRequest structReq = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
             .header("Authorization", "Bearer " + activeKeyPlain)
@@ -757,7 +790,6 @@ public class AiGatewayIntegrationTest {
             forceInvalidJsonOutput.set(false);
         }
 
-        // 5. P1-D: Embeddings endpoint POST /v1/embeddings on Netty port (50 prompt tokens * 1 micro = 50 micro-USD)
         HttpRequest embReq = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/embeddings"))
             .header("Authorization", "Bearer " + activeKeyPlain)
@@ -769,7 +801,6 @@ public class AiGatewayIntegrationTest {
         assertTrue(embResp.body().contains("\"embedding\""));
         assertTrue(embResp.body().contains("\"model\":\"agent-pro\""));
 
-        // 6. P1-E: Vision Input data-URI positive & invalid MIME negative test (200 micro-USD)
         HttpRequest badVisionReq = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
             .header("Authorization", "Bearer " + activeKeyPlain)
@@ -811,7 +842,6 @@ public class AiGatewayIntegrationTest {
         HttpResponse<String> okVisionResp = httpClient.send(okVisionReq, HttpResponse.BodyHandlers.ofString());
         assertEquals(200, okVisionResp.statusCode(), okVisionResp.body());
 
-        // 7. P1-F: Native Anthropic Messages endpoint POST /v1/messages with x-api-key header (200 micro-USD)
         HttpRequest anthroReq = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/messages"))
             .header("x-api-key", activeKeyPlain)
@@ -831,7 +861,6 @@ public class AiGatewayIntegrationTest {
         assertEquals("message", anthroJson.get("type"));
         assertEquals("end_turn", anthroJson.get("stop_reason"));
 
-        // 8. P1-G: Operational capabilities - Route Version Rollback & CSV Usage Export
         HttpResponse<String> v2Draft = sendAdmin("POST", "/api/aliases/" + p1AliasId + "/versions", Map.of(
             "targets", List.of(p1TargetId, fallbackTargetId),
             "capabilities", List.of("chat", "stream")
@@ -840,7 +869,6 @@ public class AiGatewayIntegrationTest {
         HttpResponse<String> v2Pub = sendAdmin("POST", "/api/aliases/" + p1AliasId + "/publish", Map.of("expectedVersion", 2), true);
         assertEquals(200, v2Pub.statusCode(), v2Pub.body());
 
-        // Rollback from v2 back to v1 -> creates immutable published v3 with v1's full P1 capabilities
         HttpResponse<String> rbResp = sendAdmin("POST", "/api/aliases/" + p1AliasId + "/rollback", Map.of("target_version", 1), true);
         assertEquals(200, rbResp.statusCode(), rbResp.body());
         Map<?, ?> rbJson = mapper.readValue(rbResp.body(), Map.class);
@@ -858,7 +886,6 @@ public class AiGatewayIntegrationTest {
     @Test
     @Order(6)
     void testIssue21TenThousandHistoryIncrementalAggregationAndExplainPlan() throws Exception {
-        // #21: Seed 10,000 historical ledger entries and verify O(1) incremental projection latency and EXPLAIN ANALYZE index usage
         String scaleProjId = UUID.randomUUID().toString();
         String workspaceId;
         try (Connection conn = primaryPool.getConnection();
@@ -875,7 +902,6 @@ public class AiGatewayIntegrationTest {
                 ps.setString(2, workspaceId);
                 ps.executeUpdate();
             }
-            // Bulk insert 10,000 requests and 10,000 ledger rows in one CTE statement via generate_series
             try (PreparedStatement ps = conn.prepareStatement("""
                 WITH reqs AS (
                   INSERT INTO requests(request_id, project_id, period, reserve_micros, price_snapshot, status, actual_micros, created_at, updated_at)
@@ -893,7 +919,6 @@ public class AiGatewayIntegrationTest {
             }
         }
 
-        // Now measure O(1) incremental EventWorker projection for 1 new request in the 10,000-row project
         String newReqId = UUID.randomUUID().toString();
         try (Connection conn = primaryPool.getConnection()) {
             try (PreparedStatement ps = conn.prepareStatement("""
@@ -923,7 +948,6 @@ public class AiGatewayIntegrationTest {
         double incrementalMs = (System.nanoTime() - t0) / 1_000_000.0;
         assertTrue(incrementalMs < 100.0, "Incremental O(1) aggregation on 10k+ ledger should take < 100ms, took " + incrementalMs + "ms");
 
-        // Verify EXPLAIN ANALYZE uses Index Scan on ledger_request_id_idx
         StringBuilder explainPlan = new StringBuilder();
         try (Connection conn = primaryPool.getConnection();
              PreparedStatement ps = conn.prepareStatement("""
@@ -950,7 +974,6 @@ public class AiGatewayIntegrationTest {
     void testIssue22FixedResourceSseChunkForwardingAndConcurrentLoadBenchmark() throws Exception {
         int nettyPort = nettyServer.getBoundPort();
 
-        // 1. Measure SSE first-token & per-chunk forwarding latency overhead (< 20ms target)
         List<Double> chunkLatenciesMs = new ArrayList<>();
         for (int i = 0; i < 10; i++) {
             HttpRequest streamReq = HttpRequest.newBuilder()
@@ -979,7 +1002,6 @@ public class AiGatewayIntegrationTest {
         double sseChunkP95Ms = chunkLatenciesMs.get((int) Math.floor(chunkLatenciesMs.size() * 0.95));
         assertTrue(sseChunkP95Ms < 20.0, "SSE chunk forwarding P95 latency must be < 20ms, was " + sseChunkP95Ms + "ms");
 
-        // 2. Multi-concurrency (50 concurrent virtual threads, 100 requests total) buffered benchmark + exact ledger reconciliation
         int totalConcurrentRequests = 100;
         List<Double> httpLatenciesMs = Collections.synchronizedList(new ArrayList<>());
         try (ExecutorService vExec = Executors.newVirtualThreadPerTaskExecutor()) {
@@ -1014,7 +1036,6 @@ public class AiGatewayIntegrationTest {
         System.out.printf("[BENCHMARK] Netty+VirtualThreads 100 reqs: HTTP P50=%.2fms, P95=%.2fms | SSE Chunk Forwarding P95=%.2fms | Batch PG Drain=%.2fms%n",
             httpP50Ms, httpP95Ms, sseChunkP95Ms, batchDrainMs);
 
-        // Verify exact PostgreSQL ledger reconciliation against Redis real-time budget
         String rawProj = redisConn.sync().get(hotKeys.project(projectId));
         Map<?, ?> hotState = mapper.readValue(rawProj, Map.class);
         Map<?, ?> budgets = (Map<?, ?>) hotState.get("budgets");
@@ -1033,12 +1054,10 @@ public class AiGatewayIntegrationTest {
         }
     }
 
-
     @Test
     @Order(8)
     void testStandaloneZeroSqlNettyGatewayAndOracleGraalVmNativeBinary() throws Exception {
         String encKey = "0000000000000000000000000000000000000000000000000000000000000001";
-        // 1. Verify in-process zero-SQL standalone NettyGatewayMain attaches purely to Redis hot state
         try (com.jihuayu.aigateway.netty.NettyGatewayMain.StandaloneGatewayHandle standalone =
                  com.jihuayu.aigateway.netty.NettyGatewayMain.startStandalone(
                      "redis://127.0.0.1:6379", encKey, "127.0.0.1", 0, true, "java_test_ns", "aof", 10_000
@@ -1075,7 +1094,6 @@ public class AiGatewayIntegrationTest {
             assertEquals(200, chat.statusCode(), chat.body());
         }
 
-        // 2. If the Oracle GraalVM 25 native executable target/ai-gateway-netty exists, launch and test it end-to-end
         java.io.File nativeBin = new java.io.File("../gateway-data-plane/build/native/nativeCompile/ai-gateway-netty");
         if (!nativeBin.exists()) nativeBin = new java.io.File("gateway-data-plane/build/native/nativeCompile/ai-gateway-netty");
         if (nativeBin.exists() && nativeBin.canExecute()) {
@@ -1125,9 +1143,234 @@ public class AiGatewayIntegrationTest {
         }
     }
 
-
     @Test
     @Order(9)
+    void testP2Batch1ConnectionPoolStreamingAnthropicWeightedRoutingCircuitBreakerAndGranularBilling() throws Exception {
+        int nettyPort = nettyServer.getBoundPort();
+        assertTrue(dataPlaneExecutor.getPooledRequestsDispatched() > 0, "Shared HTTP connection pool must serve upstream calls");
+
+        // 1. #33: Expanded standard Chat parameters (top_p, stop, seed, presence_penalty, frequency_penalty, reasoning_effort, user)
+        HttpRequest richChatReq = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
+            .header("Authorization", "Bearer " + activeKeyPlain)
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString("""
+                {
+                  "model": "agent-pro",
+                  "messages": [{"role": "developer", "content": "Follow rules"}, {"role": "user", "content": "Hello P2"}],
+                  "top_p": 0.9,
+                  "stop": ["STOP_TOKEN"],
+                  "seed": 42,
+                  "presence_penalty": 0.5,
+                  "frequency_penalty": -0.5,
+                  "reasoning_effort": "medium",
+                  "parallel_tool_calls": true,
+                  "user": "tenant-user-01",
+                  "max_completion_tokens": 64
+                }
+                """))
+            .build();
+        HttpResponse<String> richChatResp = httpClient.send(richChatReq, HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, richChatResp.statusCode(), richChatResp.body());
+
+        // 2. #33: Real streaming SSE state machine for POST /v1/messages (stream: true)
+        HttpRequest anthroStreamReq = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/messages"))
+            .header("x-api-key", activeKeyPlain)
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString("""
+                {
+                  "model": "agent-pro",
+                  "max_tokens": 64,
+                  "stream": true,
+                  "messages": [{"role": "user", "content": "Stream Anthropic in real time"}]
+                }
+                """))
+            .build();
+        HttpResponse<String> anthroStreamResp = httpClient.send(anthroStreamReq, HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, anthroStreamResp.statusCode(), anthroStreamResp.body());
+        String sseBody = anthroStreamResp.body();
+        assertTrue(sseBody.contains("event: message_start"), sseBody);
+        assertTrue(sseBody.contains("event: content_block_start"), sseBody);
+        assertTrue(sseBody.contains("\"text\":\"Hello \""), "Must stream first chunk individually: " + sseBody);
+        assertTrue(sseBody.contains("\"text\":\"Java 25!\""), "Must stream second chunk individually: " + sseBody);
+        assertTrue(sseBody.contains("event: content_block_stop"), sseBody);
+        assertTrue(sseBody.contains("event: message_delta"), sseBody);
+        assertTrue(sseBody.contains("event: message_stop"), sseBody);
+
+        // 3. #34: Multi-key provider credential pool rotation & 503 safe fallback & Circuit Breaker cooldown
+        HttpResponse<String> poolUpdate = sendAdmin("PATCH", "/api/providers/" + providerId, Map.of(
+            "secrets", List.of("sk-pool-key-A", "sk-pool-key-B")
+        ), true);
+        assertEquals(200, poolUpdate.statusCode(), poolUpdate.body());
+        observedAuthHeaders.clear();
+
+        dataPlaneExecutor.setCircuitBreakerConfig(2, 10_000L);
+        dataPlaneExecutor.resetCircuitBreakers();
+        primaryStatus.set(503);
+        try {
+            // Two requests where primary returns 503 -> both safely fallback to gpt-fallback and trip the circuit breaker on primaryTargetId!
+            for (int i = 0; i < 2; i++) {
+                HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
+                    .header("Authorization", "Bearer " + activeKeyPlain)
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString("{\"model\":\"support-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"503 fallback\"}],\"max_tokens\":32}"))
+                    .build();
+                HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+                assertEquals(200, resp.statusCode(), resp.body());
+                assertTrue(resp.body().contains("Hello from gpt-fallback"), resp.body());
+            }
+            assertTrue(dataPlaneExecutor.isCircuitOpen(primaryTargetId), "Primary target circuit breaker must open after 2 consecutive 503 failures");
+            assertTrue(observedAuthHeaders.contains("Bearer sk-pool-key-A") && observedAuthHeaders.contains("Bearer sk-pool-key-B"),
+                "Provider key pool must rotate across both keys: " + observedAuthHeaders);
+
+            // While circuit is OPEN, a new request must bypass gpt-primary completely (0 additional primaryCalls) and go straight to gpt-fallback!
+            int beforePrimaryCalls = primaryCalls.get();
+            HttpRequest fastBypassReq = HttpRequest.newBuilder()
+                .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
+                .header("Authorization", "Bearer " + activeKeyPlain)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"model\":\"support-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"Circuit bypass\"}],\"max_tokens\":32}"))
+                .build();
+            HttpResponse<String> fastBypassResp = httpClient.send(fastBypassReq, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, fastBypassResp.statusCode(), fastBypassResp.body());
+            assertEquals(beforePrimaryCalls, primaryCalls.get(), "Open circuit breaker must skip primary target without dispatching to it");
+        } finally {
+            primaryStatus.set(200);
+            dataPlaneExecutor.resetCircuitBreakers();
+        }
+
+        // 4. #34: Multi-target weighted routing (80% primary, 20% fallback)
+        HttpResponse<String> weightedAliasResp = sendAdmin("POST", "/api/aliases", Map.of(
+            "project_id", projectId,
+            "name", "weighted-chat",
+            "targets", List.of(
+                Map.of("target_id", primaryTargetId, "weight", 80),
+                Map.of("target_id", fallbackTargetId, "weight", 20)
+            ),
+            "capabilities", List.of("chat")
+        ), true);
+        assertEquals(200, weightedAliasResp.statusCode(), weightedAliasResp.body());
+        String weightedAliasId = String.valueOf(mapper.readValue(weightedAliasResp.body(), Map.class).get("id"));
+        assertEquals(200, sendAdmin("POST", "/api/aliases/" + weightedAliasId + "/publish", Map.of("expectedVersion", 1), true).statusCode());
+
+        int primaryHits = 0;
+        int fallbackHits = 0;
+        for (int i = 0; i < 10; i++) {
+            HttpRequest wReq = HttpRequest.newBuilder()
+                .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
+                .header("Authorization", "Bearer " + activeKeyPlain)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"model\":\"weighted-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"Weight test\"}],\"max_tokens\":32}"))
+                .build();
+            HttpResponse<String> wResp = httpClient.send(wReq, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, wResp.statusCode(), wResp.body());
+            if (wResp.body().contains("gpt-primary")) primaryHits++;
+            else if (wResp.body().contains("gpt-fallback")) fallbackHits++;
+        }
+        assertEquals(8, primaryHits, "80% weight should receive 8 of 10 requests");
+        assertEquals(2, fallbackHits, "20% weight should receive 2 of 10 requests");
+
+        // 5. #35: Prompt Cache & Reasoning Token Pricing + Key-level Budget + Key-level TPM rate limit
+        HttpResponse<String> reasonTargetResp = sendAdmin("POST", "/api/providers/" + providerId + "/targets", Map.of(
+            "upstream_model", "deepseek-r1-cache",
+            "input_price", 1_000_000L,         // 1 micro / token
+            "cached_input_price", 200_000L,    // 0.2 micro / cached token
+            "output_price", 2_000_000L,        // 2 micros / regular output token
+            "reasoning_price", 4_000_000L,     // 4 micros / reasoning token
+            "capabilities", List.of("chat"),
+            "enabled", true
+        ), true);
+        assertEquals(200, reasonTargetResp.statusCode(), reasonTargetResp.body());
+        String reasonTargetId = String.valueOf(mapper.readValue(reasonTargetResp.body(), Map.class).get("id"));
+
+        HttpResponse<String> reasonAliasResp = sendAdmin("POST", "/api/aliases", Map.of(
+            "project_id", projectId,
+            "name", "reason-chat",
+            "targets", List.of(reasonTargetId),
+            "capabilities", List.of("chat")
+        ), true);
+        assertEquals(200, reasonAliasResp.statusCode(), reasonAliasResp.body());
+        String reasonAliasId = String.valueOf(mapper.readValue(reasonAliasResp.body(), Map.class).get("id"));
+        assertEquals(200, sendAdmin("POST", "/api/aliases/" + reasonAliasId + "/publish", Map.of("expectedVersion", 1), true).statusCode());
+
+        // Create a key with a strict key-level budget (300 micro-USD) and key_tpm (250 TPM)
+        HttpResponse<String> boundedKeyResp = sendAdmin("POST", "/api/keys", Map.of(
+            "project_id", projectId,
+            "name", "bounded-subbudget-key",
+            "allowed_models", List.of("reason-chat"),
+            "budget_micros", 300L,
+            "key_tpm", 250
+        ), true);
+        assertEquals(200, boundedKeyResp.statusCode(), boundedKeyResp.body());
+        String boundedKeyPlain = String.valueOf(mapper.readValue(boundedKeyResp.body(), Map.class).get("key"));
+
+        returnCachedAndReasoningUsage.set(true);
+        try {
+            // Request 1: max_tokens=20 (est input ~15 + 20 = 35 tokens <= 250 TPM; reserved ~15*1 + 20*4 = 95 <= 300 micro-USD budget)
+            // Actual usage: 100 prompt (50 cached) + 50 completion (25 reasoning)
+            // Expected cost: 50*1 + 50*0.2 + 25*2 + 25*4 = 50 + 10 + 50 + 100 = 210 micro-USD!
+            HttpRequest r1 = HttpRequest.newBuilder()
+                .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
+                .header("Authorization", "Bearer " + boundedKeyPlain)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"model\":\"reason-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"Solve\"} ],\"max_tokens\":20}"))
+                .build();
+            HttpResponse<String> resp1 = httpClient.send(r1, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, resp1.statusCode(), resp1.body());
+
+            // Now 210 micro-USD is spent on boundedKeyPlain (remaining key budget = 90 micro-USD).
+            // Request 2 with max_tokens=25 requires > 100 micro-USD reservation -> must be rejected with 429 budget_exceeded!
+            HttpRequest r2 = HttpRequest.newBuilder()
+                .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
+                .header("Authorization", "Bearer " + boundedKeyPlain)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"model\":\"reason-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"Solve 2\"} ],\"max_tokens\":25}"))
+                .build();
+            HttpResponse<String> resp2 = httpClient.send(r2, HttpResponse.BodyHandlers.ofString());
+            assertEquals(429, resp2.statusCode(), resp2.body());
+            assertTrue(resp2.body().contains("budget_exceeded"), resp2.body());
+        } finally {
+            returnCachedAndReasoningUsage.set(false);
+        }
+
+        // Test key_tpm rate limit enforcement: create a key with key_tpm=50 and send a request with max_tokens=60 -> 429 rate_limit_exceeded
+        HttpResponse<String> tpmKeyResp = sendAdmin("POST", "/api/keys", Map.of(
+            "project_id", projectId,
+            "name", "strict-tpm-key",
+            "allowed_models", List.of("reason-chat"),
+            "key_tpm", 50
+        ), true);
+        assertEquals(200, tpmKeyResp.statusCode(), tpmKeyResp.body());
+        String tpmKeyPlain = String.valueOf(mapper.readValue(tpmKeyResp.body(), Map.class).get("key"));
+
+        HttpRequest tpmExceedReq = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
+            .header("Authorization", "Bearer " + tpmKeyPlain)
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString("{\"model\":\"reason-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"TPM test\"}],\"max_tokens\":60}"))
+            .build();
+        HttpResponse<String> tpmExceedResp = httpClient.send(tpmExceedReq, HttpResponse.BodyHandlers.ofString());
+        assertEquals(429, tpmExceedResp.statusCode(), tpmExceedResp.body());
+        assertTrue(tpmExceedResp.body().contains("rate_limit_exceeded"), tpmExceedResp.body());
+
+        // Drain and verify cached_input_tokens (50), reasoning_tokens (25), and actual_micros (210) in PostgreSQL requests table
+        hotProjector.drain(5_000L);
+        eventWorker.tick();
+        try (Connection conn = primaryPool.getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT actual_micros, cached_input_tokens, reasoning_tokens FROM requests WHERE alias_name = 'reason-chat'")) {
+            try (ResultSet rs = ps.executeQuery()) {
+                assertTrue(rs.next(), "reason-chat request must be projected to PostgreSQL");
+                assertEquals(210L, rs.getLong(1));
+                assertEquals(50L, rs.getLong(2));
+                assertEquals(25L, rs.getLong(3));
+            }
+        }
+    }
+
+    @Test
+    @Order(10)
     void testV020ModernJavaSpecsClusterModulithJooqAndSpringAi() throws Exception {
         // 1. Verify Spring Modulith module structure & boundaries
         org.springframework.modulith.core.ApplicationModules modules =
@@ -1216,6 +1459,7 @@ public class AiGatewayIntegrationTest {
             assertEquals("gateway-node-b", respB.headers().firstValue("x-gateway-node").orElse(""));
         }
     }
+
 
     private HttpResponse<String> sendAdmin(String method, String path, Object body, boolean includeCsrf) throws Exception {
         HttpRequest.Builder b = HttpRequest.newBuilder()

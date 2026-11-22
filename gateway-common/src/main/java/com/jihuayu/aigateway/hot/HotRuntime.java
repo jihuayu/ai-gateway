@@ -107,12 +107,6 @@ public class HotRuntime {
         return keys;
     }
 
-
-    /**
-     * Zero-SQL data-plane initialization for standalone / GraalVM Native Netty Gateway nodes.
-     * Verifies Redis AOF durability and attaches to the active Redis financial epoch & run_id
-     * published by the Control Plane without requiring any PostgreSQL connection.
-     */
     public void initializeFromRedisOnly() {
         RedisCommands<String, String> redis = redisConn.sync();
         if ("aof".equals(durability)) {
@@ -305,6 +299,7 @@ public class HotRuntime {
             Map<String, Object> projectSeed = new LinkedHashMap<>();
             projectSeed.put("epoch", this.epoch);
             projectSeed.put("budgets", budgets);
+            projectSeed.put("key_budgets", Map.of());
             projectSeed.put("leases", Map.of());
             seeds.put(pid, mapper.writeValueAsString(projectSeed));
         }
@@ -312,9 +307,9 @@ public class HotRuntime {
         Map<String, Map<String, Object>> entries = new LinkedHashMap<>();
         String readKeysSql = """
             SELECT k.key_hash, k.id::text AS key_id, k.prefix, k.allowed_models::text AS allowed_models,
-                   k.expires_at, k.revoked_at, k.key_rpm,
+                   k.expires_at, k.revoked_at, k.key_rpm, k.key_tpm, k.budget_micros::text AS key_budget_micros,
                    p.id::text AS project_id, p.workspace_id::text AS workspace_id,
-                   p.rpm AS project_rpm, p.concurrency, p.budget_micros::text AS budget_micros, p.max_output_tokens
+                   p.rpm AS project_rpm, p.tpm AS project_tpm, p.concurrency, p.budget_micros::text AS budget_micros, p.max_output_tokens
               FROM api_keys k JOIN projects p ON p.id = k.project_id
              ORDER BY k.id
             """;
@@ -334,10 +329,15 @@ public class HotRuntime {
                 row.put("revoked_at", revokedAt != null ? revokedAt.toInstant().toString() : null);
                 int keyRpm = rs.getInt("key_rpm");
                 row.put("key_rpm", rs.wasNull() ? null : keyRpm);
+                int keyTpm = rs.getInt("key_tpm");
+                row.put("key_tpm", rs.wasNull() ? null : keyTpm);
+                row.put("key_budget_micros", rs.getString("key_budget_micros"));
                 row.put("project_id", rs.getString("project_id"));
                 row.put("workspace_id", rs.getString("workspace_id"));
                 int projRpm = rs.getInt("project_rpm");
                 row.put("project_rpm", rs.wasNull() ? null : projRpm);
+                int projTpm = rs.getInt("project_tpm");
+                row.put("project_tpm", rs.wasNull() ? null : projTpm);
                 int conc = rs.getInt("concurrency");
                 row.put("concurrency", rs.wasNull() ? null : conc);
                 row.put("budget_micros", rs.getString("budget_micros"));
@@ -401,15 +401,18 @@ public class HotRuntime {
         } catch (Exception ignored) {}
     }
 
+    private record TargetSpec(String targetId, int weight) {}
+
     private RouteSnapshot loadRouteFromDb(Connection conn, String projectId, String workspaceId, String aliasName) throws Exception {
         String aliasId;
         String routeVersionId;
         int version;
-        List<String> targetIds;
+        List<TargetSpec> targetSpecs;
         List<String> capabilities;
         try (PreparedStatement ps = conn.prepareStatement("""
             SELECT a.id::text AS alias_id, a.name AS alias_name, rv.id::text AS route_version_id,
-                   rv.version, rv.targets::text AS targets, rv.capabilities::text AS capabilities
+                   rv.version, rv.targets::text AS targets, rv.capabilities::text AS capabilities,
+                   rv.price_snapshot::text AS price_snapshot
               FROM aliases a JOIN route_versions rv ON rv.id = a.current_version_id
              WHERE a.project_id = ?::uuid AND a.name = ? AND rv.status = 'published'
             """)) {
@@ -420,21 +423,27 @@ public class HotRuntime {
                 aliasId = rs.getString("alias_id");
                 routeVersionId = rs.getString("route_version_id");
                 version = rs.getInt("version");
-                targetIds = parseStringListOrObjects(rs.getString("targets"));
-                if (targetIds.size() > 2) {
-                    targetIds = targetIds.subList(0, 2);
+                targetSpecs = parseTargetSpecs(rs.getString("targets"), rs.getString("price_snapshot"));
+                if (targetSpecs.size() > 8) {
+                    targetSpecs = targetSpecs.subList(0, 8);
                 }
                 capabilities = parseStringList(rs.getString("capabilities"));
             }
         }
-        if (targetIds.isEmpty()) {
+        if (targetSpecs.isEmpty()) {
             return new RouteSnapshot(aliasId, aliasName, routeVersionId, version, capabilities, List.of());
+        }
+        List<String> targetIds = targetSpecs.stream().map(TargetSpec::targetId).toList();
+        Map<String, Integer> weightsById = new LinkedHashMap<>();
+        for (TargetSpec ts : targetSpecs) {
+            weightsById.put(ts.targetId(), ts.weight());
         }
         Map<String, RouteTarget> byId = new LinkedHashMap<>();
         try (PreparedStatement ps = conn.prepareStatement("""
             SELECT t.id::text AS id, t.upstream_model, t.input_price, t.output_price,
+                   t.cached_input_price, t.cache_write_price, t.reasoning_price,
                    t.capabilities::text AS capabilities, t.enabled AS target_enabled,
-                   p.base_url, p.encrypted_secret, p.enabled AS provider_enabled
+                   p.protocol, p.base_url, p.encrypted_secret, p.enabled AS provider_enabled
               FROM model_targets t JOIN providers p ON p.id = t.provider_id
              WHERE t.id = ANY(?::uuid[]) AND p.workspace_id = ?::uuid
             """)) {
@@ -443,11 +452,23 @@ public class HotRuntime {
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     String tid = rs.getString("id");
+                    long cachedIn = rs.getLong("cached_input_price");
+                    Long cachedInObj = rs.wasNull() ? null : cachedIn;
+                    long cacheWrite = rs.getLong("cache_write_price");
+                    Long cacheWriteObj = rs.wasNull() ? null : cacheWrite;
+                    long reasoningP = rs.getLong("reasoning_price");
+                    Long reasoningObj = rs.wasNull() ? null : reasoningP;
+                    String protocol = rs.getString("protocol");
                     byId.put(tid, new RouteTarget(
                         tid,
                         rs.getString("upstream_model"),
                         rs.getLong("input_price"),
                         rs.getLong("output_price"),
+                        cachedInObj,
+                        cacheWriteObj,
+                        reasoningObj,
+                        protocol != null ? protocol : "openai",
+                        weightsById.getOrDefault(tid, 100),
                         rs.getString("base_url"),
                         rs.getString("encrypted_secret"),
                         rs.getBoolean("target_enabled"),
@@ -479,21 +500,45 @@ public class HotRuntime {
         }
     }
 
-    private List<String> parseStringListOrObjects(String json) {
-        if (json == null || json.isBlank()) return List.of();
+    private List<TargetSpec> parseTargetSpecs(String targetsJson, String priceSnapshotJson) {
+        if (targetsJson == null || targetsJson.isBlank()) return List.of();
+        Map<String, Integer> snapshotWeights = new LinkedHashMap<>();
+        if (priceSnapshotJson != null && !priceSnapshotJson.isBlank()) {
+            try {
+                Map<?, ?> snap = mapper.readValue(priceSnapshotJson, Map.class);
+                if (snap.get("weights") instanceof Map<?, ?> wMap) {
+                    for (Map.Entry<?, ?> e : wMap.entrySet()) {
+                        if (e.getKey() != null && e.getValue() instanceof Number n) {
+                            snapshotWeights.put(String.valueOf(e.getKey()), Math.max(0, n.intValue()));
+                        }
+                    }
+                } else if (snap.get("targets") instanceof Map<?, ?> tMap) {
+                    for (Map.Entry<?, ?> e : tMap.entrySet()) {
+                        if (e.getKey() != null && e.getValue() instanceof Map<?, ?> tm && tm.get("weight") instanceof Number n) {
+                            snapshotWeights.put(String.valueOf(e.getKey()), Math.max(0, n.intValue()));
+                        }
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
         try {
-            List<?> raw = mapper.readValue(json, List.class);
-            List<String> out = new ArrayList<>();
+            List<?> raw = mapper.readValue(targetsJson, List.class);
+            List<TargetSpec> out = new ArrayList<>();
             for (Object o : raw) {
                 if (o instanceof String s && !s.isBlank()) {
-                    out.add(s);
+                    out.add(new TargetSpec(s, snapshotWeights.getOrDefault(s, 100)));
                 } else if (o instanceof Map<?, ?> map) {
+                    String id = null;
                     for (String k : List.of("target_id", "targetId", "id", "model_target_id")) {
                         Object val = map.get(k);
                         if (val instanceof String s && !s.isBlank()) {
-                            out.add(s);
+                            id = s;
                             break;
                         }
+                    }
+                    if (id != null) {
+                        int weight = map.get("weight") instanceof Number n ? Math.max(0, n.intValue()) : snapshotWeights.getOrDefault(id, 100);
+                        out.add(new TargetSpec(id, weight));
                     }
                 }
             }
@@ -503,7 +548,6 @@ public class HotRuntime {
         }
     }
 
-    /** Zero-SQL data-plane authentication directly against Redis config hash */
     @SuppressWarnings("unchecked")
     public KeyContext authenticateBearerHeader(String authorizationHeader) {
         String token = extractBearerToken(authorizationHeader);
@@ -552,6 +596,8 @@ public class HotRuntime {
         }
         int projectRpm = row.get("project_rpm") instanceof Number n ? n.intValue() : DEFAULT_PROJECT_RPM;
         int keyRpm = row.get("key_rpm") instanceof Number n ? n.intValue() : DEFAULT_KEY_RPM;
+        Integer projectTpm = row.get("project_tpm") instanceof Number n ? n.intValue() : null;
+        Integer keyTpm = row.get("key_tpm") instanceof Number n ? n.intValue() : null;
         int concurrency = row.get("concurrency") instanceof Number n ? n.intValue() : DEFAULT_CONCURRENCY;
         long budgetMicros = -1L;
         Object bObj = row.get("budget_micros");
@@ -559,6 +605,14 @@ public class HotRuntime {
             budgetMicros = Long.parseLong(String.valueOf(bObj));
             if (budgetMicros < 0 || budgetMicros > HotContract.MAX_SAFE_INTEGER) {
                 throw new GatewayException(500, "invalid_configuration", "budget_micros 配置无效。");
+            }
+        }
+        long keyBudgetMicros = -1L;
+        Object kbObj = row.get("key_budget_micros");
+        if (kbObj != null && !String.valueOf(kbObj).isBlank() && !"null".equals(String.valueOf(kbObj))) {
+            keyBudgetMicros = Long.parseLong(String.valueOf(kbObj));
+            if (keyBudgetMicros < 0 || keyBudgetMicros > HotContract.MAX_SAFE_INTEGER) {
+                throw new GatewayException(500, "invalid_configuration", "key_budget_micros 配置无效。");
             }
         }
         Integer maxOutputTokens = row.get("max_output_tokens") instanceof Number n ? n.intValue() : null;
@@ -573,8 +627,11 @@ public class HotRuntime {
             allowedModels,
             projectRpm,
             keyRpm,
+            projectTpm,
+            keyTpm,
             concurrency,
             budgetMicros,
+            keyBudgetMicros,
             maxOutputTokens
         );
     }
@@ -635,10 +692,6 @@ public class HotRuntime {
 
     private volatile io.lettuce.core.pubsub.StatefulRedisPubSubConnection<String, String> pubSubConn;
 
-    /**
-     * Subscribes this data-plane gateway node to Redis Pub/Sub cluster invalidation broadcasts
-     * so multi-node horizontal gateway clusters pre-warm new snapshots within milliseconds.
-     */
     public void subscribeClusterUpdates(io.lettuce.core.RedisClient redisClient) {
         if (redisClient == null || pubSubConn != null) return;
         io.lettuce.core.pubsub.StatefulRedisPubSubConnection<String, String> sub = redisClient.connectPubSub();
@@ -670,7 +723,6 @@ public class HotRuntime {
             pubSubConn = null;
         }
     }
-
 
     public static String extractRunId(String infoServer) {
         if (infoServer == null) return null;
