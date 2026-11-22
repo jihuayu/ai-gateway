@@ -13,28 +13,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Full-Stack AI Gateway Dockerfile (Spring Boot 4.2 Control Plane + Direct Netty 4.2 Data Plane on Oracle GraalVM 25)
+# Control Plane & Full-Stack AI Gateway Dockerfile (Spring Boot 4.2 + Spring Modulith + jOOQ + Flyway on Oracle GraalVM 25)
 # Build command:
 #   docker build -f Dockerfile -t ghcr.io/jihuayu/ai-gateway:latest .
 
-# Stage 1: Build Executable JAR with Oracle GraalVM 25
 FROM container-registry.oracle.com/graalvm/jdk:25 AS builder
 WORKDIR /workspace
 
-RUN command -v mvn >/dev/null 2>&1 || ( \
-    curl -fsSL https://archive.apache.org/dist/maven/maven-3/3.9.9/binaries/apache-maven-3.9.9-bin.tar.gz \
-    | tar -xz -C /opt && ln -s /opt/apache-maven-3.9.9/bin/mvn /usr/local/bin/mvn )
+COPY gradlew settings.gradle.kts build.gradle.kts ./
+COPY gradle ./gradle
+COPY gateway-common ./gateway-common
+COPY gateway-data-plane ./gateway-data-plane
+COPY gateway-control-plane ./gateway-control-plane
 
-COPY pom.xml ./
-COPY src ./src
+RUN chmod +x ./gradlew && ./gradlew :gateway-control-plane:bootJar -x test --no-daemon
 
-RUN mvn -B -DskipTests package
-
-# Stage 2: Oracle GraalVM 25 Runtime Image (Virtual Threads + JIT/AOT Ready)
 FROM container-registry.oracle.com/graalvm/jdk:25
 WORKDIR /app
 
-COPY --from=builder /workspace/target/ai-gateway-0.1.0.jar /app/ai-gateway.jar
+COPY --from=builder /workspace/gateway-control-plane/build/libs/gateway-control-plane-0.2.0.jar /app/ai-gateway.jar
 
 ENV HOST=0.0.0.0 \
     ADMIN_PORT=3000 \
@@ -48,4 +45,4 @@ ENV HOST=0.0.0.0 \
 
 EXPOSE 3000 3001
 
-ENTRYPOINT ["java", "-jar", "/app/ai-gateway.jar"]
+ENTRYPOINT ["java", "--enable-preview", "-jar", "/app/ai-gateway.jar"]
