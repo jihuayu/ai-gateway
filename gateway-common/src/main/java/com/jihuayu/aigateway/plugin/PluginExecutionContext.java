@@ -204,6 +204,24 @@ public class PluginExecutionContext {
                 }
             }
         }
+        Object stateObj = requestJson.get("state");
+        if (stateObj instanceof String s && !s.isBlank()) {
+            if (!sb.isEmpty()) sb.append('\n');
+            sb.append(s);
+        } else if (stateObj != null) {
+            if (!sb.isEmpty()) sb.append('\n');
+            sb.append(String.valueOf(stateObj));
+        }
+        Object promptObj = requestJson.get("prompt");
+        if (promptObj instanceof String s && !s.isBlank()) {
+            if (!sb.isEmpty()) sb.append('\n');
+            sb.append(s);
+        }
+        Object queryObj = requestJson.get("query");
+        if (queryObj instanceof String s && !s.isBlank()) {
+            if (!sb.isEmpty()) sb.append('\n');
+            sb.append(s);
+        }
         return sb.toString();
     }
 
@@ -249,6 +267,30 @@ public class PluginExecutionContext {
             String next = transformer.apply(s);
             if (!s.equals(next)) {
                 requestJson.put("input", next);
+                changed = true;
+            }
+        }
+        Object stateObj = requestJson.get("state");
+        if (stateObj instanceof String s) {
+            String next = transformer.apply(s);
+            if (!s.equals(next)) {
+                requestJson.put("state", next);
+                changed = true;
+            }
+        }
+        Object promptObj = requestJson.get("prompt");
+        if (promptObj instanceof String s) {
+            String next = transformer.apply(s);
+            if (!s.equals(next)) {
+                requestJson.put("prompt", next);
+                changed = true;
+            }
+        }
+        Object queryObj = requestJson.get("query");
+        if (queryObj instanceof String s) {
+            String next = transformer.apply(s);
+            if (!s.equals(next)) {
+                requestJson.put("query", next);
                 changed = true;
             }
         }

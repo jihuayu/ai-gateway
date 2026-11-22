@@ -204,6 +204,15 @@ public class NettyGatewayServer {
                         dataPlane.handleImageGenerations(authHeader, bodyBytes, requestId, sender);
                         return;
                     }
+                    if (HttpMethod.POST.equals(method) && ("/v1/systemone".equals(path) || "/jev/v1/systemone".equals(path))) {
+                        Map<String, String> inHeaders = new java.util.LinkedHashMap<>();
+                        for (Map.Entry<String, String> h : req.headers()) {
+                            inHeaders.put(h.getKey().toLowerCase(), h.getValue());
+                        }
+                        NettyResponseSender sender = new NettyResponseSender(ch, scopedNode);
+                        dataPlane.handleSystemOne(authHeader, inHeaders, bodyBytes, requestId, sender);
+                        return;
+                    }
                     if (HttpMethod.POST.equals(method) && "/v1/messages".equals(path)) {
                         NettyResponseSender sender = new NettyResponseSender(ch, scopedNode);
                         dataPlane.handleAnthropicMessages(authHeader, xApiKeyHeader, bodyBytes, requestId, sender);
