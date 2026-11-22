@@ -60,6 +60,7 @@ public class DynamicJarPluginLoader {
             if (!plugin.name().equals(plugin.id())) {
                 activePlugins.put(plugin.name(), plugin);
             }
+            activePlugins.put(plugin.getClass().getName(), plugin);
         }
     }
 

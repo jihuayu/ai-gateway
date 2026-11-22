@@ -1,13 +1,15 @@
 package com.jihuayu.aigateway.plugin;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
- * Built-in Semantic Response Cache Plugin (#37).
+ * Built-in Semantic Response Cache Plugin (#37) upgraded with Caffeine W-TinyLFU L1 scope management.
  *
  * <p>Computes a 64-dimensional L2-normalized character/word n-gram feature embedding vector over the prompt text
  * and evaluates cosine similarity against project+model scoped cached entries at {@code POST_ADMIT_PRE_DISPATCH}.
@@ -26,7 +28,11 @@ public class SemanticCachePlugin implements GatewayPlugin {
         long expiresAtMillis
     ) {}
 
-    private final Map<String, List<SemanticEntry>> entriesByScope = new ConcurrentHashMap<>();
+    private final Cache<String, List<SemanticEntry>> entriesByScope = Caffeine.newBuilder()
+        .maximumSize(4_096)
+        .expireAfterAccess(Duration.ofMinutes(20))
+        .recordStats()
+        .build();
 
     @Override
     public String id() {
@@ -67,7 +73,7 @@ public class SemanticCachePlugin implements GatewayPlugin {
         ctx.attributes().put("semantic_cache.vector", queryVec);
         ctx.attributes().put("semantic_cache.scope", scopeKey);
 
-        List<SemanticEntry> list = entriesByScope.get(scopeKey);
+        List<SemanticEntry> list = entriesByScope.getIfPresent(scopeKey);
         if (list != null && !list.isEmpty()) {
             long now = System.currentTimeMillis();
             SemanticEntry best = null;
@@ -117,7 +123,7 @@ public class SemanticCachePlugin implements GatewayPlugin {
         if (ttlCfg instanceof Number n && n.longValue() > 0) {
             ttlSeconds = n.longValue();
         }
-        List<SemanticEntry> bucket = entriesByScope.computeIfAbsent(scopeKey, _ -> new CopyOnWriteArrayList<>());
+        List<SemanticEntry> bucket = entriesByScope.get(scopeKey, _ -> new CopyOnWriteArrayList<>());
         if (bucket.size() >= 128) {
             bucket.remove(0);
         }
@@ -171,6 +177,6 @@ public class SemanticCachePlugin implements GatewayPlugin {
     }
 
     public void clearCache() {
-        entriesByScope.clear();
+        entriesByScope.invalidateAll();
     }
 }

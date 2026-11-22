@@ -64,7 +64,7 @@ public class HotStream {
     }
 
     public List<StreamEntry> read(int limit) {
-        int bound = Math.max(1, Math.min(500, limit));
+        int bound = Math.max(1, Math.min(2000, limit));
         RedisCommands<String, String> redis = redisConn.sync();
         ensureGroup(redis);
         List<StreamEntry> out = new ArrayList<>();

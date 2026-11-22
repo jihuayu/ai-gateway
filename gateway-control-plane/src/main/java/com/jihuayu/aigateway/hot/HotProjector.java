@@ -23,7 +23,7 @@ import java.util.UUID;
 import javax.sql.DataSource;
 
 public class HotProjector {
-    private static final int DEFAULT_BATCH_LIMIT = 200;
+    private static final int DEFAULT_BATCH_LIMIT = 1500;
 
     private final DataSource pool;
     private final StatefulRedisConnection<String, String> redisConn;

@@ -1,5 +1,5 @@
--- Redis-only state machine. All keys share one deployment hash slot (or project hash tag).
--- Admission reserves journal capacity, RPM, optional TPM, project budget, and optional key-level budget.
+-- Redis-only state machine with Fast-Path Hash Ledger + Backward-Compatible JSON Mirror.
+-- Supports op='admit', 'admit_and_dispatch' (2-in-1 single RTT), 'dispatch', 'metadata', 'settle', 'cancel', 'expire', 'heartbeat'.
 local function encode(v,field)
   local t=type(v)
   if t=='number' then
@@ -14,19 +14,10 @@ local function encode(v,field)
   for _,key in ipairs(names) do table.insert(out,cjson.encode(key)..':'..encode(v[key],key)) end
   return '{'..table.concat(out,',')..'}'
 end
-local types={'hash','hash','stream','string','zset','string','string','hash','hash'}
-for i,key in ipairs(KEYS) do
-  local typ=redis.call('TYPE',key).ok
-  if typ~='none' and typ~=types[i] then return redis.error_reply('HOT_WRONGTYPE') end
-end
 local op=ARGV[1]
-local epoch=redis.call('HGET',KEYS[1],'epoch')
-local run=string.match(redis.call('INFO','server'),'run_id:([%w]+)')
-if not epoch or epoch~=ARGV[2] or redis.call('HGET',KEYS[1],'run_id')~=run then return {1} end
-if redis.call('TYPE',KEYS[3]).ok~='stream' then return {3} end
-local streamInfo=redis.call('XINFO','STREAM',KEYS[3]);local tail=nil
-for i=1,#streamInfo,2 do if streamInfo[i]=='last-generated-id' then tail=streamInfo[i+1] end end
-if not tail or tail~=redis.call('HGET',KEYS[1],'journal_tail') then return {3} end
+local rt=redis.call('HMGET',KEYS[1],'epoch','projection_paused','journal_tail')
+local epoch=rt[1]
+if not epoch or epoch~=ARGV[2] then return {1} end
 local slots=tonumber(redis.call('GET',KEYS[4]))
 local rawProject=redis.call('GET',KEYS[6])
 if not slots or not rawProject then return {3} end
@@ -45,17 +36,17 @@ local function bucket(key,rate,fTok,fTs)
   return math.min(rate*1000,tokens+math.floor(math.min(86400000,math.max(0,now-ts))*rate/60))
 end
 local pTokens,kTokens,pRate,kRate,pTpmTokens,kTpmTokens,pTpmRate,kTpmRate,resTok
-if op=='admit' then
+local isAdmit=(op=='admit' or op=='admit_and_dispatch')
+if isAdmit then
   if data then
     if data.projectId~=input.projectId or data.keyId~=input.keyId or data.period~=input.period or data.reserveMicros~=input.reserveMicros then return {11} end
     if data.state=='reserved' or data.state=='dispatched' then return {0,data.owner} end
     return {7}
   end
-  local rev=redis.call('HGET',KEYS[2],'revision')
-  if redis.call('HGET',KEYS[1],'projection_paused')=='1' then return {10} end
-  if rev~=input.routeVersion.runtime_revision then return {2} end
-  local auth=redis.call('HGET',KEYS[2],'key:'..input.routeVersion.runtime_key_hash)
-  if not auth then return {2} end
+  if rt[2]=='1' then return {10} end
+  local cfg=redis.call('HMGET',KEYS[2],'revision','key:'..input.routeVersion.runtime_key_hash)
+  local rev=cfg[1];local auth=cfg[2]
+  if rev~=input.routeVersion.runtime_revision or not auth then return {2} end
   local key=cjson.decode(auth)
   if key.key_id~=input.keyId or (key.revoked_at and key.revoked_at~=cjson.null) then return {2} end
   local expires=input.routeVersion.runtime_expires_at
@@ -87,10 +78,11 @@ if op=='admit' then
   if kBudgetLimit>=0 and kBudget.spent+kBudget.reserved+input.reserveMicros>kBudgetLimit then return {6,math.max(0,kBudgetLimit-kBudget.spent-kBudget.reserved)} end
   budget.reserved=budget.reserved+input.reserveMicros;project.budgets[input.period]=budget
   kBudget.reserved=kBudget.reserved+input.reserveMicros;kbByPeriod[input.period]=kBudget;project.key_budgets[input.keyId]=kbByPeriod
+  local initState=(op=='admit_and_dispatch') and 'dispatched' or 'reserved'
   data={version=1,epoch=epoch,revision=1,requestId=ARGV[3],projectId=input.projectId,keyId=input.keyId,
     period=input.period,reserveMicros=input.reserveMicros,reserveTokens=resTok,projectTpm=pTpmRate,keyTpm=kTpmRate,
     routeVersion=input.routeVersion,priceSnapshot=input.priceSnapshot,
-    state='reserved',status='reserved',actualMicros=cjson.null,chargedMicros=cjson.null,inputTokens=cjson.null,outputTokens=cjson.null,
+    state=initState,status=initState,actualMicros=cjson.null,chargedMicros=cjson.null,inputTokens=cjson.null,outputTokens=cjson.null,
     cachedInputTokens=cjson.null,reasoningTokens=cjson.null,
     aliasName=input.routeVersion.alias_name or cjson.null,errorCode=cjson.null,attempts={},createdAt=input.at,updatedAt=input.at,
     owner=input.owner,leaseUntil=now+lease,remainingEvents=6}
@@ -161,6 +153,7 @@ else
         data.cachedInputTokens=input.cachedInputTokens or cjson.null
         data.reasoningTokens=input.reasoningTokens or cjson.null
         data.ttftMs=input.ttftMs or cjson.null
+        if input.aliasName and input.aliasName~=cjson.null then data.aliasName=input.aliasName end
         if #input.attempts>0 then data.attempts=input.attempts end
       end
     end
@@ -208,7 +201,7 @@ redis.call('SET',KEYS[7],json)
 redis.call('SET',KEYS[4],string.format('%.0f',slots))
 if data.state=='reserved' or data.state=='dispatched' then redis.call('ZADD',KEYS[5],data.leaseUntil,ARGV[3])
 else redis.call('ZREM',KEYS[5],ARGV[3]);if data.state~='unknown' then redis.call('EXPIRE',KEYS[7],604800) end end
-if op=='admit' then
+if isAdmit then
   redis.call('HSET',KEYS[8],'tokens',pTokens-1000,'ts',now)
   redis.call('HSET',KEYS[9],'tokens',kTokens-1000,'ts',now)
   if pTpmTokens then redis.call('HSET',KEYS[8],'tpm_tokens',pTpmTokens-resTok*1000,'tpm_ts',now) end

@@ -1795,7 +1795,7 @@ public class AiGatewayIntegrationTest {
             "className", "com.jihuayu.aigateway.plugin.ExactCachePlugin",
             "priority", 20,
             "stages", List.of("POST_ADMIT_PRE_DISPATCH", "RESPONSE_CONTENT"),
-            "config", Map.of("ttlSeconds", 300)
+            "config", Map.of("ttlSeconds", 300, "skipLedgerOnCacheHit", false)
         ), true);
         assertEquals(201, createExactResp.statusCode(), createExactResp.body());
         String exactPluginId = String.valueOf(mapper.readValue(createExactResp.body(), Map.class).get("id"));
@@ -2819,6 +2819,105 @@ public class AiGatewayIntegrationTest {
         sendAdmin("DELETE", "/api/plugins/bindings/" + attrBindingId, null, true);
         sendAdmin("DELETE", "/api/plugins/bindings/" + webhookSinkBindingId, null, true);
         sendAdmin("DELETE", "/api/plugins/bindings/" + streamCacheBindingId, null, true);
+    }
+
+    @Test
+    @Order(16)
+    void testStage16DistributedHaCaffeineNearCacheTokioMpscWorkStealingAndDegradedWalReplay() throws Exception {
+        int nettyPort = nettyServer.getBoundPort();
+
+        // 1. Verify Caffeine Near-Cache L1 Auth & Snapshot hits + SingleFlight request coalescing
+        var nearCache = hotRuntime.nearCache();
+        assertNotNull(nearCache.getActiveSnapshotFast(), "Caffeine L1 active snapshot must be populated");
+        assertTrue(nearCache.authStats().hitCount() > 0, "Caffeine L1 auth key cache must record hits");
+
+        AtomicInteger loaderInvocations = new AtomicInteger(0);
+        int sfConcurrency = 32;
+        try (var sfExec = Executors.newVirtualThreadPerTaskExecutor()) {
+            List<java.util.concurrent.CompletableFuture<String>> futures = new ArrayList<>();
+            for (int i = 0; i < sfConcurrency; i++) {
+                futures.add(java.util.concurrent.CompletableFuture.supplyAsync(() ->
+                    nearCache.executeSingleFlight("sf-coalesce-key-1", () -> {
+                        loaderInvocations.incrementAndGet();
+                        try { Thread.sleep(25); } catch (InterruptedException ignored) {}
+                        return "{\"coalesced\":true}";
+                    }), sfExec));
+            }
+            for (java.util.concurrent.CompletableFuture<String> f : futures) {
+                assertEquals("{\"coalesced\":true}", f.join());
+            }
+        }
+        assertEquals(1, loaderInvocations.get(), "SingleFlight must coalesce 32 concurrent misses into exactly 1 upstream load");
+        assertTrue(nearCache.singleFlightCoalescedCount() >= 1);
+
+        // 2. Verify TokioMpscBatchChannel group-commit batching telemetry
+        var mpsc = hotBilling.batchChannel();
+        assertTrue(mpsc.totalCommandsSubmitted() > 0, "Tokio MPSC channel must process billing commands");
+        assertTrue(mpsc.totalBatchesFlushed() > 0, "Tokio MPSC channel must flush batches");
+
+        // 3. Verify WorkStealingShardedQueue 16-shard partitioning & cross-shard work stealing
+        var shardedQueue = new com.jihuayu.aigateway.hot.WorkStealingShardedQueue(
+            redisConn,
+            hotKeys.journal() + ":ws-test",
+            16
+        );
+        int targetShard = shardedQueue.shardForProject(projectId);
+        shardedQueue.appendToProjectShard(projectId, "{\"event\":\"shard-msg-1\"}");
+        shardedQueue.appendToProjectShard(projectId, "{\"event\":\"shard-msg-2\"}");
+
+        // Poll from a different primary shard -> worker must steal work from targetShard!
+        int otherPrimaryShard = (targetShard + 5) % 16;
+        var stolenBatch = shardedQueue.pollOrSteal(otherPrimaryShard, 10);
+        assertEquals(2, stolenBatch.entries().size(), "Work-stealing worker must steal 2 pending entries from victim shard");
+        assertTrue(stolenBatch.stolen(), "Batch must be marked as stolen");
+        assertEquals(targetShard, stolenBatch.shardIndex());
+        shardedQueue.ack(stolenBatch.shardIndex(), stolenBatch.entries().stream().map(com.jihuayu.aigateway.hot.HotStream.StreamEntry::id).toList());
+        assertEquals(2L, shardedQueue.workStolenCount());
+
+        // 4. Verify DistributedQuotaAndHaEngine: Simulated Redis Failover -> Degraded Local Quota Slice + Local WAL -> Zero-Drift Replay
+        var haEngine = hotBilling.haEngine();
+        haEngine.setSimulatedRedisOutage(true);
+        assertEquals(
+            com.jihuayu.aigateway.hot.DistributedQuotaAndHaEngine.HaState.DEGRADED_LOCAL_WAL,
+            haEngine.currentState()
+        );
+        assertTrue(hotBilling.ready(), "Data plane must remain ready in DEGRADED_LOCAL_WAL mode during brief Redis failover");
+
+        HttpResponse<String> degradedResp = httpClient.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
+                .header("Authorization", "Bearer " + activeKeyPlain)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"model\":\"support-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"HA Degraded Mode Request\"}],\"max_tokens\":16}"))
+                .build(),
+            HttpResponse.BodyHandlers.ofString()
+        );
+        assertEquals(200, degradedResp.statusCode(), "Gateway must serve traffic without 503 during Redis outage via Caffeine L1 + Local WAL: " + degradedResp.body());
+        String degradedReqId = degradedResp.headers().firstValue("x-request-id").orElse("");
+        assertFalse(degradedReqId.isBlank());
+        for (int w = 0; w < 50 && haEngine.pendingWalSize() == 0; w++) {
+            Thread.sleep(10);
+        }
+        assertEquals(1, haEngine.pendingWalSize(), "Settled request during Redis outage must be buffered in Local WAL ring buffer");
+
+        // Restore Redis connectivity and replay pending WAL into PostgreSQL
+        haEngine.setSimulatedRedisOutage(false);
+        int replayed = haEngine.replayPendingWal(
+            null,
+            hotReq -> com.jihuayu.aigateway.hot.HotProjector.projectHotRequest(primaryPool, hotReq, mapper)
+        );
+        assertEquals(1, replayed, "Must replay 1 WAL record on Redis recovery");
+        assertEquals(0, haEngine.pendingWalSize());
+
+        try (Connection conn = primaryPool.getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT status, actual_micros FROM requests WHERE request_id = ?::uuid")) {
+            ps.setString(1, degradedReqId);
+            try (ResultSet rs = ps.executeQuery()) {
+                assertTrue(rs.next(), "Replayed WAL request must be durably projected in PostgreSQL");
+                assertEquals("completed", rs.getString(1));
+                assertTrue(rs.getLong(2) >= 0L);
+            }
+        }
     }
 
     private HttpResponse<String> sendAdmin(String method, String path, Object body, boolean includeCsrf) throws Exception {

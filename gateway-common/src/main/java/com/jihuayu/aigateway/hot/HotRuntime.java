@@ -21,7 +21,6 @@ import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -66,8 +65,7 @@ public class HotRuntime {
         """;
 
     private static final String AUTH_LUA = """
-        local run=string.match(redis.call('INFO','server'),'run_id:([%w]+)')
-        if redis.call('HGET',KEYS[1],'epoch')~=ARGV[1] or redis.call('HGET',KEYS[1],'run_id')~=run then return {false,false} end
+        if redis.call('HGET',KEYS[1],'epoch')~=ARGV[1] then return {false,false} end
         return redis.call('HMGET',KEYS[2],'revision','key:'..ARGV[2])
         """;
 
@@ -77,12 +75,7 @@ public class HotRuntime {
     private final String namespace;
     private final String durability;
     private final ObjectMapper mapper;
-    private final Map<String, Snapshot> cache = Collections.synchronizedMap(new LinkedHashMap<>(8, 0.75f, true) {
-        @Override
-        protected boolean removeEldestEntry(Map.Entry<String, Snapshot> eldest) {
-            return size() > 4;
-        }
-    });
+    private final CaffeineNearCacheHub nearCache = new CaffeineNearCacheHub();
 
     private volatile String epoch = "";
 
@@ -114,28 +107,29 @@ public class HotRuntime {
         return redisConn;
     }
 
+    public CaffeineNearCacheHub nearCache() {
+        return nearCache;
+    }
+
     public Snapshot latestSnapshot() {
+        Snapshot fast = nearCache.getActiveSnapshotFast();
+        if (fast != null) {
+            return fast;
+        }
         try {
             String rev = redisConn.sync().hget(keys.config(), "revision");
             if (rev != null && !rev.isBlank()) {
-                Snapshot s = cache.get(rev);
+                Snapshot s = nearCache.getSnapshot(rev);
                 if (s != null) return s;
                 String json = redisConn.sync().get(keys.snapshot(rev));
                 if (json != null && !json.isBlank()) {
                     s = mapper.readValue(json, Snapshot.class);
-                    cache.put(rev, s);
+                    nearCache.putSnapshot(rev, s);
                     return s;
                 }
             }
         } catch (Exception ignored) {}
-        synchronized (cache) {
-            if (!cache.isEmpty()) {
-                Snapshot last = null;
-                for (Snapshot s : cache.values()) last = s;
-                return last;
-            }
-        }
-        return null;
+        return nearCache.getActiveSnapshotFast();
     }
 
     public void initializeFromRedisOnly() {
@@ -432,7 +426,7 @@ public class HotRuntime {
             keys.prefix(),
             mapper.writeValueAsString(entries)
         );
-        cache.put(revision, snapshot);
+        nearCache.putSnapshot(revision, snapshot);
         try {
             redis.publish(keys.configChannel(), revision);
         } catch (Exception ignored) {}
@@ -585,10 +579,34 @@ public class HotRuntime {
         }
     }
 
+    public void invalidateAuthKeyCache(String keyHash) {
+        nearCache.invalidateKeyHash(keyHash);
+    }
+
     @SuppressWarnings("unchecked")
     public KeyContext authenticateBearerHeader(String authorizationHeader) {
         String token = extractBearerToken(authorizationHeader);
         String keyHash = SecurityUtils.hashKey(token);
+        KeyContext cachedCtx = nearCache.getAuthKey(keyHash);
+        if (cachedCtx != null) {
+            String activeRev = nearCache.getActiveRevision();
+            if (activeRev == null || activeRev.isBlank() || activeRev.equals(cachedCtx.runtimeRevision())) {
+                return cachedCtx;
+            }
+        }
+        return loadAndCacheAuthKeyFromRedis(keyHash);
+    }
+
+    @SuppressWarnings("unchecked")
+    public KeyContext refreshBearerHeaderFromRedis(String authorizationHeader) {
+        String token = extractBearerToken(authorizationHeader);
+        String keyHash = SecurityUtils.hashKey(token);
+        nearCache.invalidateKeyHash(keyHash);
+        return loadAndCacheAuthKeyFromRedis(keyHash);
+    }
+
+    @SuppressWarnings("unchecked")
+    private KeyContext loadAndCacheAuthKeyFromRedis(String keyHash) {
         List<Object> fields;
         try {
             fields = redisConn.sync().eval(
@@ -599,6 +617,10 @@ public class HotRuntime {
                 keyHash
             );
         } catch (Exception e) {
+            KeyContext stale = nearCache.getStaleAuthKeyOnRedisFailure(keyHash);
+            if (stale != null) {
+                return stale;
+            }
             throw new GatewayException(503, "configuration_unavailable", "运行配置暂不可用。");
         }
         if (fields == null || fields.isEmpty() || !(fields.get(0) instanceof String revision) || revision.isBlank()) {
@@ -660,7 +682,7 @@ public class HotRuntime {
         }
         Integer maxOutputTokens = row.get("max_output_tokens") instanceof Number n ? n.intValue() : null;
 
-        return new KeyContext(
+        KeyContext resolvedCtx = new KeyContext(
             revision,
             keyHash,
             expiresAtMs,
@@ -678,6 +700,8 @@ public class HotRuntime {
             keyBudgetMicros,
             maxOutputTokens
         );
+        nearCache.putAuthKey(resolvedCtx);
+        return resolvedCtx;
     }
 
     public static String extractBearerToken(String authorizationHeader) {
@@ -692,16 +716,21 @@ public class HotRuntime {
     }
 
     private Snapshot resolveSnapshot(KeyContext key) {
-        String revision = key.runtimeRevision();
+        String activeRev = nearCache.getActiveRevision();
+        String revision = (activeRev != null && !activeRev.isBlank()) ? activeRev : key.runtimeRevision();
         if (revision == null || revision.isBlank()) {
             throw new GatewayException(503, "configuration_unavailable", "运行配置未就绪。");
         }
-        Snapshot snap = cache.get(revision);
+        Snapshot snap = nearCache.getSnapshot(revision);
         if (snap == null) {
             String json;
             try {
                 json = redisConn.sync().get(keys.snapshot(revision));
             } catch (Exception e) {
+                Snapshot fallback = nearCache.getActiveSnapshotFast();
+                if (fallback != null) {
+                    return fallback;
+                }
                 throw new GatewayException(503, "configuration_unavailable", "运行配置暂不可用。");
             }
             if (json == null || json.isBlank()) {
@@ -715,7 +744,7 @@ public class HotRuntime {
             if (!this.epoch.equals(snap.epoch()) || snap.routes() == null || snap.models() == null) {
                 throw new GatewayException(503, "configuration_unavailable", "运行配置代次不匹配。");
             }
-            cache.put(revision, snap);
+            nearCache.putSnapshot(revision, snap);
         }
         return snap;
     }
@@ -884,7 +913,7 @@ public class HotRuntime {
     }
 
     public void clearLocalCache() {
-        cache.clear();
+        nearCache.invalidateAll();
     }
 
     private volatile io.lettuce.core.pubsub.StatefulRedisPubSubConnection<String, String> pubSubConn;
@@ -897,12 +926,16 @@ public class HotRuntime {
             public void message(String channel, String revision) {
                 if (keys.configChannel().equals(channel) && revision != null && !revision.isBlank()) {
                     try {
-                        if (!cache.containsKey(revision)) {
+                        if (revision.startsWith("invalidate-key:")) {
+                            nearCache.invalidateKeyHash(revision.substring("invalidate-key:".length()));
+                            return;
+                        }
+                        if (nearCache.getSnapshot(revision) == null) {
                             String json = redisConn.sync().get(keys.snapshot(revision));
                             if (json != null && !json.isBlank()) {
                                 Snapshot snap = mapper.readValue(json, Snapshot.class);
                                 if (epoch != null && epoch.equals(snap.epoch())) {
-                                    cache.put(revision, snap);
+                                    nearCache.putSnapshot(revision, snap);
                                 }
                             }
                         }
