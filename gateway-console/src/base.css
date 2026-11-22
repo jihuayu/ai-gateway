@@ -1,0 +1,180 @@
+@layer ui-sdk;
+
+@stylex;
+
+@layer ui-sdk {
+  :where([data-slot][hidden]:not([hidden="until-found"])) {
+    display: none !important;
+  }
+}
+
+:root {
+  /* shadcn/ui Neutral Zinc Light Palette & Design Tokens */
+  --bg-canvas: #fafafa;
+  --bg-background: #ffffff;
+  --bg-card: #ffffff;
+  --bg-muted: #f4f4f5;
+  --bg-accent: #f4f4f5;
+  --bg-primary: #18181b;
+  --bg-primary-hover: #27272a;
+  --bg-secondary: #f4f4f5;
+  --bg-secondary-hover: #e4e4e7;
+  --bg-destructive: #dc2626;
+  --bg-destructive-hover: #b91c1c;
+  --bg-destructive-subtle: #fef2f2;
+  --bg-success-subtle: #f0fdf4;
+  --bg-warning-subtle: #fffbeb;
+  --bg-info-subtle: #f0f9ff;
+
+  --fg-default: #09090b;
+  --fg-muted: #71717a;
+  --fg-subtle: #a1a1aa;
+  --fg-on-primary: #fafafa;
+  --fg-destructive: #dc2626;
+  --fg-success: #15803d;
+  --fg-warning: #b45309;
+  --fg-info: #0369a1;
+
+  --border-default: #e4e4e7;
+  --border-input: #e4e4e7;
+  --border-strong: #d4d4d8;
+  --border-destructive: #fecaca;
+  --border-success: #bbf7d0;
+  --border-warning: #fde68a;
+  --border-info: #bae6fd;
+
+  --ring-focus: #18181b;
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 4px 12px -2px rgba(0, 0, 0, 0.08), 0 2px 4px -2px rgba(0, 0, 0, 0.04);
+  --shadow-lg: 0 20px 25px -5px rgba(0, 0, 0, 0.12), 0 8px 10px -6px rgba(0, 0, 0, 0.06);
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Inter", "Geist", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-mono: "Geist Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--bg-canvas);
+  color: var(--fg-default);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* UI SDK Button pending slot rules */
+[data-slot="button"]:not([data-pending]) [data-show="pending"],
+[data-slot="button"][data-pending] [data-show="idle"] {
+  display: none;
+}
+
+/* UI SDK SegmentedControl sliding indicator */
+[data-slot="segmented-control"] {
+  position: relative;
+  display: inline-flex;
+  isolation: isolate;
+}
+
+[data-slot="segmented-control-indicator"] {
+  position: absolute;
+  z-index: -1;
+  top: var(--segmented-control-indicator-top, 2px);
+  left: var(--segmented-control-indicator-left, 2px);
+  width: var(--segmented-control-indicator-width, 0px);
+  height: var(--segmented-control-indicator-height, calc(100% - 4px));
+  background: var(--bg-background);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-sm);
+  transition: left 160ms cubic-bezier(0.2, 0, 0, 1), width 160ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* UI SDK Meter & Progress Track indicator */
+[data-slot="meter-indicator"],
+[data-slot="progress-indicator"] {
+  height: 100%;
+  width: var(--meter-percentage, var(--progress-percentage, 0%));
+  background-color: var(--bg-primary);
+  border-radius: 9999px;
+  transition: width 220ms ease;
+}
+
+/* UI SDK Dialog & Popover Entry/Exit transitions */
+[data-slot="dialog-backdrop"],
+[data-slot="alert-dialog-backdrop"] {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(9, 9, 11, 0.45);
+  backdrop-filter: blur(2px);
+  z-index: 50;
+  transition: opacity 150ms ease;
+}
+
+[data-slot="dialog-content"],
+[data-slot="alert-dialog-content"] {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 51;
+  margin: 0;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background-color: var(--bg-card);
+  color: var(--fg-default);
+  box-shadow: var(--shadow-lg);
+  max-height: 88vh;
+  overflow-y: auto;
+  transition: opacity 150ms ease, transform 150ms ease;
+}
+
+[data-slot="dialog-content"][data-starting-style],
+[data-slot="dialog-content"][data-ending-style],
+[data-slot="alert-dialog-content"][data-starting-style],
+[data-slot="alert-dialog-content"][data-ending-style],
+[data-slot="dialog-backdrop"][data-starting-style],
+[data-slot="dialog-backdrop"][data-ending-style] {
+  opacity: 0;
+}
+
+/* UI SDK Select Popup positioning */
+[data-slot="select-content"] {
+  z-index: 60;
+  min-width: var(--anchor-width, 180px);
+  max-height: min(300px, var(--available-height, 300px));
+  overflow-y: auto;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  padding: 4px;
+}
+
+/* UI SDK Toast Region */
+[data-slot="toast-region"] {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 70;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 380px;
+  width: calc(100vw - 40px);
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
