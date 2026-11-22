@@ -122,6 +122,7 @@ public class AiGatewayIntegrationTest {
     private HttpServer mockUpstream;
     private int upstreamPort;
     private final AtomicInteger primaryStatus = new AtomicInteger(200);
+    private final AtomicInteger primarySimulatedDelayMs = new AtomicInteger(0);
     private final AtomicBoolean forceInvalidJsonOutput = new AtomicBoolean(false);
     private final AtomicBoolean returnCachedAndReasoningUsage = new AtomicBoolean(false);
     private final AtomicInteger primaryCalls = new AtomicInteger(0);
@@ -214,6 +215,10 @@ public class AiGatewayIntegrationTest {
 
             if ("gpt-primary".equals(model)) {
                 primaryCalls.incrementAndGet();
+                int delayMs = primarySimulatedDelayMs.get();
+                if (delayMs > 0 && new String(reqBytes, StandardCharsets.UTF_8).contains("[SLOW_PRIMARY_SPIKE]")) {
+                    try { Thread.sleep(delayMs); } catch (InterruptedException ignored) {}
+                }
                 int st = primaryStatus.get();
                 if (st != 200) {
                     byte[] err = "{\"error\":{\"message\":\"upstream unavailable or rate limited\"}}".getBytes(StandardCharsets.UTF_8);
@@ -2903,9 +2908,13 @@ public class AiGatewayIntegrationTest {
         // Restore Redis connectivity and replay pending WAL into PostgreSQL
         haEngine.setSimulatedRedisOutage(false);
         int replayed = haEngine.replayPendingWal(
-            null,
+            walRec -> {
+                hotBilling.admitAndDispatch(walRec.admitInput());
+                hotBilling.settle(walRec.requestId(), walRec.settleInput());
+            },
             hotReq -> com.jihuayu.aigateway.hot.HotProjector.projectHotRequest(primaryPool, hotReq, mapper)
         );
+        hotProjector.drain(5_000L);
         assertEquals(1, replayed, "Must replay 1 WAL record on Redis recovery");
         assertEquals(0, haEngine.pendingWalSize());
 
@@ -2917,6 +2926,130 @@ public class AiGatewayIntegrationTest {
                 assertEquals("completed", rs.getString(1));
                 assertTrue(rs.getLong(2) >= 0L);
             }
+        }
+    }
+
+    @Test
+    @Order(17)
+    void testStage17PeakEwmaAdaptiveTailLatencyHedgedRequestsAndBenchmark() throws Exception {
+        int nettyPort = nettyServer.getBoundPort();
+        var router = dataPlaneExecutor.pluginPipeline().leastTtftRouterPlugin();
+
+        // Simulate 450ms tail-latency spike on gpt-primary when prompt contains [SLOW_PRIMARY_SPIKE], while gpt-fallback responds in ~2ms
+        primarySimulatedDelayMs.set(450);
+        try {
+            // 1. Baseline WITHOUT Hedged Requests: 50 requests where 10% (5 requests) hit the [SLOW_PRIMARY_SPIKE]
+            List<Double> unhedgedLatenciesMs = new ArrayList<>();
+            for (int i = 0; i < 50; i++) {
+                boolean isSpike = (i % 10 == 9);
+                String msg = isSpike ? "Query [SLOW_PRIMARY_SPIKE] " + i : "Fast query " + i;
+                long t0 = System.nanoTime();
+                HttpResponse<String> r = httpClient.send(
+                    HttpRequest.newBuilder()
+                        .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
+                        .header("Authorization", "Bearer " + activeKeyPlain)
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString("{\"model\":\"support-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"" + msg + "\"}],\"max_tokens\":16}"))
+                        .build(),
+                    HttpResponse.BodyHandlers.ofString()
+                );
+                assertEquals(200, r.statusCode(), r.body());
+                unhedgedLatenciesMs.add((System.nanoTime() - t0) / 1_000_000.0);
+            }
+            Collections.sort(unhedgedLatenciesMs);
+            double unhedgedP50 = unhedgedLatenciesMs.get(24);
+            double unhedgedP95 = unhedgedLatenciesMs.get(47);
+            double unhedgedP99 = unhedgedLatenciesMs.get(49);
+            assertTrue(unhedgedP95 >= 400.0, "Without hedging, 10% tail spike must push P95 >= 400ms, got: " + unhedgedP95);
+
+            // 2. Enable Stage 5 Peak-EWMA + Adaptive Tail-Latency Hedged Requests (hedgeDelayMs = 35ms, maxHedgeRatio = 0.30)
+            HttpResponse<String> createHedgePlugin = sendAdmin("POST", "/api/plugins", Map.of(
+                "name", "builtin:router-peak-ewma-hedge",
+                "type", "BUILTIN",
+                "className", "com.jihuayu.aigateway.plugin.MicrokernelRoutingAndPolicyPlugins$LeastTtftRouterPlugin",
+                "priority", 10,
+                "stages", List.of("ROUTE_SELECT"),
+                "config", Map.of(
+                    "hedgeEnabled", true,
+                    "hedgeDelayMs", 35,
+                    "maxHedgeRatio", 0.35
+                )
+            ), true);
+            assertEquals(201, createHedgePlugin.statusCode(), createHedgePlugin.body());
+            String hedgePluginId = String.valueOf(mapper.readValue(createHedgePlugin.body(), Map.class).get("id"));
+
+            HttpResponse<String> bindHedge = sendAdmin("POST", "/api/plugins/bindings", Map.of(
+                "pluginId", hedgePluginId,
+                "scopeType", "PROJECT",
+                "scopeId", projectId,
+                "priority", 10
+            ), true);
+            assertEquals(201, bindHedge.statusCode(), bindHedge.body());
+            String hedgeBindingId = String.valueOf(mapper.readValue(bindHedge.body(), Map.class).get("id"));
+
+            // Reset Peak-EWMA baseline for primary to 5ms so primary is initially selected first
+            router.recordTargetLatencyMs(primaryTargetId, 5L);
+            router.recordTargetLatencyMs(fallbackTargetId, 8L);
+
+            List<Double> hedgedLatenciesMs = new ArrayList<>();
+            int secondaryHedgeWins = 0;
+            for (int i = 0; i < 50; i++) {
+                // Keep primary slightly lower before spike so each spike tests hedging
+                router.resetTargetLatencyMs(primaryTargetId, 5L);
+                router.resetTargetLatencyMs(fallbackTargetId, 10L);
+                boolean isSpike = (i % 10 == 9);
+                String msg = isSpike ? "Hedged query [SLOW_PRIMARY_SPIKE] " + i : "Hedged fast query " + i;
+                long t0 = System.nanoTime();
+                HttpResponse<String> r = httpClient.send(
+                    HttpRequest.newBuilder()
+                        .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
+                        .header("Authorization", "Bearer " + activeKeyPlain)
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString("{\"model\":\"support-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"" + msg + "\"}],\"max_tokens\":16}"))
+                        .build(),
+                    HttpResponse.BodyHandlers.ofString()
+                );
+                assertEquals(200, r.statusCode(), r.body());
+                hedgedLatenciesMs.add((System.nanoTime() - t0) / 1_000_000.0);
+                String hedgedHdr = r.headers().firstValue("x-gateway-hedged").orElse("");
+                if (hedgedHdr.startsWith("WON_BY_SECONDARY:")) {
+                    secondaryHedgeWins++;
+                }
+            }
+            Collections.sort(hedgedLatenciesMs);
+            double hedgedP50 = hedgedLatenciesMs.get(24);
+            double hedgedP95 = hedgedLatenciesMs.get(47);
+            double hedgedP99 = hedgedLatenciesMs.get(49);
+
+            System.out.printf(
+                "[PEAK_EWMA_HEDGE_BENCH] Unhedged: P50=%.2fms, P95=%.2fms, P99=%.2fms | Hedged (35ms threshold): P50=%.2fms, P95=%.2fms, P99=%.2fms | SecondaryWins=%d | TotalHedgeTriggers=%d%n",
+                unhedgedP50, unhedgedP95, unhedgedP99, hedgedP50, hedgedP95, hedgedP99, secondaryHedgeWins, router.totalHedgedTriggers()
+            );
+
+            assertTrue(secondaryHedgeWins >= 2, "Secondary hedge must win when primary experiences 450ms spike, got wins: " + secondaryHedgeWins);
+            assertTrue(hedgedP95 < 150.0, "Peak-EWMA Hedged Requests must cut P95 from ~455ms down below 150ms, got: " + hedgedP95);
+            assertTrue(hedgedP99 < 180.0, "Peak-EWMA Hedged Requests must cut P99 from ~465ms down below 180ms, got: " + hedgedP99);
+
+            // Verify financial reconciliation has 0 drift after hedged requests
+            hotProjector.drain(10_000L);
+            String rawProj = redisConn.sync().get(hotKeys.project(projectId));
+            Map<?, ?> hotState = mapper.readValue(rawProj, Map.class);
+            Map<?, ?> periodBudget = (Map<?, ?>) ((Map<?, ?>) hotState.get("budgets")).get(DataPlaneExecutor.utcPeriod());
+            long redisSpent = ((Number) periodBudget.get("spent")).longValue();
+            long redisReserved = ((Number) periodBudget.get("reserved")).longValue();
+            assertEquals(0L, redisReserved, "All hedged request reservations must be cleanly settled");
+            try (Connection conn = primaryPool.getConnection();
+                 PreparedStatement ps = conn.prepareStatement("SELECT COALESCE(SUM(amount_micros),0)::bigint FROM ledger WHERE project_id = ?::uuid")) {
+                ps.setString(1, projectId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    rs.next();
+                    assertEquals(redisSpent, rs.getLong(1), "Hedged requests must produce 0 micro-USD drift between Redis and PostgreSQL ledger");
+                }
+            }
+
+            sendAdmin("DELETE", "/api/plugins/bindings/" + hedgeBindingId, null, true);
+        } finally {
+            primarySimulatedDelayMs.set(0);
         }
     }
 
