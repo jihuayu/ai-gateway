@@ -35,7 +35,9 @@ import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.codec.http.LastHttpContent;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -207,6 +209,10 @@ public class NettyGatewayServer {
     }
 
     private static void sendJsonDirect(Channel ch, int status, String requestId, String nodeId, String json, Integer retryAfterSec) {
+        sendJsonDirect(ch, status, requestId, nodeId, json, retryAfterSec, Map.of());
+    }
+
+    private static void sendJsonDirect(Channel ch, int status, String requestId, String nodeId, String json, Integer retryAfterSec, Map<String, String> extraHeaders) {
         if (!ch.isActive()) return;
         byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
         FullHttpResponse resp = new DefaultFullHttpResponse(
@@ -221,6 +227,13 @@ public class NettyGatewayServer {
         if (retryAfterSec != null && retryAfterSec > 0) {
             resp.headers().set("retry-after", String.valueOf(retryAfterSec));
         }
+        if (extraHeaders != null) {
+            for (Map.Entry<String, String> e : extraHeaders.entrySet()) {
+                if (e.getKey() != null && e.getValue() != null) {
+                    resp.headers().set(e.getKey(), e.getValue());
+                }
+            }
+        }
         ch.writeAndFlush(resp);
     }
 
@@ -229,11 +242,23 @@ public class NettyGatewayServer {
         private final String nodeId;
         private final AtomicBoolean sseStarted = new AtomicBoolean(false);
         private final AtomicBoolean closed = new AtomicBoolean(false);
+        private final Map<String, String> extraHeaders = new ConcurrentHashMap<>();
 
         NettyResponseSender(Channel ch, String nodeId) {
             this.ch = ch;
             this.nodeId = nodeId;
             ch.closeFuture().addListener(f -> closed.set(true));
+        }
+
+        @Override
+        public void addResponseHeaders(Map<String, String> headers) {
+            if (headers != null) {
+                for (Map.Entry<String, String> e : headers.entrySet()) {
+                    if (e.getKey() != null && e.getValue() != null) {
+                        extraHeaders.put(e.getKey(), e.getValue());
+                    }
+                }
+            }
         }
 
         @Override
@@ -243,7 +268,7 @@ public class NettyGatewayServer {
 
         @Override
         public void sendJson(int status, String requestId, String jsonBody, Integer retryAfterSec) {
-            sendJsonDirect(ch, status, requestId, nodeId, jsonBody, retryAfterSec);
+            sendJsonDirect(ch, status, requestId, nodeId, jsonBody, retryAfterSec, extraHeaders);
         }
 
         @Override
@@ -256,6 +281,11 @@ public class NettyGatewayServer {
                 resp.headers().set(HttpHeaderNames.CONNECTION, HttpHeaderValues.KEEP_ALIVE);
                 resp.headers().set("x-accel-buffering", "no");
                 resp.headers().set("x-request-id", requestId);
+                for (Map.Entry<String, String> e : extraHeaders.entrySet()) {
+                    if (e.getKey() != null && e.getValue() != null) {
+                        resp.headers().set(e.getKey(), e.getValue());
+                    }
+                }
                 ch.writeAndFlush(resp);
             }
         }
