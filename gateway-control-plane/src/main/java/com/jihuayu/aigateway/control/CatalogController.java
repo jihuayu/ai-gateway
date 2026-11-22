@@ -606,7 +606,7 @@ public class CatalogController {
         try (Connection conn = pool.getConnection();
              PreparedStatement ps = conn.prepareStatement("""
                  SELECT id::text, project_id::text, name, prefix, created_by::text, allowed_models::text,
-                        expires_at, revoked_at, key_rpm, key_tpm, budget_micros::text, created_at, last_used_at
+                        expires_at, revoked_at, key_rpm, key_tpm, budget_micros::text, created_at, last_used_at, allowed_mcp_tools::text
                    FROM api_keys
                   WHERE project_id = ?::uuid
                   ORDER BY created_at DESC
@@ -634,6 +634,7 @@ public class CatalogController {
                     row.put("created_at", cAt != null ? cAt.toInstant().toString() : null);
                     Timestamp lAt = rs.getTimestamp(13);
                     row.put("last_used_at", lAt != null ? lAt.toInstant().toString() : null);
+                    row.put("allowed_mcp_tools", parseJsonList(rs.getString(14)));
                     items.add(row);
                 }
             }
@@ -664,6 +665,21 @@ public class CatalogController {
             }
         }
         List<String> allowedModels = new ArrayList<>(allowedSet);
+
+        Set<String> allowedMcpSet = new LinkedHashSet<>();
+        Object allowedMcpRaw = body.get("allowed_mcp_tools") != null ? body.get("allowed_mcp_tools") : body.get("allowedMcpTools");
+        if (allowedMcpRaw != null) {
+            if (!(allowedMcpRaw instanceof List<?> list) || list.size() > 200) {
+                throw new GatewayException(400, "validation_error", "allowed_mcp_tools invalid");
+            }
+            for (Object o : list) {
+                if (!(o instanceof String s) || s.trim().isEmpty() || s.trim().length() > 150) {
+                    throw new GatewayException(400, "validation_error", "allowed_mcp_tools item invalid");
+                }
+                allowedMcpSet.add(s.trim());
+            }
+        }
+        List<String> allowedMcpTools = new ArrayList<>(allowedMcpSet);
 
         Instant expiresAt;
         if (body.get("expires_at") instanceof String expStr && !expStr.isBlank()) {
@@ -724,9 +740,9 @@ public class CatalogController {
 
             Map<String, Object> created = new LinkedHashMap<>();
             try (PreparedStatement ps = conn.prepareStatement("""
-                INSERT INTO api_keys (id, project_id, name, key_hash, prefix, created_by, allowed_models, expires_at, key_rpm, key_tpm, budget_micros)
-                VALUES (?::uuid, ?::uuid, ?, ?, ?, ?::uuid, ?::jsonb, ?, ?, ?, ?)
-                RETURNING id::text, project_id::text, name, prefix, created_by::text, allowed_models::text, expires_at, key_rpm, key_tpm, budget_micros::text, created_at
+                INSERT INTO api_keys (id, project_id, name, key_hash, prefix, created_by, allowed_models, allowed_mcp_tools, expires_at, key_rpm, key_tpm, budget_micros)
+                VALUES (?::uuid, ?::uuid, ?, ?, ?, ?::uuid, ?::jsonb, ?::jsonb, ?, ?, ?, ?)
+                RETURNING id::text, project_id::text, name, prefix, created_by::text, allowed_models::text, allowed_mcp_tools::text, expires_at, key_rpm, key_tpm, budget_micros::text, created_at
                 """)) {
                 ps.setString(1, id);
                 ps.setString(2, projectId);
@@ -735,13 +751,14 @@ public class CatalogController {
                 ps.setString(5, prefix);
                 ps.setString(6, acc.auth().userId());
                 ps.setString(7, mapper.writeValueAsString(allowedModels));
-                ps.setTimestamp(8, Timestamp.from(expiresAt));
-                if (keyRpm == null) ps.setNull(9, Types.INTEGER);
-                else ps.setInt(9, keyRpm);
-                if (keyTpm == null) ps.setNull(10, Types.INTEGER);
-                else ps.setInt(10, keyTpm);
-                if (keyBudgetMicros == null) ps.setNull(11, Types.BIGINT);
-                else ps.setLong(11, keyBudgetMicros);
+                ps.setString(8, mapper.writeValueAsString(allowedMcpTools));
+                ps.setTimestamp(9, Timestamp.from(expiresAt));
+                if (keyRpm == null) ps.setNull(10, Types.INTEGER);
+                else ps.setInt(10, keyRpm);
+                if (keyTpm == null) ps.setNull(11, Types.INTEGER);
+                else ps.setInt(11, keyTpm);
+                if (keyBudgetMicros == null) ps.setNull(12, Types.BIGINT);
+                else ps.setLong(12, keyBudgetMicros);
                 try (ResultSet rs = ps.executeQuery()) {
                     rs.next();
                     created.put("id", rs.getString(1));
@@ -750,14 +767,15 @@ public class CatalogController {
                     created.put("prefix", rs.getString(4));
                     created.put("created_by", rs.getString(5));
                     created.put("allowed_models", parseJsonList(rs.getString(6)));
-                    Timestamp eAt = rs.getTimestamp(7);
+                    created.put("allowed_mcp_tools", parseJsonList(rs.getString(7)));
+                    Timestamp eAt = rs.getTimestamp(8);
                     created.put("expires_at", eAt != null ? eAt.toInstant().toString() : null);
-                    int krpm = rs.getInt(8);
+                    int krpm = rs.getInt(9);
                     created.put("key_rpm", rs.wasNull() ? null : krpm);
-                    int ktpm = rs.getInt(9);
+                    int ktpm = rs.getInt(10);
                     created.put("key_tpm", rs.wasNull() ? null : ktpm);
-                    created.put("budget_micros", rs.getString(10));
-                    Timestamp cAt = rs.getTimestamp(11);
+                    created.put("budget_micros", rs.getString(11));
+                    Timestamp cAt = rs.getTimestamp(12);
                     created.put("created_at", cAt != null ? cAt.toInstant().toString() : null);
                 }
             }

@@ -356,6 +356,36 @@ public class AiGatewayIntegrationTest {
                 }
             }
         });
+        mockUpstream.createContext("/mcp-mock", exchange -> {
+            byte[] reqBytes = exchange.getRequestBody().readAllBytes();
+            Map<String, Object> reqJson = mapper.readValue(reqBytes, Map.class);
+            String method = String.valueOf(reqJson.get("method"));
+            Object rpcId = reqJson.get("id");
+            Map<String, Object> respJson = new LinkedHashMap<>();
+            respJson.put("jsonrpc", "2.0");
+            respJson.put("id", rpcId);
+            if ("tools/list".equals(method)) {
+                respJson.put("result", Map.of("tools", List.of(
+                    Map.of("name", "search_code", "description", "Search repository source code"),
+                    Map.of("name", "read_file", "description", "Read file contents"),
+                    Map.of("name", "delete_repo", "description", "Delete repository")
+                )));
+            } else if ("tools/call".equals(method)) {
+                Map<?, ?> params = reqJson.get("params") instanceof Map<?, ?> m ? m : Map.of();
+                String toolName = String.valueOf(params.get("name"));
+                respJson.put("result", Map.of(
+                    "content", List.of(Map.of("type", "text", "text", "executed:" + toolName)),
+                    "isError", false
+                ));
+            } else {
+                respJson.put("result", Map.of("protocolVersion", "2025-03-26"));
+            }
+            byte[] out = mapper.writeValueAsBytes(respJson);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, out.length);
+            exchange.getResponseBody().write(out);
+            exchange.close();
+        });
         mockUpstream.start();
     }
 
@@ -1735,6 +1765,135 @@ public class AiGatewayIntegrationTest {
         sendAdmin("DELETE", "/api/plugins/bindings/" + semBindingId, null, true);
         sendAdmin("DELETE", "/api/plugins/bindings/" + guardBindingId, null, true);
         sendAdmin("DELETE", "/api/plugins/bindings/" + jsBindingId, null, true);
+    }
+
+    @Test
+    @Order(12)
+    @SuppressWarnings("unchecked")
+    void testStage12P2Batch3McpProxyGatewayTtftPrometheusAndOpenTelemetry() throws Exception {
+        int nettyPort = nettyServer.getBoundPort();
+
+        // 1. #38 Register MCP Server via Control Plane POST /api/mcp-servers
+        HttpResponse<String> createMcpResp = sendAdmin("POST", "/api/mcp-servers", Map.of(
+            "alias", "github-mcp",
+            "transport", "streamable_http",
+            "endpointUrl", "http://127.0.0.1:" + upstreamPort + "/mcp-mock",
+            "secret", "mcp-secret-token-123",
+            "allowedTools", List.of("search_code", "read_file"),
+            "timeoutMs", 10_000
+        ), true);
+        assertEquals(201, createMcpResp.statusCode(), createMcpResp.body());
+        String mcpServerId = String.valueOf(mapper.readValue(createMcpResp.body(), Map.class).get("id"));
+
+        // 2. #38 Create an API Key with tool-level MCP permission allowlist: ["github-mcp:search_code"]
+        HttpResponse<String> createMcpKeyResp = sendAdmin("POST", "/api/keys", Map.of(
+            "project_id", projectId,
+            "name", "mcp-restricted-key",
+            "allowed_models", List.of("support-chat"),
+            "allowed_mcp_tools", List.of("github-mcp:search_code")
+        ), true);
+        assertEquals(200, createMcpKeyResp.statusCode(), createMcpKeyResp.body());
+        Map<String, Object> mcpKeyData = mapper.readValue(createMcpKeyResp.body(), Map.class);
+        String mcpKeyPlain = String.valueOf(mcpKeyData.get("key"));
+
+        // 3. #38 Call POST /mcp/github-mcp tools/list -> must filter tools to intersection of server & key allowlists (["search_code"])
+        HttpResponse<String> listToolsResp = httpClient.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://127.0.0.1:" + nettyPort + "/mcp/github-mcp"))
+                .header("Authorization", "Bearer " + mcpKeyPlain)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"))
+                .build(),
+            HttpResponse.BodyHandlers.ofString()
+        );
+        assertEquals(200, listToolsResp.statusCode(), listToolsResp.body());
+        assertEquals("github-mcp", listToolsResp.headers().firstValue("x-mcp-server").orElse(""));
+        Map<String, Object> listToolsJson = mapper.readValue(listToolsResp.body(), Map.class);
+        Map<String, Object> resObj = (Map<String, Object>) listToolsJson.get("result");
+        List<Map<String, Object>> filteredTools = (List<Map<String, Object>>) resObj.get("tools");
+        assertEquals(1, filteredTools.size(), "tools/list must only expose permitted tools: " + listToolsResp.body());
+        assertEquals("search_code", filteredTools.get(0).get("name"));
+
+        // 4. #38 Call POST /mcp/github-mcp tools/call on permitted tool ("search_code") -> HTTP 200
+        HttpResponse<String> callAllowedResp = httpClient.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://127.0.0.1:" + nettyPort + "/mcp/github-mcp"))
+                .header("Authorization", "Bearer " + mcpKeyPlain)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"search_code\",\"arguments\":{\"q\":\"HotRuntime\"}}}"))
+                .build(),
+            HttpResponse.BodyHandlers.ofString()
+        );
+        assertEquals(200, callAllowedResp.statusCode(), callAllowedResp.body());
+        assertTrue(callAllowedResp.body().contains("executed:search_code"), callAllowedResp.body());
+
+        // 5. #38 Call POST /mcp/github-mcp tools/call on non-permitted tool ("read_file") -> HTTP 403 tool_not_permitted
+        HttpResponse<String> callDeniedResp = httpClient.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://127.0.0.1:" + nettyPort + "/mcp/github-mcp"))
+                .header("Authorization", "Bearer " + mcpKeyPlain)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"read_file\",\"arguments\":{\"path\":\"/etc/passwd\"}}}"))
+                .build(),
+            HttpResponse.BodyHandlers.ofString()
+        );
+        assertEquals(403, callDeniedResp.statusCode(), callDeniedResp.body());
+        assertTrue(callDeniedResp.body().contains("tool_not_permitted"), callDeniedResp.body());
+
+        // 6. #39 Streaming Request with W3C traceparent -> Verify End-to-End TTFT (ttft_ms) in PostgreSQL & /api/requests/{id}
+        String traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+        String traceparent = "00-" + traceId + "-00f067aa0ba902b7-01";
+        HttpResponse<String> streamTtftResp = httpClient.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
+                .header("Authorization", "Bearer " + activeKeyPlain)
+                .header("Content-Type", "application/json")
+                .header("traceparent", traceparent)
+                .POST(HttpRequest.BodyPublishers.ofString("{\"model\":\"support-chat\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"Measure TTFT\"}],\"max_tokens\":32}"))
+                .build(),
+            HttpResponse.BodyHandlers.ofString()
+        );
+        assertEquals(200, streamTtftResp.statusCode(), streamTtftResp.body());
+        String ttftReqId = streamTtftResp.headers().firstValue("x-request-id").orElse("");
+        assertFalse(ttftReqId.isEmpty());
+
+        hotProjector.drain(5_000);
+        HttpResponse<String> reqDetailResp = sendAdmin("GET", "/api/requests/" + ttftReqId, null, false);
+        assertEquals(200, reqDetailResp.statusCode(), reqDetailResp.body());
+        Map<String, Object> reqDetail = mapper.readValue(reqDetailResp.body(), Map.class);
+        assertNotNull(reqDetail.get("ttft_ms"), "Streaming request must record ttft_ms: " + reqDetailResp.body());
+        assertTrue(((Number) reqDetail.get("ttft_ms")).longValue() >= 0L);
+
+        // 7. #39 Prometheus OpenMetrics GET /metrics on Netty Data Plane & Control Plane
+        HttpResponse<String> nettyMetricsResp = httpClient.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create("http://127.0.0.1:" + nettyPort + "/metrics"))
+                .GET()
+                .build(),
+            HttpResponse.BodyHandlers.ofString()
+        );
+        assertEquals(200, nettyMetricsResp.statusCode());
+        String promText = nettyMetricsResp.body();
+        assertTrue(promText.contains("ai_gateway_requests_total{"), promText);
+        assertTrue(promText.contains("ai_gateway_ttft_ms_count "), promText);
+        assertTrue(promText.contains("ai_gateway_pooled_upstream_requests_total "), promText);
+        assertTrue(promText.contains("ai_gateway_mcp_calls_total{server=\"github-mcp\""), promText);
+
+        // 8. #39 OpenTelemetry gen_ai.* Spans API & Redis Cluster Hash-Tag Partitioning
+        HttpResponse<String> spansResp = sendAdmin("GET", "/api/telemetry/spans", null, false);
+        assertEquals(200, spansResp.statusCode(), spansResp.body());
+        Map<String, Object> spansData = mapper.readValue(spansResp.body(), Map.class);
+        List<Map<String, Object>> spansList = (List<Map<String, Object>>) spansData.get("items");
+        assertFalse(spansList.isEmpty(), "OpenTelemetry recent spans must not be empty");
+
+        com.jihuayu.aigateway.hot.HotContract.HotKeys clusterKeys =
+            hotRuntime.getKeys().forClusterProject(projectId);
+        String expectedTag = "{proj:" + projectId + "}";
+        assertTrue(clusterKeys.project(projectId).contains(expectedTag));
+        assertTrue(clusterKeys.projectRate(projectId).contains(expectedTag));
+        assertTrue(clusterKeys.projectTpm(projectId).contains(expectedTag));
+
+        sendAdmin("DELETE", "/api/mcp-servers/" + mcpServerId, null, true);
     }
 
     private HttpResponse<String> sendAdmin(String method, String path, Object body, boolean includeCsrf) throws Exception {

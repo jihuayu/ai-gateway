@@ -2,7 +2,9 @@ package com.jihuayu.aigateway.netty;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jihuayu.aigateway.hot.GatewayException;
+import com.jihuayu.aigateway.hot.GatewayTelemetry;
 import com.jihuayu.aigateway.hot.HotBilling;
+import com.jihuayu.aigateway.hot.HotContract.McpServerSnapshot;
 import com.jihuayu.aigateway.hot.HotContract;
 import com.jihuayu.aigateway.hot.HotContract.AdmitInput;
 import com.jihuayu.aigateway.hot.HotContract.AttemptRecord;
@@ -337,6 +339,135 @@ public class DataPlaneExecutor {
     }
 
     public record HttpResponsePayload(int status, Map<String, String> headers, String jsonBody) {}
+
+    public String scrapePrometheusMetrics() {
+        long now = System.currentTimeMillis();
+        int openBreakers = 0;
+        for (CircuitBreakerState st : circuitStates.values()) {
+            if (st != null && st.isOpen(now)) openBreakers++;
+        }
+        return GatewayTelemetry.global().scrapePrometheus(pooledRequestsDispatched.get(), openBreakers);
+    }
+
+    /**
+     * #38: MCP (Model Context Protocol) JSON-RPC 2.0 Proxy Gateway with Server & API Key Tool-Level Governance.
+     */
+    @SuppressWarnings("unchecked")
+    public HttpResponsePayload handleMcpProxy(
+        String serverAlias,
+        String authorizationHeader,
+        byte[] rawBody,
+        String requestId
+    ) {
+        String method = "unknown";
+        try {
+            if (rawBody == null || rawBody.length == 0 || rawBody.length > MAX_BODY_BYTES) {
+                throw new GatewayException(400, "invalid_request", "MCP JSON-RPC 请求体不能为空或超过上限。");
+            }
+            KeyContext key = runtime.authenticateBearerHeader(authorizationHeader);
+            McpServerSnapshot server = runtime.loadMcpServer(key, serverAlias);
+            if (server == null || !server.enabled()) {
+                throw new GatewayException(404, "mcp_server_not_found", "MCP Server 不存在或未启用: " + serverAlias);
+            }
+            Object parsedObj;
+            try {
+                parsedObj = mapper.readValue(rawBody, Object.class);
+            } catch (Exception e) {
+                throw new GatewayException(400, "invalid_jsonrpc", "MCP 请求必须是合法 JSON-RPC 2.0 对象。");
+            }
+            if (!(parsedObj instanceof Map<?, ?> rawMap)) {
+                throw new GatewayException(400, "invalid_jsonrpc", "MCP 请求必须是 JSON 对象。");
+            }
+            Map<String, Object> rpcReq = new LinkedHashMap<>((Map<String, Object>) rawMap);
+            method = rpcReq.get("method") instanceof String s ? s.trim() : "";
+            if (method.isEmpty()) {
+                throw new GatewayException(400, "invalid_jsonrpc", "缺少 JSON-RPC method 字段。");
+            }
+
+            if ("tools/call".equals(method)) {
+                Map<String, Object> params = rpcReq.get("params") instanceof Map<?, ?> pm
+                    ? (Map<String, Object>) pm
+                    : Map.of();
+                String toolName = params.get("name") instanceof String s ? s.trim() : "";
+                if (toolName.isEmpty()) {
+                    throw new GatewayException(400, "invalid_jsonrpc", "tools/call 缺少 params.name。");
+                }
+                if (!server.isToolAllowedByServer(toolName) || !key.canUseMcpTool(serverAlias, toolName)) {
+                    GatewayTelemetry.global().recordMcpCall(serverAlias, method, "forbidden");
+                    throw new GatewayException(
+                        403,
+                        "tool_not_permitted",
+                        "API Key 无权调用 MCP 工具: " + serverAlias + ":" + toolName
+                    );
+                }
+            }
+
+            // Run PRE_ADMIT plugin stage on MCP payload so PiiGuardrailPlugin / JS plugins can inspect/redact tool calls
+            Snapshot snapshot = runtime.snapshotFor(key);
+            PluginExecutionContext pluginCtx = new PluginExecutionContext(
+                requestId, key.projectId(), key.workspaceId(), key.keyId(),
+                "/mcp/" + serverAlias, serverAlias, false,
+                new LinkedHashMap<>(), rpcReq
+            );
+            PluginResult preRes = pluginPipeline.executeStage(snapshot, PluginStage.PRE_ADMIT, pluginCtx);
+            if (preRes instanceof PluginResult.Reject rej) {
+                GatewayTelemetry.global().recordMcpCall(serverAlias, method, "rejected");
+                throw new GatewayException(rej.httpStatus(), rej.errorCode(), rej.message());
+            }
+
+            SecurityUtils.validateProviderUrl(server.endpointUrl(), allowPrivateUpstream);
+            HttpRequest.Builder reqBuilder = HttpRequest.newBuilder()
+                .uri(URI.create(server.endpointUrl()))
+                .timeout(Duration.ofMillis(Math.max(500, server.timeoutMs())))
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json, text/event-stream")
+                .header("X-Request-Id", requestId)
+                .header("User-Agent", "Mozilla/5.0 (compatible; Google-Agent; +https://developers.google.com/crawling/docs/crawlers-fetchers/google-agent)")
+                .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(pluginCtx.requestJson())));
+
+            if (server.encryptedSecret() != null && !server.encryptedSecret().isBlank()) {
+                String upstreamSecret = SecurityUtils.decrypt(server.encryptedSecret(), encryptionKey);
+                if (upstreamSecret != null && !upstreamSecret.isBlank()) {
+                    reqBuilder.header("Authorization", "Bearer " + upstreamSecret.trim());
+                }
+            }
+
+            pooledRequestsDispatched.incrementAndGet();
+            HttpResponse<String> upstreamResp = sharedHttpClient.send(reqBuilder.build(), HttpResponse.BodyHandlers.ofString());
+            int status = upstreamResp.statusCode();
+            String respBody = upstreamResp.body() != null ? upstreamResp.body() : "{}";
+
+            if (status >= 200 && status < 300 && "tools/list".equals(method)) {
+                try {
+                    Map<String, Object> rpcResp = new LinkedHashMap<>(mapper.readValue(respBody, Map.class));
+                    if (rpcResp.get("result") instanceof Map<?, ?> resMap) {
+                        Map<String, Object> mutableRes = new LinkedHashMap<>((Map<String, Object>) resMap);
+                        if (mutableRes.get("tools") instanceof List<?> rawTools) {
+                            List<Object> filteredTools = new ArrayList<>();
+                            for (Object tObj : rawTools) {
+                                if (tObj instanceof Map<?, ?> tm && tm.get("name") instanceof String tName) {
+                                    if (server.isToolAllowedByServer(tName) && key.canUseMcpTool(serverAlias, tName)) {
+                                        filteredTools.add(tObj);
+                                    }
+                                }
+                            }
+                            mutableRes.put("tools", filteredTools);
+                            rpcResp.put("result", mutableRes);
+                            respBody = mapper.writeValueAsString(rpcResp);
+                        }
+                    }
+                } catch (Exception ignored) {}
+            }
+
+            GatewayTelemetry.global().recordMcpCall(serverAlias, method, status >= 200 && status < 300 ? "ok" : "error");
+            Map<String, String> outHeaders = new LinkedHashMap<>(pluginCtx.responseHeaders());
+            outHeaders.put("x-request-id", requestId);
+            outHeaders.put("x-mcp-server", serverAlias);
+            return new HttpResponsePayload(status, outHeaders, respBody);
+        } catch (Exception e) {
+            return buildErrorPayload(requestId, e, retryAfterOf(e));
+        }
+    }
 
     public HttpResponsePayload handleModels(String authorizationHeader, String requestId) {
         try {
@@ -1146,9 +1277,28 @@ public class DataPlaneExecutor {
                 totals.outputTokens(),
                 totals.cachedInputTokens(),
                 totals.reasoningTokens(),
+                totals.ttftMs(),
                 status,
                 attempts
             ));
+        } catch (Exception ignored) {}
+        try {
+            long totalLat = attempts.stream().mapToLong(AttemptRecord::latency_ms).sum();
+            GatewayTelemetry.global().recordRequest(
+                requestId,
+                pluginCtx != null ? pluginCtx.requestHeaders().get("traceparent") : null,
+                pluginCtx != null ? pluginCtx.endpoint() : "/v1/chat/completions",
+                prepared != null ? prepared.key().projectId() : "unknown",
+                prepared != null ? prepared.route().aliasName() : "unknown",
+                status,
+                totalLat,
+                totals.ttftMs(),
+                totals.inputTokens() != null ? totals.inputTokens() : 0L,
+                totals.outputTokens() != null ? totals.outputTokens() : 0L,
+                totals.cachedInputTokens() != null ? totals.cachedInputTokens() : 0L,
+                totals.reasoningTokens() != null ? totals.reasoningTokens() : 0L,
+                totals.actualMicros() != null ? totals.actualMicros() : 0L
+            );
         } catch (Exception ignored) {}
         if (pluginCtx != null) {
             try {
@@ -1395,6 +1545,7 @@ public class DataPlaneExecutor {
         Long outputTokens = null;
         Long cachedInputTokens = null;
         Long reasoningTokens = null;
+        Long ttftMs = null;
         Long costMicros = null;
         boolean retrySafe = false;
         Integer retryAfter = null;
@@ -1577,6 +1728,7 @@ public class DataPlaneExecutor {
         Long outputTokens = null;
         Long cachedInputTokens = null;
         Long reasoningTokens = null;
+        Long ttftMs = null;
         Long costMicros = null;
         boolean retrySafe = false;
         Integer retryAfter = null;
@@ -1676,6 +1828,9 @@ public class DataPlaneExecutor {
                     }
                     String chunkStr = new String(buf, 0, n, StandardCharsets.UTF_8);
                     for (SseEvent ev : parser.push(chunkStr)) {
+                        if (ttftMs == null) {
+                            ttftMs = Math.max(0L, System.currentTimeMillis() - started);
+                        }
                         if ("[DONE]".equals(ev.data())) {
                             sender.startSse(requestId);
                             sender.writeSseFrame("data: [DONE]\n\n", deadlineAt);
@@ -1779,7 +1934,7 @@ public class DataPlaneExecutor {
         return new StreamAttemptResult(new AttemptRecord(
             attemptNo, targetId, upstreamModel, status, httpStatus, errorCode,
             requestSent, executionUnknown, usageKnown, inputTokens, outputTokens, costMicros, upperBound, retrySafe, lat,
-            cachedInputTokens, reasoningTokens
+            cachedInputTokens, reasoningTokens, ttftMs
         ), wroteAny, retryAfter);
     }
 
@@ -2757,9 +2912,12 @@ public class DataPlaneExecutor {
         return record.retry_safe();
     }
 
-    public record AggregatedTotals(Long actualMicros, Long inputTokens, Long outputTokens, Long cachedInputTokens, Long reasoningTokens) {
+    public record AggregatedTotals(Long actualMicros, Long inputTokens, Long outputTokens, Long cachedInputTokens, Long reasoningTokens, Long ttftMs) {
+        public AggregatedTotals(Long actualMicros, Long inputTokens, Long outputTokens, Long cachedInputTokens, Long reasoningTokens) {
+            this(actualMicros, inputTokens, outputTokens, cachedInputTokens, reasoningTokens, null);
+        }
         public AggregatedTotals(Long actualMicros, Long inputTokens, Long outputTokens) {
-            this(actualMicros, inputTokens, outputTokens, null, null);
+            this(actualMicros, inputTokens, outputTokens, null, null, null);
         }
     }
 
@@ -2769,9 +2927,13 @@ public class DataPlaneExecutor {
         long output = 0;
         long cachedIn = 0;
         long reasoning = 0;
+        Long ttft = null;
         for (AttemptRecord a : attempts) {
+            if (ttft == null && a.ttft_ms() != null) {
+                ttft = a.ttft_ms();
+            }
             if (!a.usage_known()) {
-                return new AggregatedTotals(null, null, null, null, null);
+                return new AggregatedTotals(null, null, null, null, null, ttft);
             }
             actual += a.cost_micros() != null ? a.cost_micros() : 0L;
             input += a.input_tokens() != null ? a.input_tokens() : 0L;
@@ -2781,10 +2943,10 @@ public class DataPlaneExecutor {
             if (actual < 0 || actual > HotContract.MAX_SAFE_INTEGER
                 || input < 0 || input > HotContract.MAX_SAFE_INTEGER
                 || output < 0 || output > HotContract.MAX_SAFE_INTEGER) {
-                return new AggregatedTotals(null, null, null, null, null);
+                return new AggregatedTotals(null, null, null, null, null, ttft);
             }
         }
-        return new AggregatedTotals(actual, input, output, cachedIn, reasoning);
+        return new AggregatedTotals(actual, input, output, cachedIn, reasoning, ttft);
     }
 
     public static GatewayException errorFromRecord(AttemptRecord record) {

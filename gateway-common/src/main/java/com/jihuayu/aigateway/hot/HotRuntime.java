@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jihuayu.aigateway.hot.HotContract.HotKeys;
 import com.jihuayu.aigateway.hot.HotContract.KeyContext;
+import com.jihuayu.aigateway.hot.HotContract.McpServerSnapshot;
 import com.jihuayu.aigateway.hot.HotContract.PluginBindingSnapshot;
 import com.jihuayu.aigateway.hot.HotContract.PluginSnapshot;
 import com.jihuayu.aigateway.hot.HotContract.RouteSnapshot;
@@ -308,7 +309,7 @@ public class HotRuntime {
 
         Map<String, Map<String, Object>> entries = new LinkedHashMap<>();
         String readKeysSql = """
-            SELECT k.key_hash, k.id::text AS key_id, k.prefix, k.allowed_models::text AS allowed_models,
+            SELECT k.key_hash, k.id::text AS key_id, k.prefix, k.allowed_models::text AS allowed_models, k.allowed_mcp_tools::text AS allowed_mcp_tools,
                    k.expires_at, k.revoked_at, k.key_rpm, k.key_tpm, k.budget_micros::text AS key_budget_micros,
                    p.id::text AS project_id, p.workspace_id::text AS workspace_id,
                    p.rpm AS project_rpm, p.tpm AS project_tpm, p.concurrency, p.budget_micros::text AS budget_micros, p.max_output_tokens
@@ -325,6 +326,9 @@ public class HotRuntime {
                 String allowedJson = rs.getString("allowed_models");
                 List<String> allowed = allowedJson != null ? mapper.readValue(allowedJson, new TypeReference<List<String>>() {}) : List.of();
                 row.put("allowed_models", allowed);
+                String allowedMcpJson = rs.getString("allowed_mcp_tools");
+                List<String> allowedMcp = (allowedMcpJson != null && !allowedMcpJson.isBlank()) ? mapper.readValue(allowedMcpJson, new TypeReference<List<String>>() {}) : List.of();
+                row.put("allowed_mcp_tools", allowedMcp);
                 Timestamp expiresAt = rs.getTimestamp("expires_at");
                 Timestamp revokedAt = rs.getTimestamp("revoked_at");
                 row.put("expires_at", expiresAt != null ? expiresAt.toInstant().toString() : null);
@@ -384,7 +388,8 @@ public class HotRuntime {
 
         List<PluginSnapshot> plugins = loadPluginsFromDb(conn);
         List<PluginBindingSnapshot> pluginBindings = loadPluginBindingsFromDb(conn);
-        Snapshot snapshot = new Snapshot(this.epoch, routes, models, plugins, pluginBindings);
+        List<McpServerSnapshot> mcpServers = loadMcpServersFromDb(conn);
+        Snapshot snapshot = new Snapshot(this.epoch, routes, models, plugins, pluginBindings, mcpServers);
         String snapshotJson = mapper.writeValueAsString(snapshot);
         String revision = SecurityUtils.hashKey(mapper.writeValueAsString(List.of(snapshot, entries, projects)));
 
@@ -598,6 +603,12 @@ public class HotRuntime {
                 if (item instanceof String s && !s.isBlank()) allowedModels.add(s);
             }
         }
+        List<String> allowedMcpTools = new ArrayList<>();
+        if (row.get("allowed_mcp_tools") instanceof List<?> list) {
+            for (Object item : list) {
+                if (item instanceof String s && !s.isBlank()) allowedMcpTools.add(s);
+            }
+        }
         int projectRpm = row.get("project_rpm") instanceof Number n ? n.intValue() : DEFAULT_PROJECT_RPM;
         int keyRpm = row.get("key_rpm") instanceof Number n ? n.intValue() : DEFAULT_KEY_RPM;
         Integer projectTpm = row.get("project_tpm") instanceof Number n ? n.intValue() : null;
@@ -629,6 +640,7 @@ public class HotRuntime {
             String.valueOf(row.get("project_id")),
             String.valueOf(row.get("workspace_id")),
             allowedModels,
+            allowedMcpTools,
             projectRpm,
             keyRpm,
             projectTpm,
@@ -753,6 +765,50 @@ public class HotRuntime {
             // Table may not exist yet before V8 migration runs
         }
         return list;
+    }
+
+    private List<McpServerSnapshot> loadMcpServersFromDb(Connection conn) {
+        List<McpServerSnapshot> list = new ArrayList<>();
+        String sql = """
+            SELECT id::text AS id, workspace_id::text AS workspace_id, alias, transport,
+                   endpoint_url, encrypted_secret, allowed_tools::text AS allowed_tools,
+                   timeout_ms, enabled
+              FROM mcp_servers
+             WHERE enabled = true
+             ORDER BY alias ASC, id ASC
+            """;
+        try (PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                List<String> tools = parseStringList(rs.getString("allowed_tools"));
+                list.add(new McpServerSnapshot(
+                    rs.getString("id"),
+                    rs.getString("workspace_id"),
+                    rs.getString("alias"),
+                    rs.getString("transport"),
+                    rs.getString("endpoint_url"),
+                    rs.getString("encrypted_secret"),
+                    tools,
+                    rs.getInt("timeout_ms"),
+                    rs.getBoolean("enabled")
+                ));
+            }
+        } catch (Exception ignored) {
+            // Table may not exist before V9 migration
+        }
+        return list;
+    }
+
+    public McpServerSnapshot loadMcpServer(KeyContext key, String serverAlias) {
+        if (key == null || serverAlias == null || serverAlias.isBlank()) return null;
+        Snapshot snap = resolveSnapshot(key);
+        if (snap.mcpServers() == null) return null;
+        for (McpServerSnapshot s : snap.mcpServers()) {
+            if (s != null && s.enabled() && serverAlias.equals(s.alias()) && key.workspaceId().equals(s.workspaceId())) {
+                return s;
+            }
+        }
+        return null;
     }
 
     public Snapshot snapshotFor(KeyContext key) {

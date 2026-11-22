@@ -160,6 +160,7 @@ else
         data.inputTokens=input.inputTokens;data.outputTokens=input.outputTokens;data.errorCode=input.errorCode
         data.cachedInputTokens=input.cachedInputTokens or cjson.null
         data.reasoningTokens=input.reasoningTokens or cjson.null
+        data.ttftMs=input.ttftMs or cjson.null
         if #input.attempts>0 then data.attempts=input.attempts end
       end
     end

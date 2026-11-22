@@ -370,7 +370,7 @@ public class HotProjector {
         try (PreparedStatement ps = conn.prepareStatement("""
             UPDATE requests
                SET status = ?, actual_micros = ?, input_tokens = ?, output_tokens = ?,
-                   cached_input_tokens = ?, reasoning_tokens = ?,
+                   cached_input_tokens = ?, reasoning_tokens = ?, ttft_ms = ?,
                    alias_name = ?, error_code = ?, updated_at = ?
              WHERE request_id = ?::uuid
             """)) {
@@ -380,10 +380,11 @@ public class HotProjector {
             setNullableLong(ps, 4, e.outputTokens());
             setNullableLong(ps, 5, e.cachedInputTokens());
             setNullableLong(ps, 6, e.reasoningTokens());
-            ps.setString(7, e.aliasName());
-            ps.setString(8, e.errorCode());
-            ps.setTimestamp(9, Timestamp.from(updatedAt));
-            ps.setString(10, e.requestId());
+            setNullableLong(ps, 7, e.ttftMs());
+            ps.setString(8, e.aliasName());
+            ps.setString(9, e.errorCode());
+            ps.setTimestamp(10, Timestamp.from(updatedAt));
+            ps.setString(11, e.requestId());
             ps.executeUpdate();
         }
 
@@ -417,8 +418,8 @@ public class HotProjector {
                 Instant finished = updatedAt;
                 Instant started = finished.minusMillis(Math.max(0L, a.latency_ms()));
                 try (PreparedStatement ps = conn.prepareStatement("""
-                    INSERT INTO attempts(id, request_id, attempt_no, target_id, status, error_code, started_at, finished_at, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens, cost_micros)
-                    VALUES(?::uuid, ?::uuid, ?, (SELECT id FROM model_targets WHERE id = ?::uuid), ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO attempts(id, request_id, attempt_no, target_id, status, error_code, started_at, finished_at, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens, ttft_ms, cost_micros)
+                    VALUES(?::uuid, ?::uuid, ?, (SELECT id FROM model_targets WHERE id = ?::uuid), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(request_id, attempt_no) DO UPDATE
                        SET status = excluded.status,
                            error_code = excluded.error_code,
@@ -427,6 +428,7 @@ public class HotProjector {
                            output_tokens = excluded.output_tokens,
                            cached_input_tokens = excluded.cached_input_tokens,
                            reasoning_tokens = excluded.reasoning_tokens,
+                           ttft_ms = excluded.ttft_ms,
                            cost_micros = excluded.cost_micros
                     """)) {
                     ps.setString(1, UUID.randomUUID().toString());
@@ -441,7 +443,8 @@ public class HotProjector {
                     setNullableLong(ps, 10, a.output_tokens());
                     setNullableLong(ps, 11, a.cached_input_tokens());
                     setNullableLong(ps, 12, a.reasoning_tokens());
-                    setNullableLong(ps, 13, a.cost_micros());
+                    setNullableLong(ps, 13, a.ttft_ms());
+                    setNullableLong(ps, 14, a.cost_micros());
                     ps.executeUpdate();
                 }
             }
