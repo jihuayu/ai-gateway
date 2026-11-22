@@ -4,6 +4,8 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jihuayu.aigateway.hot.HotContract.HotKeys;
 import com.jihuayu.aigateway.hot.HotContract.KeyContext;
+import com.jihuayu.aigateway.hot.HotContract.PluginBindingSnapshot;
+import com.jihuayu.aigateway.hot.HotContract.PluginSnapshot;
 import com.jihuayu.aigateway.hot.HotContract.RouteSnapshot;
 import com.jihuayu.aigateway.hot.HotContract.RouteTarget;
 import com.jihuayu.aigateway.hot.HotContract.Snapshot;
@@ -380,7 +382,9 @@ public class HotRuntime {
             models.put(pid, aliases);
         }
 
-        Snapshot snapshot = new Snapshot(this.epoch, routes, models);
+        List<PluginSnapshot> plugins = loadPluginsFromDb(conn);
+        List<PluginBindingSnapshot> pluginBindings = loadPluginBindingsFromDb(conn);
+        Snapshot snapshot = new Snapshot(this.epoch, routes, models, plugins, pluginBindings);
         String snapshotJson = mapper.writeValueAsString(snapshot);
         String revision = SecurityUtils.hashKey(mapper.writeValueAsString(List.of(snapshot, entries, projects)));
 
@@ -674,6 +678,85 @@ public class HotRuntime {
             cache.put(revision, snap);
         }
         return snap;
+    }
+
+    private List<PluginSnapshot> loadPluginsFromDb(Connection conn) {
+        List<PluginSnapshot> list = new ArrayList<>();
+        String sql = """
+            SELECT id::text AS id, workspace_id::text AS workspace_id, name, type, version, priority,
+                   stages::text AS stages, source_code, code_sha256, jar_path, class_name,
+                   config::text AS config, fail_mode, timeout_ms, max_statements, enabled
+              FROM plugins
+             WHERE enabled = true
+             ORDER BY priority ASC, created_at ASC, id ASC
+            """;
+        try (PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                List<String> stages = parseStringList(rs.getString("stages"));
+                String cfgRaw = rs.getString("config");
+                Map<String, Object> cfg = (cfgRaw != null && !cfgRaw.isBlank())
+                    ? mapper.readValue(cfgRaw, new TypeReference<Map<String, Object>>() {})
+                    : Map.of();
+                list.add(new PluginSnapshot(
+                    rs.getString("id"),
+                    rs.getString("workspace_id"),
+                    rs.getString("name"),
+                    rs.getString("type"),
+                    rs.getInt("version"),
+                    rs.getInt("priority"),
+                    stages,
+                    rs.getString("source_code"),
+                    rs.getString("code_sha256"),
+                    rs.getString("jar_path"),
+                    rs.getString("class_name"),
+                    cfg,
+                    rs.getString("fail_mode"),
+                    rs.getInt("timeout_ms"),
+                    rs.getInt("max_statements"),
+                    rs.getBoolean("enabled")
+                ));
+            }
+        } catch (Exception ignored) {
+            // Table may not exist yet before V8 migration runs
+        }
+        return list;
+    }
+
+    private List<PluginBindingSnapshot> loadPluginBindingsFromDb(Connection conn) {
+        List<PluginBindingSnapshot> list = new ArrayList<>();
+        String sql = """
+            SELECT id::text AS id, plugin_id::text AS plugin_id, scope_type, scope_id,
+                   priority, config_override::text AS config_override, enabled
+              FROM plugin_bindings
+             WHERE enabled = true
+             ORDER BY priority ASC, created_at ASC, id ASC
+            """;
+        try (PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                String cfgRaw = rs.getString("config_override");
+                Map<String, Object> cfg = (cfgRaw != null && !cfgRaw.isBlank())
+                    ? mapper.readValue(cfgRaw, new TypeReference<Map<String, Object>>() {})
+                    : Map.of();
+                list.add(new PluginBindingSnapshot(
+                    rs.getString("id"),
+                    rs.getString("plugin_id"),
+                    rs.getString("scope_type"),
+                    rs.getString("scope_id"),
+                    rs.getInt("priority"),
+                    cfg,
+                    rs.getBoolean("enabled")
+                ));
+            }
+        } catch (Exception ignored) {
+            // Table may not exist yet before V8 migration runs
+        }
+        return list;
+    }
+
+    public Snapshot snapshotFor(KeyContext key) {
+        return resolveSnapshot(key);
     }
 
     public RouteSnapshot loadRoute(KeyContext key, String model) {

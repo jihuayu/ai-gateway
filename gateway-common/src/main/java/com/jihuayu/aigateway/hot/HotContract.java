@@ -185,11 +185,52 @@ public final class HotContract {
     ) {}
 
     @JsonIgnoreProperties(ignoreUnknown = true)
+    public record PluginSnapshot(
+        String id,
+        String workspaceId,
+        String name,
+        String type,
+        int version,
+        int priority,
+        List<String> stages,
+        String sourceCode,
+        String codeSha256,
+        String jarPath,
+        String className,
+        Map<String, Object> config,
+        String failMode,
+        int timeoutMs,
+        int maxStatements,
+        boolean enabled
+    ) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record PluginBindingSnapshot(
+        String id,
+        String pluginId,
+        String scopeType,
+        String scopeId,
+        int priority,
+        Map<String, Object> configOverride,
+        boolean enabled
+    ) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
     public record Snapshot(
         String epoch,
         Map<String, RouteSnapshot> routes,
-        Map<String, List<Map<String, Object>>> models
-    ) {}
+        Map<String, List<Map<String, Object>>> models,
+        List<PluginSnapshot> plugins,
+        List<PluginBindingSnapshot> pluginBindings
+    ) {
+        public Snapshot(
+            String epoch,
+            Map<String, RouteSnapshot> routes,
+            Map<String, List<Map<String, Object>>> models
+        ) {
+            this(epoch, routes, models, List.of(), List.of());
+        }
+    }
 
     public record KeyContext(
         String runtimeRevision,

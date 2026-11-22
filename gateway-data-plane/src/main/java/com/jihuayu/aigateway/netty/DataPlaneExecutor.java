@@ -10,7 +10,12 @@ import com.jihuayu.aigateway.hot.HotContract.KeyContext;
 import com.jihuayu.aigateway.hot.HotContract.RouteSnapshot;
 import com.jihuayu.aigateway.hot.HotContract.RouteTarget;
 import com.jihuayu.aigateway.hot.HotContract.SettleInput;
+import com.jihuayu.aigateway.hot.HotContract.Snapshot;
 import com.jihuayu.aigateway.hot.HotRuntime;
+import com.jihuayu.aigateway.plugin.PluginExecutionContext;
+import com.jihuayu.aigateway.plugin.PluginPipeline;
+import com.jihuayu.aigateway.plugin.PluginResult;
+import com.jihuayu.aigateway.plugin.PluginStage;
 import com.jihuayu.aigateway.security.SecurityUtils;
 import java.io.InputStream;
 import java.math.BigInteger;
@@ -249,6 +254,7 @@ public class DataPlaneExecutor {
     private final Map<String, AtomicInteger> keyPoolCounters = new ConcurrentHashMap<>();
     private volatile int circuitBreakerThreshold = 3;
     private volatile long circuitBreakerCooldownMs = 15_000L;
+    private final PluginPipeline pluginPipeline;
 
     public DataPlaneExecutor(
         HotRuntime runtime,
@@ -263,6 +269,11 @@ public class DataPlaneExecutor {
         this.allowPrivateUpstream = allowPrivateUpstream;
         this.mapper = mapper;
         this.sharedHttpClient = buildHttpClient(Timings.DEFAULT.connectMs());
+        this.pluginPipeline = new PluginPipeline(null, runtime != null ? runtime.getKeys().prefix() : "gw:", this.sharedHttpClient, this.mapper);
+    }
+
+    public PluginPipeline pluginPipeline() {
+        return pluginPipeline;
     }
 
     private static HttpClient buildHttpClient(int connectMs) {
@@ -321,6 +332,7 @@ public class DataPlaneExecutor {
     }
 
     public void close() {
+        try { pluginPipeline.close(); } catch (Exception ignored) {}
         scheduler.shutdownNow();
     }
 
@@ -359,6 +371,7 @@ public class DataPlaneExecutor {
     }
 
     public interface ResponseSender {
+        default void addResponseHeaders(Map<String, String> headers) {}
         boolean isClientClosed();
         void sendJson(int status, String requestId, String jsonBody, Integer retryAfterSec);
         void startSse(String requestId);
@@ -379,12 +392,15 @@ public class DataPlaneExecutor {
         boolean dispatched = false;
         ScheduledFuture<?> heartbeatTask = null;
         String finalStatus = "failed";
+        Snapshot snapshot = null;
+        PluginExecutionContext pluginCtx = null;
 
         try {
             if (rawBody != null && rawBody.length > MAX_BODY_BYTES) {
                 throw new GatewayException(400, "invalid_request", "请求体超过大小上限。");
             }
             KeyContext key = runtime.authenticateBearerHeader(authorizationHeader);
+            snapshot = runtime.snapshotFor(key);
             Object parsedBody;
             try {
                 if (rawBody == null || rawBody.length == 0) {
@@ -397,6 +413,43 @@ public class DataPlaneExecutor {
                 throw new GatewayException(400, "invalid_request", "请求体必须是合法 JSON。");
             }
             ChatRequest chatReq = validateChatBody(parsedBody, allowPrivateUpstream);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> reqJsonMap = parsedBody instanceof Map<?, ?> m
+                ? new LinkedHashMap<>((Map<String, Object>) m)
+                : new LinkedHashMap<>();
+            pluginCtx = new PluginExecutionContext(
+                requestId, key.projectId(), key.workspaceId(), key.keyId(),
+                "/v1/chat/completions", chatReq.model(), chatReq.stream(),
+                new LinkedHashMap<>(), reqJsonMap
+            );
+
+            // Stage 1: REQUEST_RECEIVED
+            PluginResult r1 = pluginPipeline.executeStage(snapshot, PluginStage.REQUEST_RECEIVED, pluginCtx);
+            sender.addResponseHeaders(pluginCtx.responseHeaders());
+            if (r1 instanceof PluginResult.Reject rej) {
+                sender.addResponseHeaders(rej.headers());
+                throw new GatewayException(rej.httpStatus(), rej.errorCode(), rej.message());
+            } else if (r1 instanceof PluginResult.ShortCircuit sc) {
+                sender.addResponseHeaders(sc.headers());
+                sender.sendJson(sc.httpStatus(), requestId, sc.responseBody(), null);
+                return;
+            }
+
+            // Stage 2: PRE_ADMIT (Before Redis Lua ADMIT -> rejections consume 0 budget/concurrency/TPM)
+            PluginResult r2 = pluginPipeline.executeStage(snapshot, PluginStage.PRE_ADMIT, pluginCtx);
+            sender.addResponseHeaders(pluginCtx.responseHeaders());
+            if (r2 instanceof PluginResult.Reject rej) {
+                sender.addResponseHeaders(rej.headers());
+                throw new GatewayException(rej.httpStatus(), rej.errorCode(), rej.message());
+            } else if (r2 instanceof PluginResult.ShortCircuit sc) {
+                sender.addResponseHeaders(sc.headers());
+                sender.sendJson(sc.httpStatus(), requestId, sc.responseBody(), null);
+                return;
+            }
+            if (pluginCtx.isRequestBodyMutated()) {
+                chatReq = validateChatBody(pluginCtx.requestJson(), allowPrivateUpstream);
+            }
+
             if (!key.canUseModel("", chatReq.model())) {
                 throw new GatewayException(403, "model_not_permitted", "API Key 无权使用该模型。");
             }
@@ -411,10 +464,32 @@ public class DataPlaneExecutor {
             prepared = prepareRequest(key, chatReq, route, selectOrderedTargets(route));
             admitRequest(requestId, prepared);
             admitted = true;
+
+            // Stage 3: POST_ADMIT_PRE_DISPATCH (Exact Cache & Semantic Cache short-circuit at 0 micro-USD)
+            PluginResult r3 = pluginPipeline.executeStage(snapshot, PluginStage.POST_ADMIT_PRE_DISPATCH, pluginCtx);
+            sender.addResponseHeaders(pluginCtx.responseHeaders());
+            if (r3 instanceof PluginResult.Reject rej) {
+                sender.addResponseHeaders(rej.headers());
+                throw new GatewayException(rej.httpStatus(), rej.errorCode(), rej.message());
+            } else if (r3 instanceof PluginResult.ShortCircuit sc) {
+                sender.addResponseHeaders(sc.headers());
+                try {
+                    billing.persistMetadata(requestId, route.aliasName(), "completed", List.of());
+                    billing.settle(requestId, new SettleInput(0L, 0L, 0L, 0L, 0L, "completed", List.of()));
+                } catch (Exception ignored) {}
+                admitted = false; // already settled at 0 micro-USD
+                pluginCtx.setSettlementMetrics(0L, 0L, 0L, "completed");
+                try {
+                    pluginPipeline.executeStage(snapshot, PluginStage.POST_SETTLE, pluginCtx);
+                } catch (Exception ignored) {}
+                sender.sendJson(sc.httpStatus(), requestId, sc.responseBody(), null);
+                return;
+            }
+
             billing.dispatch(requestId);
             dispatched = true;
         } catch (Exception e) {
-            finishRequest(requestId, admitted, dispatched, prepared, "failed", attempts, persistedAttempts, heartbeatTask);
+            finishRequest(requestId, admitted, dispatched, prepared, "failed", attempts, persistedAttempts, heartbeatTask, snapshot, pluginCtx);
             if (!sender.isSseStarted() && !sender.isClientClosed()) {
                 HttpResponsePayload errPayload = buildErrorPayload(requestId, e, retryAfterOf(e));
                 String retryHeader = errPayload.headers().get("retry-after");
@@ -440,7 +515,7 @@ public class DataPlaneExecutor {
             if (prep.body().stream()) {
                 finalStatus = executeStreamFlow(requestId, prep, t, deadlineAt, attempts, persistedAttempts, activeStream, abortReason, sender);
             } else {
-                finalStatus = executeBufferedFlow(requestId, prep, t, deadlineAt, attempts, persistedAttempts, activeStream, abortReason, sender);
+                finalStatus = executeBufferedFlow(requestId, prep, t, deadlineAt, attempts, persistedAttempts, activeStream, abortReason, sender, snapshot, pluginCtx);
             }
         } catch (Exception e) {
             finalStatus = "failed";
@@ -449,7 +524,7 @@ public class DataPlaneExecutor {
                 sender.sendJson(errPayload.status(), requestId, errPayload.jsonBody(), null);
             }
         } finally {
-            finishRequest(requestId, admitted, dispatched, prep, finalStatus, attempts, persistedAttempts, heartbeatTask);
+            finishRequest(requestId, admitted, dispatched, prep, finalStatus, attempts, persistedAttempts, heartbeatTask, snapshot, pluginCtx);
         }
     }
 
@@ -1035,6 +1110,21 @@ public class DataPlaneExecutor {
         Set<Integer> persistedAttempts,
         ScheduledFuture<?> heartbeatTask
     ) {
+        finishRequest(requestId, admitted, dispatched, prepared, status, attempts, persistedAttempts, heartbeatTask, null, null);
+    }
+
+    private void finishRequest(
+        String requestId,
+        boolean admitted,
+        boolean dispatched,
+        PreparedRequest prepared,
+        String status,
+        List<AttemptRecord> attempts,
+        Set<Integer> persistedAttempts,
+        ScheduledFuture<?> heartbeatTask,
+        Snapshot snapshot,
+        PluginExecutionContext pluginCtx
+    ) {
         if (heartbeatTask != null) {
             heartbeatTask.cancel(false);
         }
@@ -1060,6 +1150,17 @@ public class DataPlaneExecutor {
                 attempts
             ));
         } catch (Exception ignored) {}
+        if (pluginCtx != null) {
+            try {
+                pluginCtx.setSettlementMetrics(
+                    totals.actualMicros() != null ? totals.actualMicros() : 0L,
+                    totals.inputTokens() != null ? totals.inputTokens() : 0L,
+                    totals.outputTokens() != null ? totals.outputTokens() : 0L,
+                    status
+                );
+                pluginPipeline.executeStage(snapshot, PluginStage.POST_SETTLE, pluginCtx);
+            } catch (Exception ignored) {}
+        }
     }
 
     private String executeBufferedFlow(
@@ -1071,7 +1172,9 @@ public class DataPlaneExecutor {
         Set<Integer> persistedAttempts,
         AtomicReference<AutoCloseable> activeStream,
         AtomicReference<String> abortReason,
-        ResponseSender sender
+        ResponseSender sender,
+        Snapshot snapshot,
+        PluginExecutionContext pluginCtx
     ) {
         GatewayException lastError = null;
         Integer retryAfter = null;
@@ -1106,7 +1209,33 @@ public class DataPlaneExecutor {
             } catch (Exception ignored) {}
             if (result.retryAfter() != null) retryAfter = result.retryAfter();
             if ("ok".equals(rec.status()) && result.completionJson() != null) {
-                sender.sendJson(200, requestId, result.completionJson(), null);
+                String outBody = result.completionJson();
+                if (pluginCtx != null) {
+                    pluginCtx.setResponseStatus(200);
+                    pluginCtx.setResponseBody(outBody);
+                    try {
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> respMap = mapper.readValue(outBody, Map.class);
+                        pluginCtx.setResponseJson(respMap);
+                    } catch (Exception ignored) {}
+                    pluginCtx.clearResponseBodyMutated();
+                    PluginResult r4 = pluginPipeline.executeStage(snapshot, PluginStage.RESPONSE_CONTENT, pluginCtx);
+                    sender.addResponseHeaders(pluginCtx.responseHeaders());
+                    if (r4 instanceof PluginResult.Reject rej) {
+                        sender.addResponseHeaders(rej.headers());
+                        HttpResponsePayload errPayload = buildErrorPayload(requestId, new GatewayException(rej.httpStatus(), rej.errorCode(), rej.message()), null);
+                        sender.sendJson(errPayload.status(), requestId, errPayload.jsonBody(), null);
+                        return "failed";
+                    } else if (r4 instanceof PluginResult.ShortCircuit sc) {
+                        sender.addResponseHeaders(sc.headers());
+                        sender.sendJson(sc.httpStatus(), requestId, sc.responseBody(), null);
+                        return "completed";
+                    }
+                    if (pluginCtx.isResponseBodyMutated() && pluginCtx.responseBody() != null) {
+                        outBody = pluginCtx.responseBody();
+                    }
+                }
+                sender.sendJson(200, requestId, outBody, null);
                 return "completed";
             }
             lastError = errorFromRecord(rec);
