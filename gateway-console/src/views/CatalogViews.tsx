@@ -38,7 +38,7 @@ import {
   notify,
 } from '../components/Primitives';
 
-const KNOWN_CAPABILITIES = ['chat', 'stream', 'tools', 'vision', 'json_schema', 'embeddings'];
+const KNOWN_CAPABILITIES = ['chat', 'stream', 'stream_usage', 'tools', 'vision', 'json_schema', 'json_object', 'anthropic_messages', 'reasoning', 'embeddings', 'rerank', 'image_generation', 'system_one', 'decisions'];
 
 async function loadAllTargets(providersList?: any[]): Promise<any[]> {
   const ps = providersList || items(await api('/api/providers'));
@@ -883,6 +883,21 @@ export function ProvidersView({
               {...stylex.props(ui.input)}
             />
           </Field>
+          <div {...stylex.props(ui.field)}>
+            <label {...stylex.props(ui.fieldLabel)}>上游协议（Protocol）</label>
+            <select
+              value={pProtocol}
+              onChange={(e) => setPProtocol(e.target.value)}
+              {...stylex.props(ui.input)}
+            >
+              <option value="openai">OpenAI 兼容 (openai)</option>
+              <option value="anthropic">Anthropic Messages (anthropic)</option>
+              <option value="gemini">Google Gemini / Imagen (gemini)</option>
+              <option value="cohere">Cohere Embed / Rerank (cohere)</option>
+              <option value="jina">Jina Reranker (jina)</option>
+              <option value="typesafe">TypeSafe Jev System One (typesafe)</option>
+            </select>
+          </div>
           <Field name="baseUrl" {...stylex.props(ui.field)}>
             <FieldLabel {...stylex.props(ui.fieldLabel)}>服务地址（Base URL）</FieldLabel>
             <Input

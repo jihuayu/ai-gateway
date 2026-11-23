@@ -17,6 +17,7 @@ import {
 } from './components/Primitives';
 import { AuthView } from './views/AuthView';
 import { AliasesView, KeysView, OverviewView, ProvidersView } from './views/CatalogViews';
+import { PluginsView, TelemetryView } from './views/MicrokernelViews';
 import { GuideView, RequestsView, SettingsView, UsageView } from './views/OperationsViews';
 
 type ViewName =
@@ -24,6 +25,8 @@ type ViewName =
   | 'providers'
   | 'aliases'
   | 'keys'
+  | 'plugins'
+  | 'telemetry'
   | 'requests'
   | 'usage'
   | 'guide'
@@ -34,6 +37,8 @@ const NAV_ITEMS: { key: ViewName; label: string; icon: string; eyebrow: string }
   { key: 'providers', label: '供应商', icon: '⇄', eyebrow: '工作空间' },
   { key: 'aliases', label: '模型别名', icon: '◇', eyebrow: '项目' },
   { key: 'keys', label: 'API Keys', icon: '⌘', eyebrow: '项目' },
+  { key: 'plugins', label: '微内核插件', icon: '❖', eyebrow: '工作空间' },
+  { key: 'telemetry', label: '内核与可观测', icon: '◉', eyebrow: '工作空间' },
   { key: 'requests', label: '请求日志', icon: '≡', eyebrow: '项目' },
   { key: 'usage', label: '用量与账单', icon: '◫', eyebrow: '项目' },
   { key: 'guide', label: '接入指南', icon: '→', eyebrow: '项目' },
@@ -444,6 +449,19 @@ export function App() {
                 refreshTick={refreshTick}
               />
             )}
+            {view === 'plugins' && (
+              <PluginsView
+                project={currentProject}
+                canWrite={canWrite}
+                refreshTick={refreshTick}
+              />
+            )}
+            {view === 'telemetry' && (
+              <TelemetryView
+                onNavigate={handleNavigate}
+                refreshTick={refreshTick}
+              />
+            )}
             {view === 'requests' && (
               <RequestsView
                 project={currentProject}
@@ -487,7 +505,7 @@ export function App() {
           </main>
 
           <footer {...stylex.props(ui.footer)}>
-            <span>AI Gateway 控制台 · React 19 + @ui-sdk/react + StyleX</span>
+            <span>AI Gateway 控制台 v0.4.2 · React 19 + @ui-sdk/react + StyleX</span>
             <span>当前项目：{currentProject?.name || '无'}</span>
           </footer>
         </div>
