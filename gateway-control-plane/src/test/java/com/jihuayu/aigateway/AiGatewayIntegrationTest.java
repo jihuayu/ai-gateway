@@ -3377,6 +3377,57 @@ public class AiGatewayIntegrationTest {
         sendAdmin("DELETE", "/api/mcp-servers/" + mcpId, null, true);
     }
 
+    @Test
+    @Order(20)
+    @SuppressWarnings("unchecked")
+    void testStage20PhaseP5ClusterNodeHeartbeatAggregationAndUnifiedRequestGanttWaterfallTrace() throws Exception {
+        // 1. Simulate a peer replica node heartbeat in Redis and verify GET /api/cluster/nodes aggregation
+        String hashKey = hotKeys.prefix() + "cluster:nodes";
+        redisConn.sync().hset(hashKey, "dp-peer-replica-2", mapper.writeValueAsString(Map.of(
+            "nodeId", "dp-peer-replica-2",
+            "role", "data-plane-netty",
+            "status", "ONLINE",
+            "haStateCode", 0,
+            "uptimeSeconds", 120,
+            "lastHeartbeatAt", Instant.now().toString(),
+            "lastHeartbeatEpochMs", System.currentTimeMillis(),
+            "snapshot", Map.of(
+                "pooledUpstreamDispatched", 42,
+                "caffeineAuthHits", 500,
+                "caffeineResponseHits", 120,
+                "mpscCommandsSubmitted", 88,
+                "hedgeTriggers", 3,
+                "hedgeSecondaryWins", 3
+            )
+        )));
+
+        HttpResponse<String> clusterResp = sendAdmin("GET", "/api/cluster/nodes", null, false);
+        assertEquals(200, clusterResp.statusCode(), clusterResp.body());
+        Map<String, Object> clusterJson = mapper.readValue(clusterResp.body(), Map.class);
+        assertNotNull(clusterJson.get("localNodeId"));
+        Map<String, Object> summary = (Map<String, Object>) clusterJson.get("summary");
+        assertTrue(((Number) summary.get("totalNodes")).intValue() >= 2, "Cluster registry must aggregate local node + peer replica");
+        assertTrue(((Number) summary.get("totalCaffeineAuthHits")).longValue() >= 500L);
+        List<Map<String, Object>> nodeItems = (List<Map<String, Object>>) clusterJson.get("items");
+        assertTrue(nodeItems.stream().anyMatch(n -> "dp-peer-replica-2".equals(n.get("nodeId"))));
+
+        // 2. Fetch most recent request and verify GET /api/requests/{id} synthesizes unified Gantt waterfall bars
+        HttpResponse<String> reqListResp = sendAdmin("GET", "/api/requests?project_id=" + projectId + "&limit=5", null, false);
+        assertEquals(200, reqListResp.statusCode(), reqListResp.body());
+        List<Map<String, Object>> reqItems = (List<Map<String, Object>>) mapper.readValue(reqListResp.body(), Map.class).get("items");
+        assertFalse(reqItems.isEmpty(), "Project must have recorded requests");
+        String targetReqId = String.valueOf(reqItems.getFirst().get("request_id"));
+
+        HttpResponse<String> reqDetailResp = sendAdmin("GET", "/api/requests/" + targetReqId, null, false);
+        assertEquals(200, reqDetailResp.statusCode(), reqDetailResp.body());
+        Map<String, Object> detailJson = mapper.readValue(reqDetailResp.body(), Map.class);
+        List<Map<String, Object>> waterfall = (List<Map<String, Object>>) detailJson.get("waterfall");
+        assertNotNull(waterfall, "Request detail must include synthesized Gantt waterfall bars");
+        assertTrue(waterfall.size() >= 2, "Waterfall must include admit stage and settle stage");
+        assertEquals("STAGE_1_4_ADMIT", waterfall.getFirst().get("stage"));
+        assertEquals("STAGE_8_POST_SETTLE", waterfall.getLast().get("stage"));
+    }
+
     private HttpResponse<String> sendAdmin(String method, String path, Object body, boolean includeCsrf) throws Exception {
         HttpRequest.Builder b = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + adminPort + path));

@@ -300,6 +300,111 @@ export function UiSwitch({
 }
 
 // 8. UI SDK Timeline for Request Attempt History
+export function UiRequestWaterfall({ detail }: { detail: any }) {
+  const bars = Array.isArray(detail?.waterfall) ? detail.waterfall : [];
+  const totalMs = Math.max(1, Number(detail?.duration_ms ?? 1));
+  const span = detail?.otel_span;
+
+  if (!bars.length) return null;
+
+  const colorForCategory = (cat: string, status: string) => {
+    if (['failed', 'error', 'rejected', 'timeout'].includes(String(status || '').toLowerCase())) {
+      return 'var(--fg-destructive)';
+    }
+    if (cat === 'hedge') return '#059669';
+    if (cat === 'upstream') return '#2563eb';
+    if (cat === 'plugin') return '#7c3aed';
+    if (cat === 'settle') return '#0d9488';
+    return 'var(--bg-primary)';
+  };
+
+  return (
+    <div {...stylex.props(ui.detailItem, ui.stackSm)} style={{ marginTop: '8px' }}>
+      <div {...stylex.props(ui.inlineRow)} style={{ justifyContent: 'space-between' }}>
+        <div {...stylex.props(ui.inlineRow)}>
+          <strong style={{ fontSize: '13px' }}>
+            全链路甘特瀑布图（8 阶段微内核 + 主备对冲竞速 + OTel Span）
+          </strong>
+          {detail?.trace_id && (
+            <UiBadge tone="info" label={`Trace: ${String(detail.trace_id).slice(0, 16)}…`} />
+          )}
+        </div>
+        <span {...stylex.props(ui.tdMono)}>
+          总耗时: {fmtDuration(totalMs)}
+          {detail?.ttft_ms != null ? ` · 首包 TTFT: ${fmtDuration(detail.ttft_ms)}` : ''}
+        </span>
+      </div>
+
+      <div {...stylex.props(ui.stackSm)} style={{ marginTop: '4px' }}>
+        {bars.map((b: any, idx: number) => {
+          const offset = Math.max(0, Number(b.start_offset_ms ?? 0));
+          const dur = Math.max(1, Number(b.duration_ms ?? 1));
+          const leftPct = Math.min(92, Math.max(0, (offset / totalMs) * 100));
+          const widthPct = Math.min(100 - leftPct, Math.max(4, (dur / totalMs) * 100));
+          const barColor = colorForCategory(b.category, b.status);
+          return (
+            <div key={`${b.stage || idx}-${idx}`} style={{ fontSize: '12px' }}>
+              <div
+                {...stylex.props(ui.inlineRow)}
+                style={{ justifyContent: 'space-between', marginBottom: '3px' }}
+              >
+                <div {...stylex.props(ui.inlineRow)}>
+                  <span style={{ fontWeight: 500 }}>{b.label}</span>
+                  {b.category === 'hedge' && (
+                    <UiBadge tone="success" label="Peak-EWMA 对冲/备路并发" />
+                  )}
+                  {b.ttft_ms != null && (
+                    <UiBadge tone="info" label={`TTFT ${fmtDuration(b.ttft_ms)}`} />
+                  )}
+                </div>
+                <span {...stylex.props(ui.tdMono)} style={{ color: 'var(--fg-muted)' }}>
+                  +{offset} ms · 耗时 {fmtDuration(dur)}
+                </span>
+              </div>
+              <div
+                style={{
+                  position: 'relative',
+                  height: '10px',
+                  width: '100%',
+                  backgroundColor: 'var(--bg-muted)',
+                  borderRadius: '999px',
+                  overflow: 'hidden',
+                }}
+              >
+                <div
+                  style={{
+                    position: 'absolute',
+                    left: `${leftPct}%`,
+                    width: `${widthPct}%`,
+                    top: 0,
+                    bottom: 0,
+                    backgroundColor: barColor,
+                    borderRadius: '999px',
+                  }}
+                />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {span?.attributes && (
+        <div style={{ marginTop: '6px' }}>
+          <div {...stylex.props(ui.mutedText)} style={{ marginBottom: '4px' }}>
+            关联 OpenTelemetry GenAI Span 属性（spanId: {span.spanId}）：
+          </div>
+          <pre
+            {...stylex.props(ui.codeBlock)}
+            style={{ fontSize: '11px', padding: '8px 10px', maxHeight: '130px' }}
+          >
+            <code>{JSON.stringify(span.attributes, null, 2)}</code>
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function UiAttemptTimeline({
   attempts,
   targets,
