@@ -1,6 +1,6 @@
 # mise-en-place configuration for AI Gateway (https://mise.jdx.dev)
 [tools]
-java = "graalvm-25.0.4"
+java = "graalvm-25.5.5.0.3"
 gradle = "9.1.0"
 node = "22"
 
@@ -28,5 +28,5 @@ description = "Format all Java & Kotlin DSL files with Spotless"
 run = "./gradlew spotlessApply"
 
 [tasks.native-gateway]
-description = "Compile standalone Netty Data-Plane Gateway to Oracle GraalVM 25 native executable"
+description = "Compile standalone Netty Data-Plane Gateway to Oracle GraalVM 25.5 native executable"
 run = "./gradlew :gateway-data-plane:nativeCompile"

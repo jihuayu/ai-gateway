@@ -37,16 +37,16 @@ env:
 
 jobs:
   build-and-release:
-    name: Build Oracle GraalVM 25 Native Binary, Control-Plane JAR & GitHub Release
+    name: Build Oracle GraalVM 25.5 Native Binary, Control-Plane JAR & GitHub Release
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Oracle GraalVM 25
+      - name: Set up Oracle GraalVM 25.5 (25.5.5.0.3)
         uses: graalvm/setup-graalvm@v1
         with:
-          java-version: "25"
+          version: "25.5"
           distribution: "graalvm"
           github-token: ${{ secrets.GITHUB_TOKEN }}
           cache: "gradle"
@@ -68,7 +68,7 @@ jobs:
           chmod +x ./gradlew
           ./gradlew spotlessCheck :gateway-control-plane:bootJar -x test --no-daemon
 
-      - name: Build Standalone Netty Data-Plane Native Executable (Oracle GraalVM 25)
+      - name: Build Standalone Netty Data-Plane Native Executable (Oracle GraalVM 25.5)
         run: ./gradlew :gateway-data-plane:nativeCompile -x test --no-daemon
 
       - name: Package Release Artifacts & Checksums
@@ -146,7 +146,7 @@ jobs:
             type=raw,value=latest
             type=raw,value=native
 
-      - name: Build and push Oracle GraalVM 25 Native Gateway Image (ghcr.io/${{ github.repository }}-netty)
+      - name: Build and push Oracle GraalVM 25.5 Native Gateway Image (ghcr.io/${{ github.repository }}-netty)
         uses: docker/build-push-action@v6
         with:
           context: .

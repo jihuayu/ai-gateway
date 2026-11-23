@@ -53,7 +53,7 @@ Every data-plane request flows through an 8-stage plugin pipeline (`PRE_ADMIT` â
 ## Toolchain & Build
 
 Tool versions are declared in [`mise.toml`](mise.toml) and dependencies are centralized in [`gradle/libs.versions.toml`](gradle/libs.versions.toml):
-- **Java / GraalVM**: **Oracle GraalVM 25 (`25.0.4`)** / **OpenJDK 25 (`25.0.5.1`)** (`--enable-preview --enable-native-access=ALL-UNNAMED`)
+- **Java / GraalVM**: **Oracle GraalVM 25.5 (`25.5.5.0.3` / `25i5`, based on Oracle JDK `25.0.5.0.3`)** / **OpenJDK 25 (`25.0.5.1`)** (`--enable-preview --enable-native-access=ALL-UNNAMED`)
 - **Build System**: **Gradle `9.1.0`**
 - **Backend Stack**: **Spring Boot `4.2.0`** (Spring Framework `7.1.0`), **Spring Modulith `2.2.0`**, **Spring AI `2.1.0`**, **Netty `4.2.20.Final`**, **Lettuce `7.8.0.RELEASE`**, **Flyway `12.11.0`**, **jOOQ `3.21.9`**, **Spotless `8.12.0`**
 - **Frontend Console**: **React `19.3.1`**, **`@ui-sdk/react` `0.1.0-beta.13`**, **StyleX `0.19.2`**, **TypeScript `5.9.3`**, **Vite `6.4.6`**
