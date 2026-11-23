@@ -25,6 +25,7 @@ import {
   UiCheckboxRow,
   UiConfirmDialog,
   UiDialog,
+  UiRequestWaterfall,
   UiSwitch,
   copyToClipboard,
   notify,
@@ -512,9 +513,11 @@ export function TelemetryView({
   refreshTick: number;
 }) {
   const [runtime, setRuntime] = useState<any | null>(null);
+  const [clusterNodes, setClusterNodes] = useState<any>({ localNodeId: '', summary: {}, items: [] });
   const [accessLogs, setAccessLogs] = useState<any[]>([]);
   const [spans, setSpans] = useState<any[]>([]);
   const [dlqData, setDlqData] = useState<any>({ items: [], dlqCount: 0, recentExportedCount: 0 });
+  const [waterfallReq, setWaterfallReq] = useState<any | null>(null);
   const [metricsRaw, setMetricsRaw] = useState('');
   const [metricsFilter, setMetricsFilter] = useState('');
   const [obsTab, setObsTab] = useState<'logs' | 'spans' | 'dlq' | 'metrics'>('logs');
@@ -526,13 +529,15 @@ export function TelemetryView({
   const [selectedSpan, setSelectedSpan] = useState<any | null>(null);
 
   async function reload() {
-    const [rtRes, logsRes, spansRes, dlqRes] = await Promise.all([
+    const [rtRes, clRes, logsRes, spansRes, dlqRes] = await Promise.all([
       getSafe('/api/telemetry/runtime'),
+      getSafe('/api/cluster/nodes'),
       getSafe('/api/telemetry/access-logs'),
       getSafe('/api/telemetry/spans'),
       getSafe('/api/billing/dlq'),
     ]);
     if (rtRes.ok) setRuntime(rtRes.data);
+    if (clRes.ok) setClusterNodes(clRes.data || { localNodeId: '', summary: {}, items: [] });
     if (logsRes.ok) setAccessLogs(items(logsRes.data));
     if (spansRes.ok) setSpans(items(spansRes.data));
     if (dlqRes.ok) setDlqData(dlqRes.data || { items: [], dlqCount: 0, recentExportedCount: 0 });
@@ -711,6 +716,85 @@ export function TelemetryView({
           note={`Webhook 死信队列 (DLQ)：${fmtInt(dlqItems.length)} 条`}
         />
       </div>
+
+      {/* Multi-Node Cluster Heartbeat & Probe Aggregation Matrix */}
+      <section {...stylex.props(ui.card)}>
+        <div {...stylex.props(ui.cardHeader)}>
+          <div>
+            <h3 {...stylex.props(ui.cardTitle)}>
+              数据面多副本集群节点拓扑与 Redis 心跳探针汇聚（/api/cluster/nodes）
+            </h3>
+            <p {...stylex.props(ui.cardSubtitle)}>
+              各 Netty 数据面实例每 5 秒向 Redis 注册表同步 KernelEngineSnapshot 心跳，支持跨节点聚合观测。
+            </p>
+          </div>
+          <UiBadge
+            tone="success"
+            label={`在线节点 ${fmtInt(clusterNodes?.summary?.onlineNodes ?? 1)} / ${fmtInt(clusterNodes?.summary?.totalNodes ?? 1)}`}
+          />
+        </div>
+        <div {...stylex.props(ui.cardBodyFlush)}>
+          {arr(clusterNodes?.items).length ? (
+            <div {...stylex.props(ui.tableWrap)}>
+              <table {...stylex.props(ui.table)}>
+                <thead>
+                  <tr>
+                    <th {...stylex.props(ui.th)}>节点 ID / 角色</th>
+                    <th {...stylex.props(ui.th)}>心跳状态</th>
+                    <th {...stylex.props(ui.th)}>HA 模式</th>
+                    <th {...stylex.props(ui.th, ui.thNum)}>L1 Auth 命中</th>
+                    <th {...stylex.props(ui.th, ui.thNum)}>MPSC 提交指令</th>
+                    <th {...stylex.props(ui.th, ui.thNum)}>Peak-EWMA 对冲触发/胜出</th>
+                    <th {...stylex.props(ui.th)}>最后心跳时间</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {arr(clusterNodes?.items).map((nd: any) => {
+                    const snap = nd.snapshot || {};
+                    const isLocal = nd.nodeId === clusterNodes?.localNodeId;
+                    return (
+                      <tr key={nd.nodeId}>
+                        <td {...stylex.props(ui.td, ui.tdMono)}>
+                          <span {...stylex.props(ui.cellPrimary)}>
+                            {nd.nodeId} {isLocal ? ' (当前节点)' : ''}
+                          </span>
+                          <span {...stylex.props(ui.cellSub)}>
+                            {nd.role} · 运行 {fmtInt(nd.uptimeSeconds)}s
+                          </span>
+                        </td>
+                        <td {...stylex.props(ui.td)}>
+                          <UiBadge
+                            tone={nd.status === 'ONLINE' ? 'success' : 'warning'}
+                            label={nd.status || 'ONLINE'}
+                          />
+                        </td>
+                        <td {...stylex.props(ui.td)}>
+                          <UiBadge
+                            tone={nd.haStateCode === 0 ? 'success' : 'warning'}
+                            label={nd.haStateCode === 0 ? 'NORMAL' : 'DEGRADED_WAL'}
+                          />
+                        </td>
+                        <td {...stylex.props(ui.td, ui.tdNum)}>
+                          {fmtInt(snap.caffeineAuthHits ?? 0)}
+                        </td>
+                        <td {...stylex.props(ui.td, ui.tdNum)}>
+                          {fmtInt(snap.mpscCommandsSubmitted ?? 0)}
+                        </td>
+                        <td {...stylex.props(ui.td, ui.tdNum)}>
+                          {fmtInt(snap.hedgeTriggers ?? 0)} / {fmtInt(snap.hedgeSecondaryWins ?? 0)}
+                        </td>
+                        <td {...stylex.props(ui.td)}>{fmtDate(nd.lastHeartbeatAt)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <EmptyBox title="正在同步集群节点心跳" description="数据面节点心跳即将就绪。" />
+          )}
+        </div>
+      </section>
 
       <section {...stylex.props(ui.card)}>
         <div {...stylex.props(ui.cardHeader)}>
@@ -910,13 +994,33 @@ export function TelemetryView({
                             {fmtInt(arr(sp.events).length)}
                           </td>
                           <td {...stylex.props(ui.td, ui.tdActions)}>
-                            <UiButton
-                              size="sm"
-                              variant="outline"
-                              onClick={() => setSelectedSpan(sp)}
+                            <div
+                              {...stylex.props(ui.inlineRow)}
+                              style={{ justifyContent: 'flex-end' }}
                             >
-                              查看 Span 属性
-                            </UiButton>
+                              {sp.requestId && (
+                                <UiButton
+                                  size="sm"
+                                  variant="secondary"
+                                  onClick={async () => {
+                                    const r = await getSafe(
+                                      `/api/requests/${encodeURIComponent(sp.requestId)}`,
+                                    );
+                                    if (r.ok) setWaterfallReq(r.data);
+                                    else setSelectedSpan(sp);
+                                  }}
+                                >
+                                  甘特瀑布图
+                                </UiButton>
+                              )}
+                              <UiButton
+                                size="sm"
+                                variant="outline"
+                                onClick={() => setSelectedSpan(sp)}
+                              >
+                                Span 属性
+                              </UiButton>
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -1061,7 +1165,25 @@ export function TelemetryView({
         )}
       </UiDialog>
 
-      {/* OpenTelemetry Span Detail Dialog */}
+      {/* Unified Request Gantt Waterfall Dialog */}
+      <UiDialog
+        open={!!waterfallReq}
+        onOpenChange={(o) => !o && setWaterfallReq(null)}
+        title="单请求全链路甘特瀑布图（微内核准入 + 主备对冲 + OTel Span）"
+        description={
+          waterfallReq ? `请求 ID: ${waterfallReq.request_id || waterfallReq.id}` : ''
+        }
+        wide
+        footer={
+          <UiButton variant="primary" onClick={() => setWaterfallReq(null)}>
+            关闭
+          </UiButton>
+        }
+      >
+        {waterfallReq && <UiRequestWaterfall detail={waterfallReq} />}
+      </UiDialog>
+
+            {/* OpenTelemetry Span Detail Dialog */}
       <UiDialog
         open={!!selectedSpan}
         onOpenChange={(o) => !o && setSelectedSpan(null)}

@@ -27,6 +27,7 @@ import {
   MetricCard,
   PageHeader,
   UiAttemptTimeline,
+  UiRequestWaterfall,
   UiBadge,
   UiButton,
   UiCheckboxRow,
@@ -468,6 +469,7 @@ export function OverviewView({
               </div>
             </dl>
             <h4 style={{ margin: '12px 0 4px 0', fontSize: '14px' }}>上游尝试时间线</h4>
+            <UiRequestWaterfall detail={detailReq} />
             <UiAttemptTimeline attempts={arr(detailReq.attempts)} targets={targets} />
           </div>
         )}

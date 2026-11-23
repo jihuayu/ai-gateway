@@ -388,6 +388,12 @@ public class McpController {
         return Map.of("cleared", cleared);
     }
 
+    @GetMapping("/api/cluster/nodes")
+    public Map<String, Object> listClusterNodes(HttpServletRequest req) {
+        authService.requireWorkspaceRole(req, List.of("admin", "developer", "viewer"));
+        return dataPlaneExecutor.listClusterNodes();
+    }
+
     @GetMapping("/api/telemetry/runtime")
     public GatewayTelemetry.KernelEngineSnapshot inspectRuntimeTelemetry(HttpServletRequest req) {
         authService.requireWorkspaceRole(req, List.of("admin", "developer", "viewer"));

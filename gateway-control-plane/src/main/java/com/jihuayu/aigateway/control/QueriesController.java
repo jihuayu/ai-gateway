@@ -252,6 +252,83 @@ public class QueriesController {
                 }
             }
             row.put("attempts", attempts);
+
+            // Synthesize unified Gantt Waterfall Trace combining request lifecycle, hedged attempts & OTel GenAiSpan
+            com.jihuayu.aigateway.hot.GatewayTelemetry.GenAiSpan matchedSpan = null;
+            for (var sp : com.jihuayu.aigateway.hot.GatewayTelemetry.global().recentSpans()) {
+                if (id.equals(sp.requestId())) {
+                    matchedSpan = sp;
+                    break;
+                }
+            }
+            if (matchedSpan != null) {
+                row.put("otel_span", matchedSpan);
+                row.put("trace_id", matchedSpan.traceId());
+            }
+
+            long reqCreatedMs = row.get("created_at") instanceof String cs ? Instant.parse(cs).toEpochMilli() : System.currentTimeMillis();
+            long reqUpdatedMs = row.get("updated_at") instanceof String us ? Instant.parse(us).toEpochMilli() : reqCreatedMs + 10L;
+            long totalDurationMs = Math.max(1L, matchedSpan != null && matchedSpan.durationMs() > 0 ? matchedSpan.durationMs() : (reqUpdatedMs - reqCreatedMs));
+            row.put("duration_ms", totalDurationMs);
+
+            List<Map<String, Object>> waterfall = new ArrayList<>();
+            long firstAttemptStartMs = reqCreatedMs;
+            if (!attempts.isEmpty() && attempts.getFirst().get("started_at") instanceof String sa) {
+                firstAttemptStartMs = Instant.parse(sa).toEpochMilli();
+            }
+            long preAdmitDur = Math.max(1L, Math.min(totalDurationMs, Math.max(1L, firstAttemptStartMs - reqCreatedMs)));
+            waterfall.add(Map.of(
+                "stage", "STAGE_1_4_ADMIT",
+                "label", "Stage 1~4 · 鉴权、近端缓存与 Redis Lua 配额预留",
+                "category", "kernel",
+                "start_offset_ms", 0L,
+                "duration_ms", preAdmitDur,
+                "status", "completed"
+            ));
+
+            for (int i = 0; i < attempts.size(); i++) {
+                Map<String, Object> att = attempts.get(i);
+                long aStart = att.get("started_at") instanceof String sa ? Instant.parse(sa).toEpochMilli() : firstAttemptStartMs;
+                long aEnd = att.get("finished_at") instanceof String fa ? Instant.parse(fa).toEpochMilli() : (aStart + Math.max(1L, totalDurationMs - preAdmitDur));
+                long offset = Math.max(0L, Math.min(totalDurationMs - 1L, aStart - reqCreatedMs));
+                long dur = Math.max(1L, aEnd - aStart);
+                boolean isHedgeOrBackup = i >= 1;
+                Map<String, Object> bar = new LinkedHashMap<>();
+                bar.put("stage", "STAGE_5_7_ATTEMPT_" + (i + 1));
+                bar.put("label", (isHedgeOrBackup ? "Stage 5~7 · 对冲/备节点抢答 Attempt #" : "Stage 5~7 · 主节点上游调用 Attempt #") + (i + 1));
+                bar.put("category", isHedgeOrBackup ? "hedge" : "upstream");
+                bar.put("start_offset_ms", offset);
+                bar.put("duration_ms", dur);
+                bar.put("ttft_ms", att.get("ttft_ms") != null ? att.get("ttft_ms") : row.get("ttft_ms"));
+                bar.put("status", att.getOrDefault("status", "completed"));
+                bar.put("target_id", att.getOrDefault("target_id", ""));
+                waterfall.add(bar);
+            }
+
+            if (matchedSpan != null && matchedSpan.events() != null) {
+                for (var ev : matchedSpan.events()) {
+                    long evOffset = Math.max(0L, Math.min(totalDurationMs, ev.timestampEpochMs() - matchedSpan.startEpochMs()));
+                    waterfall.add(Map.of(
+                        "stage", "OTEL_EVENT",
+                        "label", "Plugin Span Event · " + ev.name(),
+                        "category", "plugin",
+                        "start_offset_ms", evOffset,
+                        "duration_ms", 1L,
+                        "status", "completed"
+                    ));
+                }
+            }
+
+            waterfall.add(Map.of(
+                "stage", "STAGE_8_POST_SETTLE",
+                "label", "Stage 8 · 微美元精确结算与 OTLP / Langfuse 异步下沉",
+                "category", "settle",
+                "start_offset_ms", Math.max(0L, totalDurationMs - 1L),
+                "duration_ms", 1L,
+                "status", String.valueOf(row.getOrDefault("status", "completed"))
+            ));
+
+            row.put("waterfall", waterfall);
             return row;
         } catch (GatewayException ge) {
             throw ge;

@@ -310,6 +310,8 @@ public class DataPlaneExecutor {
     private volatile int circuitBreakerThreshold = 3;
     private volatile long circuitBreakerCooldownMs = 15_000L;
     private final PluginPipeline pluginPipeline;
+    private final String nodeId = "dp-node-" + java.util.UUID.randomUUID().toString().substring(0, 8);
+    private final long startedAtEpochMs = System.currentTimeMillis();
 
     public DataPlaneExecutor(
         HotRuntime runtime,
@@ -325,6 +327,7 @@ public class DataPlaneExecutor {
         this.mapper = mapper;
         this.sharedHttpClient = buildHttpClient(Timings.DEFAULT.connectMs());
         this.pluginPipeline = new PluginPipeline(runtime != null ? runtime.getRedisConn() : null, runtime != null ? runtime.getKeys().prefix() : "gw:", this.sharedHttpClient, this.mapper);
+        this.scheduler.scheduleWithFixedDelay(this::publishNodeHeartbeatSafe, 1L, 5L, java.util.concurrent.TimeUnit.SECONDS);
     }
 
     public PluginPipeline pluginPipeline() {
@@ -393,7 +396,110 @@ public class DataPlaneExecutor {
 
     public record HttpResponsePayload(int status, Map<String, String> headers, String jsonBody) {}
 
+    public String nodeId() {
+        return nodeId;
+    }
+
+    public void publishNodeHeartbeatSafe() {
+        try {
+            if (runtime == null || runtime.getRedisConn() == null) return;
+            var ha = billing != null ? billing.haEngine() : null;
+            if (ha != null && ha.currentState() != com.jihuayu.aigateway.hot.DistributedQuotaAndHaEngine.HaState.NORMAL) {
+                return;
+            }
+            GatewayTelemetry.KernelEngineSnapshot snap = captureKernelEngineSnapshotInternal();
+            Map<String, Object> hb = buildNodeRecord(snap, System.currentTimeMillis());
+            String hashKey = (runtime.getKeys() != null ? runtime.getKeys().prefix() : "gw:") + "cluster:nodes";
+            runtime.getRedisConn().async().hset(hashKey, nodeId, mapper.writeValueAsString(hb));
+        } catch (Exception ignored) {}
+    }
+
+    private Map<String, Object> buildNodeRecord(GatewayTelemetry.KernelEngineSnapshot snap, long nowMs) {
+        Map<String, Object> hb = new LinkedHashMap<>();
+        hb.put("nodeId", nodeId);
+        hb.put("role", "data-plane-netty");
+        hb.put("startedAt", java.time.Instant.ofEpochMilli(startedAtEpochMs).toString());
+        hb.put("lastHeartbeatAt", java.time.Instant.ofEpochMilli(nowMs).toString());
+        hb.put("lastHeartbeatEpochMs", nowMs);
+        hb.put("uptimeSeconds", Math.max(1L, (nowMs - startedAtEpochMs) / 1000L));
+        hb.put("status", "ONLINE");
+        hb.put("haStateCode", snap.haStateCode());
+        hb.put("snapshot", snap);
+        return hb;
+    }
+
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> listClusterNodes() {
+        long nowMs = System.currentTimeMillis();
+        GatewayTelemetry.KernelEngineSnapshot localSnap = captureKernelEngineSnapshotInternal();
+        Map<String, Object> localRecord = buildNodeRecord(localSnap, nowMs);
+        Map<String, Map<String, Object>> nodesById = new LinkedHashMap<>();
+        nodesById.put(nodeId, localRecord);
+
+        try {
+            if (runtime != null && runtime.getRedisConn() != null) {
+                String hashKey = (runtime.getKeys() != null ? runtime.getKeys().prefix() : "gw:") + "cluster:nodes";
+                runtime.getRedisConn().sync().hset(hashKey, nodeId, mapper.writeValueAsString(localRecord));
+                Map<String, String> rawAll = runtime.getRedisConn().sync().hgetall(hashKey);
+                if (rawAll != null) {
+                    for (Map.Entry<String, String> e : rawAll.entrySet()) {
+                        if (e.getKey() == null || e.getValue() == null || e.getKey().equals(nodeId)) continue;
+                        try {
+                            Map<String, Object> parsed = mapper.readValue(e.getValue(), Map.class);
+                            long lastMs = parsed.get("lastHeartbeatEpochMs") instanceof Number n ? n.longValue() : nowMs;
+                            parsed.put("status", (nowMs - lastMs) <= 30_000L ? "ONLINE" : "STALE");
+                            nodesById.put(e.getKey(), parsed);
+                        } catch (Exception ignored) {}
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+
+        int onlineCount = 0;
+        long totalDispatched = 0L, totalAuthHits = 0L, totalRespHits = 0L, totalMpsc = 0L, totalHedges = 0L, totalHedgeWins = 0L;
+        for (Map<String, Object> n : nodesById.values()) {
+            if ("ONLINE".equals(n.get("status"))) onlineCount++;
+            Object sObj = n.get("snapshot");
+            if (sObj instanceof GatewayTelemetry.KernelEngineSnapshot ks) {
+                totalDispatched += ks.pooledUpstreamDispatched();
+                totalAuthHits += ks.caffeineAuthHits();
+                totalRespHits += ks.caffeineResponseHits();
+                totalMpsc += ks.mpscCommandsSubmitted();
+                totalHedges += ks.hedgeTriggers();
+                totalHedgeWins += ks.hedgeSecondaryWins();
+            } else if (sObj instanceof Map<?, ?> sm) {
+                totalDispatched += sm.get("pooledUpstreamDispatched") instanceof Number num ? num.longValue() : 0L;
+                totalAuthHits += sm.get("caffeineAuthHits") instanceof Number num ? num.longValue() : 0L;
+                totalRespHits += sm.get("caffeineResponseHits") instanceof Number num ? num.longValue() : 0L;
+                totalMpsc += sm.get("mpscCommandsSubmitted") instanceof Number num ? num.longValue() : 0L;
+                totalHedges += sm.get("hedgeTriggers") instanceof Number num ? num.longValue() : 0L;
+                totalHedgeWins += sm.get("hedgeSecondaryWins") instanceof Number num ? num.longValue() : 0L;
+            }
+        }
+
+        Map<String, Object> agg = new LinkedHashMap<>();
+        agg.put("totalNodes", nodesById.size());
+        agg.put("onlineNodes", onlineCount);
+        agg.put("totalPooledDispatched", totalDispatched);
+        agg.put("totalCaffeineAuthHits", totalAuthHits);
+        agg.put("totalCaffeineResponseHits", totalRespHits);
+        agg.put("totalMpscCommands", totalMpsc);
+        agg.put("totalHedgeTriggers", totalHedges);
+        agg.put("totalHedgeSecondaryWins", totalHedgeWins);
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("localNodeId", nodeId);
+        out.put("summary", agg);
+        out.put("items", new ArrayList<>(nodesById.values()));
+        return out;
+    }
+
     public GatewayTelemetry.KernelEngineSnapshot captureKernelEngineSnapshot() {
+        publishNodeHeartbeatSafe();
+        return captureKernelEngineSnapshotInternal();
+    }
+
+    private GatewayTelemetry.KernelEngineSnapshot captureKernelEngineSnapshotInternal() {
         long now = System.currentTimeMillis();
         int openBreakers = 0;
         for (CircuitBreakerState st : circuitStates.values()) {
