@@ -99,6 +99,52 @@ public class CatalogController {
         return doCreateAlias(req, id, body);
     }
 
+    @GetMapping("/api/aliases/{id}/versions")
+    public Map<String, Object> listAliasVersions(HttpServletRequest req, @PathVariable("id") String aliasId) {
+        requireUuidOr404(aliasId);
+        try (Connection conn = pool.getConnection()) {
+            AliasAccess acc = aliasForAccess(req, conn, aliasId, false);
+            List<Map<String, Object>> versions = new ArrayList<>();
+            Set<String> allTids = new LinkedHashSet<>();
+            try (PreparedStatement ps = conn.prepareStatement("""
+                SELECT id::text, version, status, targets::text, capabilities::text, price_snapshot::text, created_at, published_at
+                  FROM route_versions
+                 WHERE alias_id = ?::uuid
+                 ORDER BY version DESC
+                """)) {
+                ps.setString(1, aliasId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        Map<String, Object> v = new LinkedHashMap<>();
+                        v.put("id", rs.getString(1));
+                        v.put("alias_id", aliasId);
+                        v.put("alias_name", acc.name());
+                        v.put("version", rs.getInt(2));
+                        v.put("status", rs.getString(3));
+                        List<String> tids = parseJsonTargetIds(rs.getString(4));
+                        v.put("targets", tids);
+                        allTids.addAll(tids);
+                        v.put("capabilities", parseJsonList(rs.getString(5)));
+                        Map<String, Object> snap = parseJsonMap(rs.getString(6));
+                        v.put("price_snapshot", snap);
+                        v.put("weights", snap.getOrDefault("weights", Map.of()));
+                        Timestamp cAt = rs.getTimestamp(7);
+                        Timestamp pAt = rs.getTimestamp(8);
+                        v.put("created_at", cAt != null ? cAt.toInstant().toString() : null);
+                        v.put("published_at", pAt != null ? pAt.toInstant().toString() : null);
+                        versions.add(v);
+                    }
+                }
+            }
+            Map<String, TargetDetail> details = loadTargetDetailMap(conn, allTids);
+            return Map.of("items", versions, "target_details", details.values());
+        } catch (GatewayException ge) {
+            throw ge;
+        } catch (Exception e) {
+            throw new GatewayException(500, "internal_error", "Failed to list route versions");
+        }
+    }
+
     @PostMapping("/api/aliases/{id}/versions")
     public Map<String, Object> createAliasVersion(HttpServletRequest req, @PathVariable("id") String aliasId, @RequestBody(required = false) Map<String, Object> body) {
         requireUuidOr404(aliasId);
@@ -416,6 +462,74 @@ public class CatalogController {
     public Map<String, Object> createKeyPath(HttpServletRequest req, @PathVariable("id") String id, @RequestBody(required = false) Map<String, Object> body) {
         requireUuidOr404(id);
         return doCreateKey(req, id, body);
+    }
+
+    @PostMapping("/api/keys/{id}/rotate")
+    public Map<String, Object> rotateKey(
+        HttpServletRequest req,
+        @PathVariable("id") String keyId,
+        @RequestBody(required = false) Map<String, Object> body
+    ) {
+        requireUuidOr404(keyId);
+        boolean revokeOld = body == null || !Boolean.FALSE.equals(body.get("revoke_old"));
+        String projectId;
+        String createdBy;
+        String oldName;
+        List<String> allowedModels;
+        List<String> allowedMcpTools;
+        Integer keyRpm;
+        Integer keyTpm;
+        Long budgetMicros;
+        try (Connection conn = pool.getConnection();
+             PreparedStatement ps = conn.prepareStatement("""
+                 SELECT project_id::text, created_by::text, name, allowed_models::text, allowed_mcp_tools::text,
+                        key_rpm, key_tpm, budget_micros
+                   FROM api_keys
+                  WHERE id = ?::uuid
+                 """)) {
+            ps.setString(1, keyId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    throw new GatewayException(404, "key_not_found", "API key not found");
+                }
+                projectId = rs.getString(1);
+                createdBy = rs.getString(2);
+                oldName = rs.getString(3);
+                allowedModels = parseJsonList(rs.getString(4));
+                allowedMcpTools = parseJsonList(rs.getString(5));
+                int kr = rs.getInt(6); keyRpm = rs.wasNull() ? null : kr;
+                int kt = rs.getInt(7); keyTpm = rs.wasNull() ? null : kt;
+                long bm = rs.getLong(8); budgetMicros = rs.wasNull() ? null : bm;
+            }
+        } catch (GatewayException ge) {
+            throw ge;
+        } catch (Exception e) {
+            throw new GatewayException(500, "internal_error", "Failed to read key for rotation");
+        }
+        ProjectAccess acc = authService.requireProject(req, projectId, true);
+        if ("developer".equals(acc.auth().role()) && !acc.auth().userId().equals(createdBy)) {
+            throw new GatewayException(403, "forbidden", "Developers may only rotate their own keys");
+        }
+        String newName = (body != null && body.get("name") instanceof String s && !s.isBlank())
+            ? s.trim()
+            : (oldName.endsWith("-rotated") ? oldName : oldName + "-rotated");
+        Map<String, Object> createPayload = new LinkedHashMap<>();
+        createPayload.put("name", newName);
+        createPayload.put("allowed_models", allowedModels);
+        createPayload.put("allowed_mcp_tools", allowedMcpTools);
+        if (keyRpm != null) createPayload.put("key_rpm", keyRpm);
+        if (keyTpm != null) createPayload.put("key_tpm", keyTpm);
+        if (budgetMicros != null) createPayload.put("budget_micros", budgetMicros);
+        if (body != null && body.get("expires_at") instanceof String exp) {
+            createPayload.put("expires_at", exp);
+        }
+        Map<String, Object> created = new LinkedHashMap<>(doCreateKey(req, projectId, createPayload));
+        if (revokeOld) {
+            revokeKey(req, keyId);
+        }
+        created.put("rotated_from_id", keyId);
+        created.put("revoked_old", revokeOld);
+        return created;
     }
 
     @PostMapping("/api/keys/{id}/revoke")

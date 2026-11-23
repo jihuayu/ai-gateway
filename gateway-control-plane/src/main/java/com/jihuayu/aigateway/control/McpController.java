@@ -297,6 +297,97 @@ public class McpController {
         return Map.of("items", GatewayTelemetry.global().recentAccessLogs());
     }
 
+    @PostMapping("/api/mcp-servers/{id}/probe")
+    public Map<String, Object> probeMcpServer(HttpServletRequest req, @PathVariable("id") String id) {
+        SessionInfo auth = authService.requireWorkspaceRole(req, List.of("admin", "developer"));
+        String alias;
+        String transport;
+        String endpointUrl;
+        List<String> allowedTools;
+        int timeoutMs;
+        boolean enabled;
+        try (Connection conn = pool.getConnection();
+             PreparedStatement ps = conn.prepareStatement("""
+                 SELECT alias, transport, endpoint_url, allowed_tools::text, timeout_ms, enabled
+                   FROM mcp_servers
+                  WHERE id = ?::uuid AND workspace_id = ?::uuid
+                 """)) {
+            ps.setString(1, id);
+            ps.setString(2, auth.workspaceId());
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    throw new GatewayException(404, "not_found", "MCP Server 不存在: " + id);
+                }
+                alias = rs.getString(1);
+                transport = rs.getString(2);
+                endpointUrl = rs.getString(3);
+                String toolsRaw = rs.getString(4);
+                allowedTools = (toolsRaw != null && !toolsRaw.isBlank())
+                    ? mapper.readValue(toolsRaw, new TypeReference<List<String>>() {})
+                    : List.of();
+                timeoutMs = rs.getInt(5);
+                enabled = rs.getBoolean(6);
+            }
+        } catch (GatewayException ge) {
+            throw ge;
+        } catch (Exception e) {
+            throw new GatewayException(500, "internal_error", "读取 MCP Server 失败: " + e.getMessage());
+        }
+
+        long t0 = System.nanoTime();
+        String probeStatus = enabled ? "ok" : "disabled";
+        String probeMessage = enabled ? "MCP 端点配置与安全策略校验通过" : "该 MCP Server 当前处于禁用状态";
+        try {
+            SecurityUtils.validateProviderUrl(endpointUrl, config.isAllowPrivateUpstream());
+        } catch (Exception e) {
+            probeStatus = "invalid_url";
+            probeMessage = e.getMessage();
+        }
+        long latencyMs = Math.max(1L, (System.nanoTime() - t0) / 1_000_000L);
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("id", id);
+        out.put("alias", alias);
+        out.put("transport", transport);
+        out.put("endpointUrl", endpointUrl);
+        out.put("timeoutMs", timeoutMs);
+        out.put("status", probeStatus);
+        out.put("message", probeMessage);
+        out.put("latencyMs", latencyMs);
+        out.put("allowedTools", allowedTools);
+        out.put("testedAt", java.time.Instant.now().toString());
+        return out;
+    }
+
+    @PostMapping("/api/telemetry/circuit-breakers/reset")
+    public Map<String, Object> resetCircuitBreakers(HttpServletRequest req) {
+        authService.requireWorkspaceRole(req, List.of("admin", "developer"));
+        dataPlaneExecutor.resetCircuitBreakers();
+        return Map.of(
+            "reset", true,
+            "openCircuitBreakers", 0,
+            "resetAt", java.time.Instant.now().toString()
+        );
+    }
+
+    @GetMapping("/api/billing/dlq")
+    public Map<String, Object> listBillingDlq(HttpServletRequest req) {
+        authService.requireWorkspaceRole(req, List.of("admin", "developer", "viewer"));
+        var sink = dataPlaneExecutor.pluginPipeline().webhookBillingSinkPlugin();
+        return Map.of(
+            "items", sink.dlqEvents(),
+            "dlqCount", sink.dlqEvents().size(),
+            "recentExportedCount", sink.recentExportedEvents().size()
+        );
+    }
+
+    @PostMapping("/api/billing/dlq/clear")
+    public Map<String, Object> clearBillingDlq(HttpServletRequest req) {
+        authService.requireWorkspaceRole(req, List.of("admin", "developer"));
+        int cleared = dataPlaneExecutor.pluginPipeline().webhookBillingSinkPlugin().clearDlqEvents();
+        return Map.of("cleared", cleared);
+    }
+
     @GetMapping("/api/telemetry/runtime")
     public GatewayTelemetry.KernelEngineSnapshot inspectRuntimeTelemetry(HttpServletRequest req) {
         authService.requireWorkspaceRole(req, List.of("admin", "developer", "viewer"));

@@ -15,6 +15,7 @@ import {
   isKeyActive,
   isPublished,
   items,
+  microsToUsd,
   rangeBounds,
   statusText,
   targetIdsOf,
@@ -499,12 +500,19 @@ export function ProvidersView({
   const [pEnabled, setPEnabled] = useState(true);
   const [pErr, setPErr] = useState('');
 
-  // Target dialog
+  const [deletingProvider, setDeletingProvider] = useState<any | null>(null);
+
+  // Target dialog (Create & Edit with 5-Dimensional Pricing)
   const [targetModalOpen, setTargetModalOpen] = useState(false);
+  const [editingTarget, setEditingTarget] = useState<any | null>(null);
   const [tProviderId, setTProviderId] = useState('');
   const [tModel, setTModel] = useState('');
   const [tInputPrice, setTInputPrice] = useState('0.40');
   const [tOutputPrice, setTOutputPrice] = useState('1.60');
+  const [tCachedInputPrice, setTCachedInputPrice] = useState('');
+  const [tCacheWritePrice, setTCacheWritePrice] = useState('');
+  const [tReasoningPrice, setTReasoningPrice] = useState('');
+  const [tEnabled, setTEnabled] = useState(true);
   const [tCaps, setTCaps] = useState<string[]>(['chat', 'stream']);
   const [tErr, setTErr] = useState('');
 
@@ -568,7 +576,17 @@ export function ProvidersView({
         base_url: pBaseUrl.trim(),
         enabled: pEnabled,
       };
-      if (pSecret.trim()) body.secret = pSecret.trim();
+      if (pSecret.trim()) {
+        const keyPool = pSecret
+          .split(/[\n,]+/)
+          .map((k) => k.trim())
+          .filter(Boolean);
+        if (keyPool.length > 1) {
+          body.secrets = keyPool;
+        } else if (keyPool.length === 1) {
+          body.secret = keyPool[0];
+        }
+      }
       if (editingProvider?.id) {
         await api(`/api/providers/${encodeURIComponent(editingProvider.id)}`, {
           method: 'PATCH',
@@ -591,11 +609,31 @@ export function ProvidersView({
       notify('请先添加供应商连接', 'error');
       return;
     }
+    setEditingTarget(null);
     setTProviderId(defaultPid || providers[0]?.id || '');
     setTModel('');
     setTInputPrice('0.40');
     setTOutputPrice('1.60');
+    setTCachedInputPrice('');
+    setTCacheWritePrice('');
+    setTReasoningPrice('');
+    setTEnabled(true);
     setTCaps(['chat', 'stream']);
+    setTErr('');
+    setTargetModalOpen(true);
+  }
+
+  function openEditTarget(t: any) {
+    setEditingTarget(t);
+    setTProviderId(t.provider_id || t.providerId || providers[0]?.id || '');
+    setTModel(t.upstream_model || t.upstreamModel || '');
+    setTInputPrice(microsToUsd(t.input_price ?? t.inputPrice) || '0');
+    setTOutputPrice(microsToUsd(t.output_price ?? t.outputPrice) || '0');
+    setTCachedInputPrice(microsToUsd(t.cached_input_price ?? t.cachedInputPrice));
+    setTCacheWritePrice(microsToUsd(t.cache_write_price ?? t.cacheWritePrice));
+    setTReasoningPrice(microsToUsd(t.reasoning_price ?? t.reasoningPrice));
+    setTEnabled(t.enabled !== false);
+    setTCaps(arr(t.capabilities));
     setTErr('');
     setTargetModalOpen(true);
   }
@@ -604,26 +642,51 @@ export function ProvidersView({
     setTErr('');
     const inMicros = usdToMicros(tInputPrice);
     const outMicros = usdToMicros(tOutputPrice);
+    const cachedInMicros = tCachedInputPrice.trim() ? usdToMicros(tCachedInputPrice) : null;
+    const cacheWriteMicros = tCacheWritePrice.trim() ? usdToMicros(tCacheWritePrice) : null;
+    const reasoningMicros = tReasoningPrice.trim() ? usdToMicros(tReasoningPrice) : null;
     if (!tProviderId || !tModel.trim() || inMicros === null || outMicros === null) {
-      setTErr('请填写供应商、上游模型标识与非负价格。');
+      setTErr('请填写供应商、上游模型标识与非负输入/输出价格。');
       return;
     }
     try {
-      await api(`/api/providers/${encodeURIComponent(tProviderId)}/targets`, {
-        method: 'POST',
-        body: {
-          upstream_model: tModel.trim(),
-          input_price: inMicros,
-          output_price: outMicros,
-          capabilities: tCaps,
-          enabled: true,
-        },
-      });
-      notify('模型目标已添加', 'success');
+      const payload: Record<string, any> = {
+        upstream_model: tModel.trim(),
+        input_price: inMicros,
+        output_price: outMicros,
+        cached_input_price: cachedInMicros,
+        cache_write_price: cacheWriteMicros,
+        reasoning_price: reasoningMicros,
+        capabilities: tCaps,
+        enabled: tEnabled,
+      };
+      if (editingTarget?.id) {
+        await api(`/api/targets/${encodeURIComponent(editingTarget.id)}`, {
+          method: 'PATCH',
+          body: payload,
+        });
+        notify('模型目标与多维单价已更新', 'success');
+      } else {
+        await api(`/api/providers/${encodeURIComponent(tProviderId)}/targets`, {
+          method: 'POST',
+          body: payload,
+        });
+        notify('模型目标已添加', 'success');
+      }
       setTargetModalOpen(false);
       await reload();
     } catch (e: any) {
       setTErr(e?.message || '保存模型目标失败');
+    }
+  }
+
+  async function handleDeleteProvider(p: any) {
+    try {
+      await api(`/api/providers/${encodeURIComponent(p.id)}`, { method: 'DELETE' });
+      notify(`供应商“${p.name}”已删除`, 'success');
+      await reload();
+    } catch (e: any) {
+      notify(e?.message || '删除供应商失败（请先解绑引用该供应商模型的路由版本）', 'error');
     }
   }
 
@@ -753,6 +816,13 @@ export function ProvidersView({
                                   >
                                     编辑
                                   </UiButton>
+                                  <UiButton
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => setDeletingProvider(p)}
+                                  >
+                                    删除
+                                  </UiButton>
                                 </div>
                               ) : (
                                 <span {...stylex.props(ui.mutedText)}>只读</span>
@@ -798,10 +868,11 @@ export function ProvidersView({
                       <tr>
                         <th {...stylex.props(ui.th)}>上游模型标识</th>
                         <th {...stylex.props(ui.th)}>所属供应商</th>
-                        <th {...stylex.props(ui.th, ui.thNum)}>输入单价 / 1M</th>
-                        <th {...stylex.props(ui.th, ui.thNum)}>输出单价 / 1M</th>
+                        <th {...stylex.props(ui.th, ui.thNum)}>输入 / 输出单价 (1M)</th>
+                        <th {...stylex.props(ui.th, ui.thNum)}>缓存读 / 写 / 推理单价</th>
                         <th {...stylex.props(ui.th)}>声明能力</th>
                         <th {...stylex.props(ui.th)}>状态</th>
+                        <th {...stylex.props(ui.th)} />
                       </tr>
                     </thead>
                     <tbody>
@@ -819,10 +890,16 @@ export function ProvidersView({
                               {p?.name || t.provider_name || '—'}
                             </td>
                             <td {...stylex.props(ui.td, ui.tdNum)}>
-                              {fmtMoney(t.input_price ?? t.inputPrice)}
+                              {fmtMoney(t.input_price ?? t.inputPrice)} /{' '}
+                              {fmtMoney(t.output_price ?? t.outputPrice)}
                             </td>
                             <td {...stylex.props(ui.td, ui.tdNum)}>
-                              {fmtMoney(t.output_price ?? t.outputPrice)}
+                              <span {...stylex.props(ui.cellPrimary)}>
+                                读 {fmtMoney(t.cached_input_price)} · 写 {fmtMoney(t.cache_write_price)}
+                              </span>
+                              <span {...stylex.props(ui.cellSub)}>
+                                推理: {fmtMoney(t.reasoning_price)}
+                              </span>
                             </td>
                             <td {...stylex.props(ui.td)}>
                               <div {...stylex.props(ui.inlineRow)}>
@@ -837,6 +914,17 @@ export function ProvidersView({
                             </td>
                             <td {...stylex.props(ui.td)}>
                               <UiBadge status={t.enabled === false ? 'disabled' : 'enabled'} />
+                            </td>
+                            <td {...stylex.props(ui.td, ui.tdActions)}>
+                              {isAdmin && (
+                                <UiButton
+                                  size="sm"
+                                  variant="secondary"
+                                  onClick={() => openEditTarget(t)}
+                                >
+                                  编辑单价
+                                </UiButton>
+                              )}
                             </td>
                           </tr>
                         );
@@ -913,14 +1001,16 @@ export function ProvidersView({
           </Field>
           <Field name="apiKey" {...stylex.props(ui.field)}>
             <FieldLabel {...stylex.props(ui.fieldLabel)}>
-              {editingProvider ? '替换 API 密钥（留空保持原密钥）' : '上游 API 密钥'}
+              {editingProvider
+                ? '替换 API 密钥或多 Key 轮询池（多个密钥用逗号分隔，留空保持原凭据）'
+                : '上游 API 密钥或多 Key 轮询池（多个密钥用逗号分隔自动启用负载均衡池）'}
             </FieldLabel>
             <Input
               type="password"
               autoComplete="new-password"
               value={pSecret}
               onValueChange={setPSecret}
-              placeholder="sk-..."
+              placeholder="sk-key1, sk-key2 (支持单密钥或多 Key 池)"
               {...stylex.props(ui.input)}
             />
           </Field>
@@ -933,12 +1023,12 @@ export function ProvidersView({
         </div>
       </UiDialog>
 
-      {/* Model Target Add Dialog with P1 Capability Checkboxes */}
+      {/* Model Target Add / Edit Dialog with 5D Pricing & Capabilities */}
       <UiDialog
         open={targetModalOpen}
         onOpenChange={setTargetModalOpen}
-        title="添加模型目标"
-        description="价格按每 1,000,000 Token 的美元填写，服务端自动转换为整数微美元。"
+        title={editingTarget ? `编辑模型目标：${editingTarget.upstream_model}` : '添加模型目标'}
+        description="支持输入、输出、缓存读取（Cached Input）、缓存写入（Cache Write）及推理思考（Reasoning）五维微美元计价。"
         wide
         footer={
           <>
@@ -946,35 +1036,38 @@ export function ProvidersView({
               取消
             </UiButton>
             <UiButton variant="primary" onClick={saveTarget}>
-              保存模型目标
+              {editingTarget ? '保存单价与能力' : '保存模型目标'}
             </UiButton>
           </>
         }
       >
         <div {...stylex.props(ui.formGrid)}>
-          <div {...stylex.props(ui.field)}>
-            <label {...stylex.props(ui.fieldLabel)}>所属供应商</label>
-            <select
-              value={tProviderId}
-              onChange={(e) => setTProviderId(e.target.value)}
-              {...stylex.props(ui.input)}
-            >
-              {providers.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
+          <div {...stylex.props(ui.formRow)}>
+            <div {...stylex.props(ui.field)}>
+              <label {...stylex.props(ui.fieldLabel)}>所属供应商</label>
+              <select
+                value={tProviderId}
+                disabled={!!editingTarget}
+                onChange={(e) => setTProviderId(e.target.value)}
+                {...stylex.props(ui.input)}
+              >
+                {providers.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <Field name="upstreamModel" {...stylex.props(ui.field)}>
+              <FieldLabel {...stylex.props(ui.fieldLabel)}>上游模型标识</FieldLabel>
+              <Input
+                value={tModel}
+                onValueChange={setTModel}
+                placeholder="例如：gpt-4.1-mini 或 claude-3-7-sonnet"
+                {...stylex.props(ui.input)}
+              />
+            </Field>
           </div>
-          <Field name="upstreamModel" {...stylex.props(ui.field)}>
-            <FieldLabel {...stylex.props(ui.fieldLabel)}>上游模型标识</FieldLabel>
-            <Input
-              value={tModel}
-              onValueChange={setTModel}
-              placeholder="例如：gpt-4.1-mini 或 claude-3-7-sonnet"
-              {...stylex.props(ui.input)}
-            />
-          </Field>
           <div {...stylex.props(ui.formRow)}>
             <Field name="inputPrice" {...stylex.props(ui.field)}>
               <FieldLabel {...stylex.props(ui.fieldLabel)}>
@@ -1003,6 +1096,55 @@ export function ProvidersView({
               />
             </Field>
           </div>
+          <div {...stylex.props(ui.formRow)}>
+            <Field name="cachedInputPrice" {...stylex.props(ui.field)}>
+              <FieldLabel {...stylex.props(ui.fieldLabel)}>
+                缓存命中读取单价（Cached Input，可选）
+              </FieldLabel>
+              <Input
+                type="number"
+                step="0.000001"
+                min="0"
+                placeholder="例如：0.10"
+                value={tCachedInputPrice}
+                onValueChange={setTCachedInputPrice}
+                {...stylex.props(ui.input)}
+              />
+            </Field>
+            <Field name="cacheWritePrice" {...stylex.props(ui.field)}>
+              <FieldLabel {...stylex.props(ui.fieldLabel)}>
+                缓存写入单价（Cache Write，可选）
+              </FieldLabel>
+              <Input
+                type="number"
+                step="0.000001"
+                min="0"
+                placeholder="例如：0.50"
+                value={tCacheWritePrice}
+                onValueChange={setTCacheWritePrice}
+                {...stylex.props(ui.input)}
+              />
+            </Field>
+            <Field name="reasoningPrice" {...stylex.props(ui.field)}>
+              <FieldLabel {...stylex.props(ui.fieldLabel)}>
+                推理 Token 单价（Reasoning，可选）
+              </FieldLabel>
+              <Input
+                type="number"
+                step="0.000001"
+                min="0"
+                placeholder="例如：2.00"
+                value={tReasoningPrice}
+                onValueChange={setTReasoningPrice}
+                {...stylex.props(ui.input)}
+              />
+            </Field>
+          </div>
+          <UiSwitch
+            checked={tEnabled}
+            onChange={setTEnabled}
+            label={tEnabled ? '目标状态：已启用' : '目标状态：已禁用'}
+          />
           <div {...stylex.props(ui.field)}>
             <span {...stylex.props(ui.fieldLabel)}>声明模型能力（P0 / P1 协议校验）</span>
             <div {...stylex.props(ui.grid3)}>
@@ -1024,7 +1166,24 @@ export function ProvidersView({
         </div>
       </UiDialog>
 
-      {/* Connectivity Test Confirm */}
+      {/* Delete Provider Confirm */}
+      <UiConfirmDialog
+        open={!!deletingProvider}
+        onOpenChange={(o) => !o && setDeletingProvider(null)}
+        title="删除供应商连接"
+        description={
+          deletingProvider
+            ? `确认删除供应商“${deletingProvider.name}”？若其模型目标正被路由版本引用，服务端将安全拦截删除。`
+            : ''
+        }
+        confirmLabel="确认删除"
+        danger
+        onConfirm={async () => {
+          if (deletingProvider) await handleDeleteProvider(deletingProvider);
+        }}
+      />
+
+            {/* Connectivity Test Confirm */}
       <UiConfirmDialog
         open={!!testingProvider}
         onOpenChange={(o) => !o && setTestingProvider(null)}
@@ -1112,14 +1271,16 @@ export function AliasesView({
   const [editingAlias, setEditingAlias] = useState<any | null>(null);
   const [aliasName, setAliasName] = useState('');
   const [selectedTargets, setSelectedTargets] = useState<string[]>([]);
+  const [targetWeights, setTargetWeights] = useState<Record<string, number>>({});
   const [selectedCaps, setSelectedCaps] = useState<string[]>([]);
   const [formErr, setFormErr] = useState('');
 
   // Publish confirm
   const [publishingAlias, setPublishingAlias] = useState<any | null>(null);
 
-  // P1 Rollback modal
+  // P5 Version History & Diff Rollback Modal
   const [rollbackAlias, setRollbackAlias] = useState<any | null>(null);
+  const [versionHistory, setVersionHistory] = useState<any[]>([]);
   const [rollbackVer, setRollbackVer] = useState('1');
   const [rollbackErr, setRollbackErr] = useState('');
 
@@ -1146,6 +1307,7 @@ export function AliasesView({
     setEditingAlias(null);
     setAliasName('');
     setSelectedTargets([]);
+    setTargetWeights({});
     setSelectedCaps(['chat', 'stream']);
     setFormErr('');
     setModalOpen(true);
@@ -1154,7 +1316,14 @@ export function AliasesView({
   function openEditVersion(a: any) {
     setEditingAlias(a);
     setAliasName(a.name || '');
-    setSelectedTargets(targetIdsOf(a));
+    const tids = targetIdsOf(a);
+    setSelectedTargets(tids);
+    const snapWeights = a.price_snapshot?.weights || a.current_version?.price_snapshot?.weights || {};
+    const nextWeights: Record<string, number> = {};
+    tids.forEach((id) => {
+      nextWeights[id] = Number(snapWeights[id] ?? 100);
+    });
+    setTargetWeights(nextWeights);
     setSelectedCaps(arr(a.draft_version?.capabilities ?? a.capabilities));
     setFormErr('');
     setModalOpen(true);
@@ -1162,11 +1331,12 @@ export function AliasesView({
 
   function toggleTarget(id: string, checked: boolean) {
     if (checked) {
-      if (selectedTargets.length >= 2) {
-        notify('每个路由版本最多选择 2 个目标（1 主 + 1 备）', 'error');
+      if (selectedTargets.length >= 8) {
+        notify('每个路由版本最多选择 8 个目标节点', 'error');
         return;
       }
       setSelectedTargets([...selectedTargets, id]);
+      setTargetWeights((prev) => ({ ...prev, [id]: prev[id] ?? 100 }));
     } else {
       setSelectedTargets(selectedTargets.filter((x) => x !== id));
     }
@@ -1178,17 +1348,25 @@ export function AliasesView({
       setFormErr('请填写别名并至少选择 1 个模型目标。');
       return;
     }
-    if (selectedTargets.length > 2) {
-      setFormErr('每个路由版本最多选择 2 个目标。');
+    if (selectedTargets.length > 8) {
+      setFormErr('每个路由版本最多选择 8 个目标。');
       return;
     }
+    const weightsPayload: Record<string, number> = {};
+    selectedTargets.forEach((id) => {
+      weightsPayload[id] = Math.max(0, Math.min(10000, Number(targetWeights[id] ?? 100)));
+    });
     try {
       if (editingAlias) {
         await api(`/api/aliases/${encodeURIComponent(editingAlias.id)}/versions`, {
           method: 'POST',
-          body: { targets: selectedTargets, capabilities: selectedCaps },
+          body: {
+            targets: selectedTargets,
+            weights: weightsPayload,
+            capabilities: selectedCaps,
+          },
         });
-        notify('新草稿版本已保存，检查无误后即可发布', 'success');
+        notify('新草稿版本（含目标权重）已保存，检查无误后即可发布', 'success');
       } else {
         await api('/api/aliases', {
           method: 'POST',
@@ -1196,6 +1374,7 @@ export function AliasesView({
             project_id: project.id,
             name: aliasName.trim(),
             targets: selectedTargets,
+            weights: weightsPayload,
             capabilities: selectedCaps,
           },
         });
@@ -1225,11 +1404,16 @@ export function AliasesView({
     }
   }
 
-  function openRollbackModal(a: any) {
+  async function openRollbackModal(a: any) {
     const curVer = Number(a.current_version?.version ?? a.current_version ?? a.version ?? 1);
     setRollbackAlias(a);
     setRollbackVer(String(Math.max(1, curVer - 1)));
     setRollbackErr('');
+    setVersionHistory([]);
+    const res = await getSafe(`/api/aliases/${encodeURIComponent(a.id)}/versions`);
+    if (res.ok) {
+      setVersionHistory(items(res.data));
+    }
   }
 
   async function executeRollback() {
@@ -1389,13 +1573,13 @@ export function AliasesView({
                                   发布草稿
                                 </UiButton>
                               )}
-                              {hasCurrent && Number(curVer) > 1 && (
+                              {hasCurrent && (
                                 <UiButton
                                   size="sm"
                                   variant="outline"
                                   onClick={() => openRollbackModal(a)}
                                 >
-                                  版本回滚
+                                  版本历史与回滚
                                 </UiButton>
                               )}
                             </div>
@@ -1457,30 +1641,56 @@ export function AliasesView({
           </Field>
           <div {...stylex.props(ui.field)}>
             <span {...stylex.props(ui.fieldLabel)}>
-              选择目标模型（最多 2 个，已选 {selectedTargets.length}/2）
+              选择目标模型与负载均衡权重（支持 1~8 个目标节点，已选 {selectedTargets.length}/8）
             </span>
             <div {...stylex.props(ui.stackSm)}>
               {targets.map((t) => {
                 const idx = selectedTargets.indexOf(t.id);
                 const checked = idx !== -1;
+                const totalW = selectedTargets.reduce(
+                  (acc, tid) => acc + Math.max(0, Number(targetWeights[tid] ?? 100)),
+                  0,
+                );
+                const curW = Number(targetWeights[t.id] ?? 100);
+                const pct = checked && totalW > 0 ? Math.round((curW / totalW) * 100) : 0;
                 return (
-                  <UiCheckboxRow
-                    key={t.id}
-                    checked={checked}
-                    onChange={(on) => toggleTarget(t.id, on)}
-                    title={
-                      <span>
-                        {t.upstream_model}{' '}
-                        {checked && (
-                          <UiBadge
-                            tone={idx === 0 ? 'info' : 'neutral'}
-                            label={idx === 0 ? '主目标' : '备用目标'}
-                          />
-                        )}
-                      </span>
-                    }
-                    subtitle={`${t.provider_name || '上游供应商'} · 输入 ${fmtMoney(t.input_price)} / 输出 ${fmtMoney(t.output_price)} · 能力: ${arr(t.capabilities).join(', ') || '无'}`}
-                  />
+                  <div key={t.id} {...stylex.props(ui.detailItem, ui.stackSm)}>
+                    <UiCheckboxRow
+                      checked={checked}
+                      onChange={(on) => toggleTarget(t.id, on)}
+                      title={
+                        <span>
+                          {t.upstream_model}{' '}
+                          {checked && (
+                            <UiBadge
+                              tone={idx === 0 ? 'info' : 'neutral'}
+                              label={`#${idx + 1} (${idx === 0 ? '主' : '备/池'} · 权重 ${curW} / ${pct}%)`}
+                            />
+                          )}
+                        </span>
+                      }
+                      subtitle={`${t.provider_name || '上游供应商'} · 输入 ${fmtMoney(t.input_price)} / 输出 ${fmtMoney(t.output_price)} · 能力: ${arr(t.capabilities).join(', ') || '无'}`}
+                    />
+                    {checked && (
+                      <div {...stylex.props(ui.inlineRow)} style={{ paddingLeft: '28px' }}>
+                        <span {...stylex.props(ui.mutedText)}>节点流量权重 (0~10000)：</span>
+                        <input
+                          type="number"
+                          min="0"
+                          max="10000"
+                          value={curW}
+                          onChange={(e) =>
+                            setTargetWeights((prev) => ({
+                              ...prev,
+                              [t.id]: Number(e.target.value) || 0,
+                            }))
+                          }
+                          {...stylex.props(ui.input)}
+                          style={{ width: '110px', height: '28px' }}
+                        />
+                      </div>
+                    )}
+                  </div>
                 );
               })}
             </div>
@@ -1540,8 +1750,56 @@ export function AliasesView({
         }
       >
         <div {...stylex.props(ui.formGrid)}>
+          {versionHistory.length > 0 && (
+            <div {...stylex.props(ui.tableWrap)}>
+              <table {...stylex.props(ui.table)}>
+                <thead>
+                  <tr>
+                    <th {...stylex.props(ui.th)}>版本</th>
+                    <th {...stylex.props(ui.th)}>状态</th>
+                    <th {...stylex.props(ui.th)}>目标与权重</th>
+                    <th {...stylex.props(ui.th)}>能力集</th>
+                    <th {...stylex.props(ui.th)} />
+                  </tr>
+                </thead>
+                <tbody>
+                  {versionHistory.map((v) => (
+                    <tr key={v.id}>
+                      <td {...stylex.props(ui.td, ui.tdMono)}>v{v.version}</td>
+                      <td {...stylex.props(ui.td)}>
+                        <UiBadge status={v.status} />
+                      </td>
+                      <td {...stylex.props(ui.td)}>
+                        <div {...stylex.props(ui.inlineRow)}>
+                          {arr(v.targets).map((tid: string, i: number) => (
+                            <UiBadge
+                              key={tid}
+                              tone={i === 0 ? 'info' : 'neutral'}
+                              label={`${targetLabel(tid, targets)} (w:${v.weights?.[tid] ?? 100})`}
+                            />
+                          ))}
+                        </div>
+                      </td>
+                      <td {...stylex.props(ui.td)}>{arr(v.capabilities).join(', ') || '—'}</td>
+                      <td {...stylex.props(ui.td, ui.tdActions)}>
+                        {v.status === 'published' && (
+                          <UiButton
+                            size="sm"
+                            variant={String(v.version) === rollbackVer ? 'primary' : 'outline'}
+                            onClick={() => setRollbackVer(String(v.version))}
+                          >
+                            选择回滚至 v{v.version}
+                          </UiButton>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
           <Field name="targetVersion" {...stylex.props(ui.field)}>
-            <FieldLabel {...stylex.props(ui.fieldLabel)}>目标历史版本号</FieldLabel>
+            <FieldLabel {...stylex.props(ui.fieldLabel)}>目标历史已发布版本号</FieldLabel>
             <Input
               type="number"
               min="1"
@@ -1550,14 +1808,6 @@ export function AliasesView({
               onValueChange={setRollbackVer}
               {...stylex.props(ui.input)}
             />
-            <FieldDescription {...stylex.props(ui.fieldHint)}>
-              当前已发布版本为 v
-              {rollbackAlias?.current_version?.version ??
-                rollbackAlias?.current_version ??
-                rollbackAlias?.version ??
-                1}
-              。输入之前已发布过的版本号（例如 1）即可一键回滚。
-            </FieldDescription>
           </Field>
           {rollbackErr && <p {...stylex.props(ui.fieldError)}>{rollbackErr}</p>}
         </div>
@@ -1580,13 +1830,17 @@ export function KeysView({
 }) {
   const [keys, setKeys] = useState<any[]>([]);
   const [aliases, setAliases] = useState<any[]>([]);
+  const [mcpServers, setMcpServers] = useState<any[]>([]);
 
   // Create key dialog
   const [createOpen, setCreateOpen] = useState(false);
   const [kName, setKName] = useState('');
   const [kDays, setKDays] = useState('30');
   const [kRpm, setKRpm] = useState('');
+  const [kTpm, setKTpm] = useState('');
+  const [kBudgetUsd, setKBudgetUsd] = useState('');
   const [kModels, setKModels] = useState<string[]>([]);
+  const [kMcpTools, setKMcpTools] = useState<string[]>([]);
   const [kErr, setKErr] = useState('');
 
   // Created key secret one-time display
@@ -1598,12 +1852,14 @@ export function KeysView({
   async function reload() {
     if (!project?.id) return;
     const pid = encodeURIComponent(project.id);
-    const [kd, ad] = await Promise.all([
+    const [kd, ad, md] = await Promise.all([
       getSafe(`/api/keys?project_id=${pid}`),
       getSafe(`/api/aliases?project_id=${pid}`),
+      getSafe('/api/mcp-servers'),
     ]);
     if (kd.ok) setKeys(items(kd.data));
     if (ad.ok) setAliases(items(ad.data));
+    if (md.ok) setMcpServers(items(md.data));
   }
 
   useEffect(() => {
@@ -1614,7 +1870,10 @@ export function KeysView({
     setKName('');
     setKDays('30');
     setKRpm('');
+    setKTpm('');
+    setKBudgetUsd('');
     setKModels([]);
+    setKMcpTools([]);
     setKErr('');
     setCreateOpen(true);
   }
@@ -1637,13 +1896,18 @@ export function KeysView({
     }
     try {
       const expiresAt = new Date(Date.now() + days * 86400000).toISOString();
+      const tpmVal = kTpm.trim() === '' ? null : Number(kTpm);
+      const budgetMicrosVal = kBudgetUsd.trim() === '' ? null : usdToMicros(kBudgetUsd);
       const body: Record<string, any> = {
         project_id: project.id,
         name: kName.trim(),
         allowed_models: kModels,
+        allowed_mcp_tools: kMcpTools,
         expires_at: expiresAt,
       };
       if (rpmVal !== null) body.key_rpm = rpmVal;
+      if (tpmVal !== null && Number.isInteger(tpmVal) && tpmVal > 0) body.key_tpm = tpmVal;
+      if (budgetMicrosVal !== null) body.budget_micros = budgetMicrosVal;
       const r = await api('/api/keys', { method: 'POST', body });
       setCreateOpen(false);
       setCreatedKey(r);
@@ -1651,6 +1915,20 @@ export function KeysView({
       await reload();
     } catch (e: any) {
       setKErr(e?.message || '创建密钥失败');
+    }
+  }
+
+  async function handleRotateKey(k: any) {
+    try {
+      const r = await api(`/api/keys/${encodeURIComponent(k.id)}/rotate`, {
+        method: 'POST',
+        body: { revoke_old: true },
+      });
+      setCreatedKey(r);
+      notify(`已为“${k.name}”完成零停机密钥轮换并吊销旧密钥`, 'success');
+      await reload();
+    } catch (e: any) {
+      notify(e?.message || '轮换密钥失败', 'error');
     }
   }
 
@@ -1732,8 +2010,8 @@ export function KeysView({
                 <thead>
                   <tr>
                     <th {...stylex.props(ui.th)}>名称 / 前缀</th>
-                    <th {...stylex.props(ui.th)}>允许模型范围</th>
-                    <th {...stylex.props(ui.th, ui.thNum)}>单 Key RPM</th>
+                    <th {...stylex.props(ui.th)}>模型与 MCP 工具白名单</th>
+                    <th {...stylex.props(ui.th, ui.thNum)}>单 Key RPM / TPM / 预算</th>
                     <th {...stylex.props(ui.th)}>状态</th>
                     <th {...stylex.props(ui.th)}>到期时间</th>
                     <th {...stylex.props(ui.th)}>最近使用</th>
@@ -1767,12 +2045,21 @@ export function KeysView({
                                 <UiBadge key={m} tone="neutral" label={m} />
                               ))
                             ) : (
-                              <span {...stylex.props(ui.mutedText)}>全部已发布别名</span>
+                              <span {...stylex.props(ui.mutedText)}>全部别名</span>
                             )}
+                            {arr(k.allowed_mcp_tools).map((mt: string) => (
+                              <UiBadge key={mt} tone="info" label={`MCP:${mt}`} />
+                            ))}
                           </div>
                         </td>
                         <td {...stylex.props(ui.td, ui.tdNum)}>
-                          {k.key_rpm != null ? `${fmtInt(k.key_rpm)} / min` : '继承项目'}
+                          <span {...stylex.props(ui.cellPrimary)}>
+                            {k.key_rpm != null ? `${fmtInt(k.key_rpm)} RPM` : '项目 RPM'} ·{' '}
+                            {k.key_tpm != null ? `${fmtInt(k.key_tpm)} TPM` : '项目 TPM'}
+                          </span>
+                          <span {...stylex.props(ui.cellSub)}>
+                            预算上限: {k.budget_micros != null ? fmtMoney(k.budget_micros) : '无独立上限'}
+                          </span>
                         </td>
                         <td {...stylex.props(ui.td)}>
                           <UiBadge
@@ -1786,13 +2073,25 @@ export function KeysView({
                         <td {...stylex.props(ui.td)}>{fmtDate(k.last_used_at)}</td>
                         <td {...stylex.props(ui.td, ui.tdActions)}>
                           {active && canWrite ? (
-                            <UiButton
-                              size="sm"
-                              variant="outline"
-                              onClick={() => setRevokingKey(k)}
+                            <div
+                              {...stylex.props(ui.inlineRow)}
+                              style={{ justifyContent: 'flex-end' }}
                             >
-                              吊销
-                            </UiButton>
+                              <UiButton
+                                size="sm"
+                                variant="secondary"
+                                onClick={() => handleRotateKey(k)}
+                              >
+                                一键轮换
+                              </UiButton>
+                              <UiButton
+                                size="sm"
+                                variant="outline"
+                                onClick={() => setRevokingKey(k)}
+                              >
+                                吊销
+                              </UiButton>
+                            </div>
                           ) : (
                             <span {...stylex.props(ui.mutedText)}>—</span>
                           )}
@@ -1866,9 +2165,36 @@ export function KeysView({
               <Input
                 type="number"
                 min="1"
-                placeholder="留空则共享项目 RPM"
+                placeholder="共享项目 RPM"
                 value={kRpm}
                 onValueChange={setKRpm}
+                {...stylex.props(ui.input)}
+              />
+            </Field>
+            <Field name="keyTpm" {...stylex.props(ui.field)}>
+              <FieldLabel {...stylex.props(ui.fieldLabel)}>
+                单 Key TPM 上限（Tokens/min，可选）
+              </FieldLabel>
+              <Input
+                type="number"
+                min="1"
+                placeholder="共享项目 TPM"
+                value={kTpm}
+                onValueChange={setKTpm}
+                {...stylex.props(ui.input)}
+              />
+            </Field>
+            <Field name="keyBudgetUsd" {...stylex.props(ui.field)}>
+              <FieldLabel {...stylex.props(ui.fieldLabel)}>
+                单 Key 独立预算上限（USD，可选）
+              </FieldLabel>
+              <Input
+                type="number"
+                min="0"
+                step="0.01"
+                placeholder="例如：10.00"
+                value={kBudgetUsd}
+                onValueChange={setKBudgetUsd}
                 {...stylex.props(ui.input)}
               />
             </Field>
@@ -1894,6 +2220,37 @@ export function KeysView({
               </div>
             ) : (
               <p {...stylex.props(ui.mutedText)}>当前项目尚无已发布别名，可先直接创建密钥。</p>
+            )}
+          </div>
+          <div {...stylex.props(ui.field)}>
+            <span {...stylex.props(ui.fieldLabel)}>
+              允许调用的 MCP 工具白名单（allowed_mcp_tools，不勾选代表不限制）
+            </span>
+            {mcpServers.length ? (
+              <div {...stylex.props(ui.grid3)}>
+                {mcpServers.flatMap((srv) => {
+                  const patterns = [
+                    `${srv.alias}:*`,
+                    ...arr(srv.allowedTools).map((t: string) => `${srv.alias}:${t}`),
+                  ];
+                  return patterns.map((pat) => (
+                    <UiCheckboxRow
+                      key={pat}
+                      checked={kMcpTools.includes(pat)}
+                      onChange={(on) =>
+                        setKMcpTools((prev) =>
+                          on ? [...new Set([...prev, pat])] : prev.filter((x) => x !== pat),
+                        )
+                      }
+                      title={pat}
+                    />
+                  ));
+                })}
+              </div>
+            ) : (
+              <p {...stylex.props(ui.mutedText)}>
+                当前工作空间暂未注册 MCP Server（可前往「MCP 工具网关」注册）。
+              </p>
             )}
           </div>
           {kErr && <p {...stylex.props(ui.fieldError)}>{kErr}</p>}

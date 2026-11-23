@@ -443,6 +443,147 @@ public class PluginsController {
         return ResponseEntity.status(HttpStatus.CREATED).body(created);
     }
 
+    @PatchMapping("/api/plugins/bindings/{bindingId}")
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> updateBinding(
+        HttpServletRequest req,
+        @PathVariable("bindingId") String bindingId,
+        @RequestBody(required = false) Map<String, Object> body
+    ) {
+        authService.requireWorkspaceRole(req, List.of("admin", "developer"));
+        if (body == null || body.isEmpty()) {
+            throw new GatewayException(400, "invalid_request", "请求体不能为空。");
+        }
+        Map<String, Object> updated = new LinkedHashMap<>();
+        try (Connection conn = pool.getConnection()) {
+            String pluginId;
+            String scopeType;
+            String scopeId;
+            int priority;
+            String cfgJson;
+            boolean enabled;
+            double sampleRate;
+            try (PreparedStatement ps = conn.prepareStatement("""
+                SELECT plugin_id::text, scope_type, scope_id, priority, config_override::text, enabled, COALESCE(sample_rate, 1.0)
+                  FROM plugin_bindings
+                 WHERE id = ?::uuid
+                """)) {
+                ps.setString(1, bindingId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (!rs.next()) {
+                        throw new GatewayException(404, "not_found", "绑定不存在: " + bindingId);
+                    }
+                    pluginId = rs.getString(1);
+                    scopeType = rs.getString(2);
+                    scopeId = rs.getString(3);
+                    priority = rs.getInt(4);
+                    cfgJson = rs.getString(5);
+                    enabled = rs.getBoolean(6);
+                    sampleRate = rs.getDouble(7);
+                }
+            }
+            if (body.get("scopeType") instanceof String st && !st.isBlank()) {
+                String up = st.trim().toUpperCase();
+                if (!VALID_SCOPE_TYPES.contains(up)) {
+                    throw new GatewayException(400, "invalid_request", "不支持的 scopeType: " + st);
+                }
+                scopeType = up;
+            }
+            if (body.get("scopeId") instanceof String sid && !sid.isBlank()) {
+                scopeId = sid.trim();
+            }
+            if (body.get("priority") instanceof Number n) {
+                priority = n.intValue();
+            }
+            if (body.get("sampleRate") instanceof Number n) {
+                sampleRate = Math.max(0.0, Math.min(1.0, n.doubleValue()));
+            }
+            if (body.get("enabled") instanceof Boolean b) {
+                enabled = b;
+            }
+            if (body.get("configOverride") instanceof Map<?, ?> m) {
+                cfgJson = mapper.writeValueAsString(m);
+            }
+            try (PreparedStatement ps = conn.prepareStatement("""
+                UPDATE plugin_bindings
+                   SET scope_type = ?, scope_id = ?, priority = ?, config_override = ?::jsonb, enabled = ?, sample_rate = ?
+                 WHERE id = ?::uuid
+                """)) {
+                ps.setString(1, scopeType);
+                ps.setString(2, scopeId);
+                ps.setInt(3, priority);
+                ps.setString(4, cfgJson != null && !cfgJson.isBlank() ? cfgJson : "{}");
+                ps.setBoolean(5, enabled);
+                ps.setDouble(6, sampleRate);
+                ps.setString(7, bindingId);
+                ps.executeUpdate();
+            }
+            updated.put("id", bindingId);
+            updated.put("pluginId", pluginId);
+            updated.put("scopeType", scopeType);
+            updated.put("scopeId", scopeId);
+            updated.put("priority", priority);
+            updated.put("configOverride", cfgJson != null && !cfgJson.isBlank() ? mapper.readValue(cfgJson, Map.class) : Map.of());
+            updated.put("enabled", enabled);
+            updated.put("sampleRate", sampleRate);
+        } catch (GatewayException ge) {
+            throw ge;
+        } catch (Exception e) {
+            throw new GatewayException(500, "internal_error", "更新插件绑定失败: " + e.getMessage());
+        }
+        hotRuntime.publish();
+        return updated;
+    }
+
+    @PostMapping("/api/plugins/resolve-chain")
+    public Map<String, Object> resolveEffectivePluginChain(
+        HttpServletRequest req,
+        @RequestBody(required = false) Map<String, Object> body
+    ) {
+        SessionInfo auth = authService.requireWorkspaceRole(req, List.of("admin", "developer", "viewer"));
+        String projectId = body != null && body.get("projectId") instanceof String s && !s.isBlank() ? s.trim() : null;
+        String aliasName = body != null && body.get("aliasName") instanceof String s && !s.isBlank() ? s.trim() : null;
+        String keyId = body != null && body.get("keyId") instanceof String s && !s.isBlank() ? s.trim() : null;
+
+        var snapshot = hotRuntime.latestSnapshot();
+        PluginPipeline pipeline = dataPlaneExecutor.pluginPipeline();
+        List<Map<String, Object>> stageChains = new ArrayList<>();
+        int totalInvocations = 0;
+
+        for (PluginStage stage : PluginStage.values()) {
+            List<PluginPipeline.BoundPluginInvocation> bound = pipeline.resolveStagePlugins(
+                snapshot, stage, auth.workspaceId(), projectId, aliasName, keyId
+            );
+            List<Map<String, Object>> pluginsOut = new ArrayList<>();
+            for (PluginPipeline.BoundPluginInvocation inv : bound) {
+                Map<String, Object> pMap = new LinkedHashMap<>();
+                pMap.put("pluginId", inv.metadata() != null ? inv.metadata().id() : inv.plugin().id());
+                pMap.put("name", inv.metadata() != null ? inv.metadata().name() : inv.plugin().name());
+                pMap.put("type", inv.metadata() != null ? inv.metadata().type() : inv.plugin().type());
+                pMap.put("effectivePriority", inv.effectivePriority());
+                pMap.put("failMode", inv.failMode());
+                pMap.put("sampleRate", inv.sampleRate());
+                pMap.put("mergedConfig", inv.mergedConfig());
+                pluginsOut.add(pMap);
+                totalInvocations++;
+            }
+            Map<String, Object> stRow = new LinkedHashMap<>();
+            stRow.put("stage", stage.name());
+            stRow.put("count", pluginsOut.size());
+            stRow.put("plugins", pluginsOut);
+            stageChains.add(stRow);
+        }
+
+        Map<String, Object> res = new LinkedHashMap<>();
+        res.put("workspaceId", auth.workspaceId());
+        res.put("projectId", projectId != null ? projectId : "*");
+        res.put("aliasName", aliasName != null ? aliasName : "*");
+        res.put("keyId", keyId != null ? keyId : "*");
+        res.put("totalInvocations", totalInvocations);
+        res.put("stages", stageChains);
+        return res;
+    }
+
     @DeleteMapping("/api/plugins/bindings/{bindingId}")
     public Map<String, Object> deleteBinding(
         HttpServletRequest req,

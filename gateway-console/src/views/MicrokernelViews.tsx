@@ -126,7 +126,7 @@ export const BUILTIN_PLUGIN_TEMPLATES: BuiltinPluginTemplate[] = [
     id: 'builtin:router-peak-ewma-hedge',
     title: 'Peak-EWMA 负载感知路由与尾延迟对冲',
     category: 'routing',
-    categoryLabel: '路由与对冲',
+    categoryLabel: '路由与策略',
     className:
       'com.jihuayu.aigateway.plugin.MicrokernelRoutingAndPolicyPlugins$LeastTtftRouterPlugin',
     defaultPriority: 20,
@@ -146,7 +146,7 @@ export const BUILTIN_PLUGIN_TEMPLATES: BuiltinPluginTemplate[] = [
     id: 'builtin:router-weighted-cb',
     title: '加权负载均衡与滑动窗口熔断路由',
     category: 'routing',
-    categoryLabel: '路由与对冲',
+    categoryLabel: '路由与策略',
     className:
       'com.jihuayu.aigateway.plugin.MicrokernelRoutingAndPolicyPlugins$WeightedCircuitBreakerRouterPlugin',
     defaultPriority: 15,
@@ -160,7 +160,7 @@ export const BUILTIN_PLUGIN_TEMPLATES: BuiltinPluginTemplate[] = [
     id: 'builtin:router-prefix-cache-affinity',
     title: 'Prompt 前缀 KV-Cache 亲和路由',
     category: 'routing',
-    categoryLabel: '路由与对冲',
+    categoryLabel: '路由与策略',
     className:
       'com.jihuayu.aigateway.plugin.MicrokernelRoutingAndPolicyPlugins$PrefixCacheAffinityRouterPlugin',
     defaultPriority: 18,
@@ -173,10 +173,28 @@ export const BUILTIN_PLUGIN_TEMPLATES: BuiltinPluginTemplate[] = [
     },
   },
   {
+    id: 'builtin:router-canary-header',
+    title: 'Header / 用户标签金丝雀灰度路由',
+    category: 'routing',
+    categoryLabel: '路由与策略',
+    className:
+      'com.jihuayu.aigateway.plugin.MicrokernelRoutingAndPolicyPlugins$CanaryHeaderRouterPlugin',
+    defaultPriority: 16,
+    stages: ['ROUTE_SELECT'],
+    failMode: 'FAIL_OPEN',
+    summary:
+      '根据 X-Canary-Tag 请求头或灰度流量比例将请求定向重写至新版候选模型别名，支持零停机新模型 A/B 验证。',
+    defaultConfig: {
+      headerName: 'x-canary',
+      headerValue: 'true',
+      canaryAlias: 'support-chat-v2',
+    },
+  },
+  {
     id: 'builtin:router-jev-semantic',
     title: 'TypeSafe Jev 语义复杂度分层路由',
     category: 'routing',
-    categoryLabel: '路由与对冲',
+    categoryLabel: '路由与策略',
     className:
       'com.jihuayu.aigateway.plugin.MicrokernelRoutingAndPolicyPlugins$JevSemanticRouterPlugin',
     defaultPriority: 22,
@@ -186,6 +204,57 @@ export const BUILTIN_PLUGIN_TEMPLATES: BuiltinPluginTemplate[] = [
       '基于超低延迟 System One 语义分类器评估请求复杂度，简单问答分流至高性价比小模型，复杂推理路由至旗舰模型。',
     defaultConfig: {
       complexityThreshold: 0.65,
+    },
+  },
+  {
+    id: 'builtin:policy-model-capability',
+    title: '模型多模态能力前置合规校验',
+    category: 'routing',
+    categoryLabel: '路由与策略',
+    className:
+      'com.jihuayu.aigateway.plugin.MicrokernelRoutingAndPolicyPlugins$ModelCapabilityPolicyPlugin',
+    defaultPriority: 14,
+    stages: ['PRE_ADMIT'],
+    failMode: 'FAIL_CLOSED',
+    summary:
+      '在扣费准入前自动检查请求是否包含 tools、image_url 或 json_schema，并校验目标路由是否具备对应能力声明。',
+    defaultConfig: {
+      enforceToolsCapability: true,
+      enforceVisionCapability: true,
+    },
+  },
+  {
+    id: 'builtin:prompt-decorator-trimmer',
+    title: '系统提示词注入与上下文滑动窗口裁剪',
+    category: 'routing',
+    categoryLabel: '路由与策略',
+    className:
+      'com.jihuayu.aigateway.plugin.MicrokernelRoutingAndPolicyPlugins$PromptDecoratorTrimmerPlugin',
+    defaultPriority: 19,
+    stages: ['PRE_UPSTREAM'],
+    failMode: 'FAIL_OPEN',
+    summary:
+      '在发往上游前统一注入企业合规 System Prompt 前缀，并按最大消息轮数自动裁剪过长历史对话以节约 Token。',
+    defaultConfig: {
+      prependSystemPrompt: '请始终遵守企业数据安全规范作答。',
+      maxHistoryMessages: 20,
+    },
+  },
+  {
+    id: 'builtin:policy-mcp-tool-args',
+    title: 'MCP 工具调用参数 SQLi / SSRF 防火墙',
+    category: 'routing',
+    categoryLabel: '路由与策略',
+    className:
+      'com.jihuayu.aigateway.plugin.MicrokernelRoutingAndPolicyPlugins$McpToolArgumentPolicyPlugin',
+    defaultPriority: 13,
+    stages: ['PRE_ADMIT'],
+    failMode: 'FAIL_CLOSED',
+    summary:
+      '深度扫描 MCP tools/call 参数载荷，拦截路径穿越（../）、危险 Shell 元字符、敏感表名与私网 SSRF 注入。',
+    defaultConfig: {
+      blockPathTraversal: true,
+      blockShellInjection: true,
     },
   },
   {
@@ -205,6 +274,22 @@ export const BUILTIN_PLUGIN_TEMPLATES: BuiltinPluginTemplate[] = [
     },
   },
   {
+    id: 'builtin:semantic-cache',
+    title: '向量近似语义缓存（Semantic Cache）',
+    category: 'cache',
+    categoryLabel: '缓存与护栏',
+    className: 'com.jihuayu.aigateway.plugin.SemanticCachePlugin',
+    defaultPriority: 11,
+    stages: ['POST_ADMIT_PRE_DISPATCH', 'RESPONSE_CONTENT'],
+    failMode: 'FAIL_OPEN',
+    summary:
+      '对用户提示词计算语义特征向量并在相似度超过阈值（如 0.92）时直接返回高置信缓存回答，大幅降低高频相似咨询成本。',
+    defaultConfig: {
+      similarityThreshold: 0.92,
+      ttlSeconds: 1800,
+    },
+  },
+  {
     id: 'builtin:pii-guardrail',
     title: 'PII 敏感隐私脱敏与流式安全护栏',
     category: 'cache',
@@ -219,6 +304,56 @@ export const BUILTIN_PLUGIN_TEMPLATES: BuiltinPluginTemplate[] = [
       mode: 'MASK',
       redactEmail: true,
       redactPhone: true,
+    },
+  },
+  {
+    id: 'builtin:guardrail-jev-calibrated',
+    title: 'TypeSafe Jev 校准概率越狱与有害内容护栏',
+    category: 'cache',
+    categoryLabel: '缓存与护栏',
+    className:
+      'com.jihuayu.aigateway.plugin.MicrokernelRoutingAndPolicyPlugins$JevCalibratedGuardrailPlugin',
+    defaultPriority: 14,
+    stages: ['PRE_ADMIT'],
+    failMode: 'FAIL_CLOSED',
+    summary:
+      '利用 Jev System One 的校准概率（noul）实时评估 Prompt 注入与越狱风险，超出风险阈值立即拒绝准入且不消耗上游预算。',
+    defaultConfig: {
+      riskThreshold: 0.85,
+    },
+  },
+  {
+    id: 'builtin:ext-proc',
+    title: 'Envoy 风格外部 Webhook 协同处理器（ExtProc）',
+    category: 'cache',
+    categoryLabel: '缓存与护栏',
+    className: 'com.jihuayu.aigateway.plugin.ExtProcPlugin',
+    defaultPriority: 30,
+    stages: ['PRE_ADMIT', 'RESPONSE_CONTENT'],
+    failMode: 'FAIL_OPEN',
+    summary:
+      '将请求或响应载荷通过 HTTP POST 转发至外部自定义微服务进行合规审查、水印注入或动态改写。',
+    defaultConfig: {
+      endpointUrl: 'http://127.0.0.1:9001/ext-proc',
+      timeoutMs: 1000,
+    },
+  },
+  {
+    id: 'builtin:auth-custom-extractor',
+    title: '多源自定义 Header / Query / Basic 凭据提取',
+    category: 'security',
+    categoryLabel: '鉴权与限流',
+    className:
+      'com.jihuayu.aigateway.plugin.MicrokernelAuthAndRateLimitPlugins$CustomExtractorAuthPlugin',
+    defaultPriority: 15,
+    stages: ['AUTHENTICATE'],
+    failMode: 'FAIL_OPEN',
+    summary:
+      '支持从自定义请求头（如 X-Gateway-Key）、URL 查询参数（?api_key=）或 HTTP Basic Auth 中提取并绑定项目密钥。',
+    defaultConfig: {
+      headerNames: ['x-gateway-key', 'x-custom-token', 'api-key'],
+      queryParams: ['api_key', 'key'],
+      allowBasicAuth: true,
     },
   },
   {
@@ -240,6 +375,25 @@ export const BUILTIN_PLUGIN_TEMPLATES: BuiltinPluginTemplate[] = [
       nonceHeader: 'x-nonce',
       maxClockSkewSeconds: 300,
       credentials: {},
+    },
+  },
+  {
+    id: 'builtin:auth-jwt-oidc',
+    title: '企业 OIDC / JWT 签名校验与租户映射',
+    category: 'security',
+    categoryLabel: '鉴权与限流',
+    className:
+      'com.jihuayu.aigateway.plugin.MicrokernelAuthAndRateLimitPlugins$JwtOidcAuthPlugin',
+    defaultPriority: 22,
+    stages: ['AUTHENTICATE'],
+    failMode: 'FAIL_CLOSED',
+    summary:
+      '校验 Bearer JWT 令牌签名、iss/aud/exp 声明，自动提取 sub 作为终端用户标识（endUserId）并映射至受管项目 API Key。',
+    defaultConfig: {
+      issuer: 'https://sso.example.com',
+      audience: 'ai-gateway',
+      hs256Secret: 'replace-with-jwt-secret',
+      mappedApiKeyPlain: '',
     },
   },
   {
@@ -308,6 +462,22 @@ export const BUILTIN_PLUGIN_TEMPLATES: BuiltinPluginTemplate[] = [
       timeoutMs: 1500,
     },
   },
+  {
+    id: 'builtin:billing-redis-stream-sink',
+    title: 'FinOps 实时数仓 Redis Stream 下沉管道',
+    category: 'finops',
+    categoryLabel: 'FinOps 计费',
+    className:
+      'com.jihuayu.aigateway.plugin.MicrokernelBillingSinkPlugins$RedisStreamBillingSinkPlugin',
+    defaultPriority: 60,
+    stages: ['POST_SETTLE'],
+    failMode: 'FAIL_OPEN',
+    summary:
+      '将附带归因标签的微美元结算事件实时追加至专用 Redis Stream，供 ClickHouse / Flink 实时数仓消费。',
+    defaultConfig: {
+      streamKey: 'gw:finops:billing_stream',
+    },
+  },
 ];
 
 const ALL_STAGES = [
@@ -333,18 +503,21 @@ const DEFAULT_JS_SAMPLE = `function onPreAdmit(ctx) {
 // 1. KERNEL HEALTH & OBSERVABILITY TELEMETRY VIEW (#/telemetry)
 // ============================================================================
 export function TelemetryView({
+  canWrite,
   onNavigate,
   refreshTick,
 }: {
+  canWrite?: boolean;
   onNavigate: (view: string) => void;
   refreshTick: number;
 }) {
   const [runtime, setRuntime] = useState<any | null>(null);
   const [accessLogs, setAccessLogs] = useState<any[]>([]);
   const [spans, setSpans] = useState<any[]>([]);
+  const [dlqData, setDlqData] = useState<any>({ items: [], dlqCount: 0, recentExportedCount: 0 });
   const [metricsRaw, setMetricsRaw] = useState('');
   const [metricsFilter, setMetricsFilter] = useState('');
-  const [obsTab, setObsTab] = useState<'logs' | 'spans' | 'metrics'>('logs');
+  const [obsTab, setObsTab] = useState<'logs' | 'spans' | 'dlq' | 'metrics'>('logs');
 
   // Slow / Error log client filters
   const [minLatencyFilter, setMinLatencyFilter] = useState('0');
@@ -353,14 +526,16 @@ export function TelemetryView({
   const [selectedSpan, setSelectedSpan] = useState<any | null>(null);
 
   async function reload() {
-    const [rtRes, logsRes, spansRes] = await Promise.all([
+    const [rtRes, logsRes, spansRes, dlqRes] = await Promise.all([
       getSafe('/api/telemetry/runtime'),
       getSafe('/api/telemetry/access-logs'),
       getSafe('/api/telemetry/spans'),
+      getSafe('/api/billing/dlq'),
     ]);
     if (rtRes.ok) setRuntime(rtRes.data);
     if (logsRes.ok) setAccessLogs(items(logsRes.data));
     if (spansRes.ok) setSpans(items(spansRes.data));
+    if (dlqRes.ok) setDlqData(dlqRes.data || { items: [], dlqCount: 0, recentExportedCount: 0 });
   }
 
   async function loadPrometheusText() {
@@ -370,6 +545,26 @@ export function TelemetryView({
       setMetricsRaw(txt);
     } catch (e: any) {
       notify(e?.message || '拉取 /metrics 指标失败', 'error');
+    }
+  }
+
+  async function handleResetCircuitBreakers() {
+    try {
+      await api('/api/telemetry/circuit-breakers/reset', { method: 'POST' });
+      notify('已手动复位全部上游熔断器', 'success');
+      await reload();
+    } catch (e: any) {
+      notify(e?.message || '复位熔断器失败', 'error');
+    }
+  }
+
+  async function handleClearDlq() {
+    try {
+      const res = await api('/api/billing/dlq/clear', { method: 'POST' });
+      notify(`已清理 ${fmtInt(res?.cleared ?? 0)} 条计费 Webhook 死信记录`, 'success');
+      await reload();
+    } catch (e: any) {
+      notify(e?.message || '清理死信队列失败', 'error');
     }
   }
 
@@ -430,13 +625,20 @@ export function TelemetryView({
         .join('\n')
     : '';
 
+  const dlqItems = items(dlqData);
+
   return (
     <>
       <PageHeader
         title="内核健康与全链路可观测"
-        description="实时洞察数据面 Caffeine W-TinyLFU 近端缓存、MPSC 组提交管道、分布式 HA 状态机、Peak-EWMA 对冲引擎，以及慢请求结构化日志与 OpenTelemetry GenAI 追踪。"
+        description="实时洞察数据面 Caffeine W-TinyLFU 近端缓存、MPSC 组提交管道、分布式 HA 状态机、Peak-EWMA 对冲引擎，以及慢请求结构化日志、OpenTelemetry GenAI 追踪与计费死信队列。"
         actions={
           <>
+            {canWrite !== false && (
+              <UiButton variant="outline" onClick={handleResetCircuitBreakers}>
+                复位上游熔断器
+              </UiButton>
+            )}
             <UiButton variant="outline" onClick={() => onNavigate('plugins')}>
               配置可观测插件
             </UiButton>
@@ -503,19 +705,19 @@ export function TelemetryView({
           note={`当前开启熔断器：${fmtInt(runtime?.openCircuitBreakers ?? 0)} 个`}
         />
         <MetricCard
-          label="环形缓冲区遥测事件"
-          value={fmtInt(accessLogs.length + spans.length)}
-          unit="条"
-          note={`慢/访问日志 ${fmtInt(accessLogs.length)} 条 · OTel Span ${fmtInt(spans.length)} 条`}
+          label="计费下沉与死信监控"
+          value={fmtInt(dlqData?.recentExportedCount ?? 0)}
+          unit="笔下沉"
+          note={`Webhook 死信队列 (DLQ)：${fmtInt(dlqItems.length)} 条`}
         />
       </div>
 
       <section {...stylex.props(ui.card)}>
         <div {...stylex.props(ui.cardHeader)}>
           <div>
-            <h3 {...stylex.props(ui.cardTitle)}>可插拔遥测诊断中心</h3>
+            <h3 {...stylex.props(ui.cardTitle)}>可插拔遥测与死信诊断中心</h3>
             <p {...stylex.props(ui.cardSubtitle)}>
-              由微内核 Layer 2 可观测插件套件驱动采集，不启用对应插件时热路径保持零额外开销。
+              由微内核 Layer 2 可观测与计费下沉插件套件驱动采集，不启用对应插件时热路径保持零额外开销。
             </p>
           </div>
         </div>
@@ -523,7 +725,7 @@ export function TelemetryView({
           <Tabs
             value={obsTab}
             onValueChange={(v) => {
-              if (v === 'logs' || v === 'spans' || v === 'metrics') setObsTab(v);
+              if (v === 'logs' || v === 'spans' || v === 'dlq' || v === 'metrics') setObsTab(v);
             }}
           >
             <TabsList aria-label="遥测数据视图切换" {...stylex.props(ui.tabsList)}>
@@ -542,6 +744,14 @@ export function TelemetryView({
                 }
               >
                 OpenTelemetry GenAI Spans ({spans.length})
+              </TabsTab>
+              <TabsTab
+                value="dlq"
+                className={(s) =>
+                  stylex.props(ui.tabsTab, s.selected && ui.tabsTabSelected).className
+                }
+              >
+                计费 Webhook 死信队列 ({dlqItems.length})
               </TabsTab>
               <TabsTab
                 value="metrics"
@@ -721,6 +931,65 @@ export function TelemetryView({
               )}
             </TabsPanel>
 
+            <TabsPanel value="dlq" style={{ marginTop: '16px' }}>
+              <div
+                {...stylex.props(ui.inlineRow)}
+                style={{ justifyContent: 'space-between', marginBottom: '12px' }}
+              >
+                <span {...stylex.props(ui.mutedText)}>
+                  当 `builtin:billing-webhook-sink` 推送外部 ERP / Lago 计费接收端返回 HTTP 4xx/5xx 或超时时，事件将自动暂存至死信队列。
+                </span>
+                {dlqItems.length > 0 && canWrite !== false && (
+                  <UiButton size="sm" variant="outline" onClick={handleClearDlq}>
+                    清空已核对死信
+                  </UiButton>
+                )}
+              </div>
+              {dlqItems.length ? (
+                <div {...stylex.props(ui.tableWrap)}>
+                  <table {...stylex.props(ui.table)}>
+                    <thead>
+                      <tr>
+                        <th {...stylex.props(ui.th)}>请求 ID</th>
+                        <th {...stylex.props(ui.th)}>模型别名</th>
+                        <th {...stylex.props(ui.th, ui.thNum)}>实结金额</th>
+                        <th {...stylex.props(ui.th)}>失败原因 (dlqReason)</th>
+                        <th {...stylex.props(ui.th)} />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {dlqItems.map((d: any, idx: number) => (
+                        <tr key={d.requestId || idx}>
+                          <td {...stylex.props(ui.td, ui.tdMono)}>{d.requestId || '—'}</td>
+                          <td {...stylex.props(ui.td)}>{d.modelAlias || '—'}</td>
+                          <td {...stylex.props(ui.td, ui.tdNum)}>
+                            {fmtMoney(d.actualMicros)}
+                          </td>
+                          <td {...stylex.props(ui.td)}>
+                            <UiBadge tone="danger" label={String(d.dlqReason || 'webhook_error')} />
+                          </td>
+                          <td {...stylex.props(ui.td, ui.tdActions)}>
+                            <UiButton
+                              size="sm"
+                              variant="outline"
+                              onClick={() => setSelectedLog(d)}
+                            >
+                              查看载荷
+                            </UiButton>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <EmptyBox
+                  title="计费 Webhook 死信队列为空"
+                  description="所有已下沉的微美元结算事件均正常投递，无异常堆积。"
+                />
+              )}
+            </TabsPanel>
+
             <TabsPanel value="metrics" style={{ marginTop: '16px' }}>
               <div {...stylex.props(ui.formRow)} style={{ marginBottom: '12px' }}>
                 <Field name="metricsFilter" {...stylex.props(ui.field)}>
@@ -759,12 +1028,12 @@ export function TelemetryView({
         </div>
       </section>
 
-      {/* Structured Access Log Detail Dialog */}
+      {/* Structured Access Log / DLQ Detail Dialog */}
       <UiDialog
         open={!!selectedLog}
         onOpenChange={(o) => !o && setSelectedLog(null)}
-        title="结构化慢请求与访问日志详情"
-        description={selectedLog ? `Trace ID: ${selectedLog.traceId || '—'}` : ''}
+        title="结构化事件 JSON 载荷详情"
+        description={selectedLog ? `Request ID: ${selectedLog.requestId || '—'}` : ''}
         wide
         footer={
           <>
@@ -831,7 +1100,7 @@ export function TelemetryView({
 }
 
 // ============================================================================
-// 2. MICROKERNEL PLUGINS, BUILT-IN TEMPLATES & DRY-RUN STUDIO (#/plugins)
+// 2. MICROKERNEL PLUGINS, 8-STAGE SWIMLANE SIMULATOR & DRY-RUN STUDIO (#/plugins)
 // ============================================================================
 export function PluginsView({
   project,
@@ -846,8 +1115,14 @@ export function PluginsView({
   const [bindings, setBindings] = useState<any[]>([]);
   const [catFilter, setCatFilter] = useState<string>('all');
 
-  // Create / Install Template Modal
+  // 8-Stage Effective Chain Resolver Simulator
+  const [simAlias, setSimAlias] = useState('support-chat');
+  const [simKeyId, setSimKeyId] = useState('');
+  const [resolvedChain, setResolvedChain] = useState<any | null>(null);
+
+  // Create / Edit Plugin Modal
   const [modalOpen, setModalOpen] = useState(false);
+  const [editingPlugin, setEditingPlugin] = useState<any | null>(null);
   const [pName, setPName] = useState('');
   const [pType, setPType] = useState<'BUILTIN' | 'JS' | 'WEBHOOK' | 'JAVA_SPI'>('BUILTIN');
   const [pClassName, setPClassName] = useState('');
@@ -856,9 +1131,24 @@ export function PluginsView({
   const [pStages, setPStages] = useState<string[]>(['POST_SETTLE']);
   const [pConfigJson, setPConfigJson] = useState('{}');
   const [pSourceCode, setPSourceCode] = useState(DEFAULT_JS_SAMPLE);
+  const [pEnabled, setPEnabled] = useState(true);
   const [autoBindScope, setAutoBindScope] = useState<'PROJECT' | 'GLOBAL' | 'NONE'>('PROJECT');
   const [sampleRate, setSampleRate] = useState('1.0');
   const [formErr, setFormErr] = useState('');
+
+  // Edit Binding Modal
+  const [editingBinding, setEditingBinding] = useState<any | null>(null);
+  const [bScopeType, setBScopeType] = useState('PROJECT');
+  const [bScopeId, setBScopeId] = useState('*');
+  const [bPriority, setBPriority] = useState('40');
+  const [bSampleRate, setBSampleRate] = useState('1.0');
+  const [bConfigOverrideJson, setBConfigOverrideJson] = useState('{}');
+  const [bEnabled, setBEnabled] = useState(true);
+
+  // Dynamic JAR Hot-Loader Modal
+  const [jarModalOpen, setJarModalOpen] = useState(false);
+  const [jarPathInput, setJarPathInput] = useState('/opt/gateway/plugins/custom-plugin.jar');
+  const [jarResult, setJarResult] = useState<any | null>(null);
 
   // Dry-run modal
   const [dryRunOpen, setDryRunOpen] = useState(false);
@@ -877,6 +1167,23 @@ export function PluginsView({
     ]);
     if (plRes.ok) setPlugins(items(plRes.data));
     if (bdRes.ok) setBindings(items(bdRes.data));
+    runResolveChain();
+  }
+
+  async function runResolveChain() {
+    try {
+      const res = await api('/api/plugins/resolve-chain', {
+        method: 'POST',
+        body: {
+          projectId: project?.id || '',
+          aliasName: simAlias.trim(),
+          keyId: simKeyId.trim(),
+        },
+      });
+      setResolvedChain(res);
+    } catch {
+      /* ignore during initial load */
+    }
   }
 
   useEffect(() => {
@@ -884,6 +1191,7 @@ export function PluginsView({
   }, [project?.id, refreshTick]);
 
   function openFromTemplate(tpl: BuiltinPluginTemplate) {
+    setEditingPlugin(null);
     setPName(tpl.id);
     setPType('BUILTIN');
     setPClassName(tpl.className);
@@ -891,6 +1199,7 @@ export function PluginsView({
     setPFailMode(tpl.failMode);
     setPStages([...tpl.stages]);
     setPConfigJson(JSON.stringify(tpl.defaultConfig, null, 2));
+    setPEnabled(true);
     setAutoBindScope(project?.id ? 'PROJECT' : 'GLOBAL');
     setSampleRate('1.0');
     setFormErr('');
@@ -898,6 +1207,7 @@ export function PluginsView({
   }
 
   function openCustomJsModal() {
+    setEditingPlugin(null);
     setPName('custom-js-telemetry-guard');
     setPType('JS');
     setPClassName('');
@@ -906,13 +1216,30 @@ export function PluginsView({
     setPStages(['PRE_ADMIT']);
     setPConfigJson('{}');
     setPSourceCode(DEFAULT_JS_SAMPLE);
+    setPEnabled(true);
     setAutoBindScope(project?.id ? 'PROJECT' : 'GLOBAL');
     setSampleRate('1.0');
     setFormErr('');
     setModalOpen(true);
   }
 
-  async function handleCreatePluginAndBind() {
+  function openEditPlugin(pl: any) {
+    setEditingPlugin(pl);
+    setPName(pl.name || '');
+    setPType(pl.type || 'BUILTIN');
+    setPClassName(pl.className || '');
+    setPPriority(String(pl.priority ?? 50));
+    setPFailMode(pl.failMode === 'FAIL_OPEN' ? 'FAIL_OPEN' : 'FAIL_CLOSED');
+    setPStages(arr(pl.stages).length ? arr(pl.stages) : ['PRE_ADMIT']);
+    setPConfigJson(JSON.stringify(pl.config || {}, null, 2));
+    setPSourceCode(pl.sourceCode || DEFAULT_JS_SAMPLE);
+    setPEnabled(pl.enabled !== false);
+    setAutoBindScope('NONE');
+    setFormErr('');
+    setModalOpen(true);
+  }
+
+  async function handleSavePlugin() {
     setFormErr('');
     if (!pName.trim()) {
       setFormErr('插件名称不能为空。');
@@ -933,48 +1260,120 @@ export function PluginsView({
     const sr = Math.min(1.0, Math.max(0.0, Number(sampleRate) || 1.0));
 
     try {
-      const body: Record<string, any> = {
-        name: pName.trim(),
-        type: pType,
-        priority: prio,
-        stages: pStages,
-        failMode: pFailMode,
-        config: parsedCfg,
-        enabled: true,
-      };
-      if (pType === 'BUILTIN' || pType === 'JAVA_SPI') {
-        body.className = pClassName.trim();
-      }
-      if (pType === 'JS') {
-        body.sourceCode = pSourceCode;
-        body.maxStatements = 5000;
-      }
-
-      const created = await api('/api/plugins', { method: 'POST', body });
-      if (autoBindScope !== 'NONE' && created?.id) {
-        const scopeId = autoBindScope === 'PROJECT' && project?.id ? project.id : '*';
-        await api('/api/plugins/bindings', {
-          method: 'POST',
-          body: {
-            pluginId: created.id,
-            scopeType: autoBindScope,
-            scopeId,
-            priority: prio,
-            sampleRate: sr,
-            enabled: true,
-          },
+      if (editingPlugin?.id) {
+        const patchBody: Record<string, any> = {
+          priority: prio,
+          stages: pStages,
+          failMode: pFailMode,
+          config: parsedCfg,
+          enabled: pEnabled,
+        };
+        if (pType === 'JS') {
+          patchBody.sourceCode = pSourceCode;
+        }
+        await api(`/api/plugins/${encodeURIComponent(editingPlugin.id)}`, {
+          method: 'PATCH',
+          body: patchBody,
         });
+        notify(`插件 ${pName} 已原位更新至新版本`, 'success');
+      } else {
+        const body: Record<string, any> = {
+          name: pName.trim(),
+          type: pType,
+          priority: prio,
+          stages: pStages,
+          failMode: pFailMode,
+          config: parsedCfg,
+          enabled: pEnabled,
+        };
+        if (pType === 'BUILTIN' || pType === 'JAVA_SPI') {
+          body.className = pClassName.trim();
+        }
+        if (pType === 'JS') {
+          body.sourceCode = pSourceCode;
+          body.maxStatements = 5000;
+        }
+
+        const created = await api('/api/plugins', { method: 'POST', body });
+        if (autoBindScope !== 'NONE' && created?.id) {
+          const scopeId = autoBindScope === 'PROJECT' && project?.id ? project.id : '*';
+          await api('/api/plugins/bindings', {
+            method: 'POST',
+            body: {
+              pluginId: created.id,
+              scopeType: autoBindScope,
+              scopeId,
+              priority: prio,
+              sampleRate: sr,
+              enabled: true,
+            },
+          });
+        }
+        notify(
+          autoBindScope === 'NONE'
+            ? `插件 ${pName} 已注册`
+            : `插件 ${pName} 已注册并绑定至 ${autoBindScope === 'PROJECT' ? '当前项目' : '全局'}`,
+          'success',
+        );
       }
-      notify(
-        autoBindScope === 'NONE'
-          ? `插件 ${pName} 已注册`
-          : `插件 ${pName} 已注册并绑定至 ${autoBindScope === 'PROJECT' ? '当前项目' : '全局'}`,
-        'success',
-      );
       setModalOpen(false);
       await reload();
     } catch (e: any) {
-      setFormErr(e?.message || '注册插件失败');
+      setFormErr(e?.message || '保存插件失败');
+    }
+  }
+
+  function openEditBindingModal(b: any) {
+    setEditingBinding(b);
+    setBScopeType(b.scopeType || 'PROJECT');
+    setBScopeId(b.scopeId || '*');
+    setBPriority(String(b.priority ?? 50));
+    setBSampleRate(String(b.sampleRate ?? 1.0));
+    setBConfigOverrideJson(JSON.stringify(b.configOverride || {}, null, 2));
+    setBEnabled(b.enabled !== false);
+  }
+
+  async function handleSaveBinding() {
+    if (!editingBinding) return;
+    let parsedOverride: Record<string, any> = {};
+    try {
+      parsedOverride = bConfigOverrideJson.trim() ? JSON.parse(bConfigOverrideJson) : {};
+    } catch {
+      notify('绑定覆盖配置 JSON 格式不合法', 'error');
+      return;
+    }
+    try {
+      await api(`/api/plugins/bindings/${encodeURIComponent(editingBinding.id)}`, {
+        method: 'PATCH',
+        body: {
+          scopeType: bScopeType,
+          scopeId: bScopeId.trim() || '*',
+          priority: Number(bPriority) || 50,
+          sampleRate: Math.min(1.0, Math.max(0.0, Number(bSampleRate) || 1.0)),
+          configOverride: parsedOverride,
+          enabled: bEnabled,
+        },
+      });
+      notify('插件绑定策略已更新', 'success');
+      setEditingBinding(null);
+      await reload();
+    } catch (e: any) {
+      notify(e?.message || '更新绑定失败', 'error');
+    }
+  }
+
+  async function handleLoadJar() {
+    if (!jarPathInput.trim()) return;
+    try {
+      const res = await api('/api/plugins/load-jar', {
+        method: 'POST',
+        body: { jarPath: jarPathInput.trim() },
+      });
+      setJarResult(res);
+      notify(`成功热加载 ${fmtInt(res?.loadedCount ?? 0)} 个 Java SPI 插件`, 'success');
+      await reload();
+    } catch (e: any) {
+      setJarResult({ error: e?.message || '加载 JAR 失败' });
     }
   }
 
@@ -1030,11 +1429,14 @@ export function PluginsView({
   return (
     <>
       <PageHeader
-        title="8 阶段微内核插件与配置模板"
-        description="基于同构 PluginExecutionContext（ctx.kv / ctx.crypto / ctx.telemetry）按需挂载可观测性、自适应对冲路由、安全护栏与 FinOps 归因插件。"
+        title="8 阶段微内核插件与流水线编排中心"
+        description="基于同构 PluginExecutionContext（ctx.kv / ctx.crypto / ctx.telemetry）管理 24 个企业内置插件模板、8 阶段生效泳道预演、GraalJS 确定性沙箱与 JVM 动态 JAR 热加载。"
         actions={
           canWrite ? (
             <>
+              <UiButton variant="outline" onClick={() => setJarModalOpen(true)}>
+                热加载 SPI JAR
+              </UiButton>
               <UiButton variant="outline" onClick={() => setDryRunOpen(true)}>
                 在线沙箱 Dry-Run
               </UiButton>
@@ -1043,28 +1445,134 @@ export function PluginsView({
               </UiButton>
             </>
           ) : (
-            <UiBadge tone="neutral" label="只读角色可浏览模板" />
+            <UiBadge tone="neutral" label="只读角色可浏览模板与预演链路" />
           )
         }
       />
+
+      {/* 8-Stage Effective Pipeline Swimlane Simulator */}
+      <section {...stylex.props(ui.card)}>
+        <div {...stylex.props(ui.cardHeader)}>
+          <div>
+            <h3 {...stylex.props(ui.cardTitle)}>
+              8 阶段微内核生效插件链可视化泳道（Effective Chain Simulator）
+            </h3>
+            <p {...stylex.props(ui.cardSubtitle)}>
+              自动合并 GLOBAL → WORKSPACE → PROJECT → ALIAS → API_KEY 五级作用域与优先级，预览请求在各生命周期阶段真实触发的插件链。
+            </p>
+          </div>
+          <UiBadge
+            tone="info"
+            label={`生效挂载点：${fmtInt(resolvedChain?.totalInvocations ?? 0)} 处`}
+          />
+        </div>
+        <div {...stylex.props(ui.cardBody, ui.stackSm)}>
+          <div {...stylex.props(ui.formRow)}>
+            <div {...stylex.props(ui.field)}>
+              <label {...stylex.props(ui.fieldLabel)}>模拟项目上下文</label>
+              <input
+                readOnly
+                value={project?.name ? `${project.name} (${project.id})` : '全局 (*)'}
+                {...stylex.props(ui.input)}
+              />
+            </div>
+            <Field name="simAlias" {...stylex.props(ui.field)}>
+              <FieldLabel {...stylex.props(ui.fieldLabel)}>模拟模型别名 (ALIAS)</FieldLabel>
+              <Input
+                value={simAlias}
+                onValueChange={setSimAlias}
+                placeholder="例如：support-chat"
+                {...stylex.props(ui.input)}
+              />
+            </Field>
+            <Field name="simKeyId" {...stylex.props(ui.field)}>
+              <FieldLabel {...stylex.props(ui.fieldLabel)}>模拟密钥 ID (API_KEY，可选)</FieldLabel>
+              <Input
+                value={simKeyId}
+                onValueChange={setSimKeyId}
+                placeholder="留空代表任意密钥 *"
+                {...stylex.props(ui.input)}
+              />
+            </Field>
+            <UiButton variant="secondary" onClick={runResolveChain}>
+              计算生效流水线
+            </UiButton>
+          </div>
+
+          <div {...stylex.props(ui.grid3)} style={{ marginTop: '8px' }}>
+            {arr(resolvedChain?.stages).map((st: any, idx: number) => {
+              const itemsInStage = arr(st.plugins);
+              return (
+                <div key={st.stage} {...stylex.props(ui.detailItem, ui.stackSm)}>
+                  <div
+                    {...stylex.props(ui.inlineRow)}
+                    style={{ justifyContent: 'space-between' }}
+                  >
+                    <strong style={{ fontSize: '12px', fontFamily: 'var(--font-mono)' }}>
+                      {idx + 1}. {st.stage}
+                    </strong>
+                    <UiBadge
+                      tone={itemsInStage.length > 0 ? 'success' : 'neutral'}
+                      label={`${itemsInStage.length} 个生效`}
+                    />
+                  </div>
+                  {itemsInStage.length ? (
+                    <div {...stylex.props(ui.stackSm)}>
+                      {itemsInStage.map((pl: any, pIdx: number) => (
+                        <div
+                          key={`${pl.pluginId}-${pIdx}`}
+                          style={{
+                            fontSize: '12px',
+                            padding: '6px 8px',
+                            borderRadius: '4px',
+                            backgroundColor: 'var(--bg-background)',
+                            border: '1px solid var(--border-default)',
+                          }}
+                        >
+                          <div
+                            {...stylex.props(ui.inlineRow)}
+                            style={{ justifyContent: 'space-between' }}
+                          >
+                            <strong>{pl.name}</strong>
+                            <span {...stylex.props(ui.tdMono)}>
+                              P{pl.effectivePriority} · {fmtPct(pl.sampleRate)}
+                            </span>
+                          </div>
+                          <div {...stylex.props(ui.mutedText)}>
+                            {pl.type} · {pl.failMode}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <span {...stylex.props(ui.mutedText)}>零插件挂载（0 开销直通）</span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </section>
 
       {/* Built-in Plugin Configuration Templates Gallery */}
       <section {...stylex.props(ui.card)}>
         <div {...stylex.props(ui.cardHeader)}>
           <div>
-            <h3 {...stylex.props(ui.cardTitle)}>内置微内核插件配置模板库</h3>
+            <h3 {...stylex.props(ui.cardTitle)}>
+              内置微内核插件配置模板库（{BUILTIN_PLUGIN_TEMPLATES.length} 个企业级模板）
+            </h3>
             <p {...stylex.props(ui.cardSubtitle)}>
               选择任意内置插件模板即可预填推荐阶段、容错策略与 JSON 参数，一键绑定至当前项目或全局。
             </p>
           </div>
           <div {...stylex.props(ui.inlineRow)}>
             {[
-              ['all', '全部模板'],
+              ['all', `全部 (${BUILTIN_PLUGIN_TEMPLATES.length})`],
               ['observability', '可观测性 (4)'],
-              ['routing', '路由与对冲 (4)'],
-              ['cache', '缓存与护栏'],
-              ['security', '鉴权与限流'],
-              ['finops', 'FinOps 计费'],
+              ['routing', '路由与策略 (8)'],
+              ['cache', '缓存与护栏 (5)'],
+              ['security', '鉴权与限流 (5)'],
+              ['finops', 'FinOps 计费 (3)'],
             ].map(([k, label]) => (
               <UiButton
                 key={k}
@@ -1097,12 +1605,19 @@ export function PluginsView({
                 <div {...stylex.props(ui.tdMono)} style={{ color: 'var(--fg-muted)' }}>
                   {tpl.id} · 阶段: {tpl.stages.join(', ')} · 默认优先级 P{tpl.defaultPriority}
                 </div>
-                <p style={{ margin: 0, fontSize: '12px', color: 'var(--fg-muted)', lineHeight: 1.55 }}>
+                <p
+                  style={{
+                    margin: 0,
+                    fontSize: '12px',
+                    color: 'var(--fg-muted)',
+                    lineHeight: 1.55,
+                  }}
+                >
                   {tpl.summary}
                 </p>
                 <pre
                   {...stylex.props(ui.codeBlock)}
-                  style={{ fontSize: '11px', padding: '8px 10px', maxHeight: '120px' }}
+                  style={{ fontSize: '11px', padding: '8px 10px', maxHeight: '110px' }}
                 >
                   <code>{JSON.stringify(tpl.defaultConfig, null, 2)}</code>
                 </pre>
@@ -1130,7 +1645,7 @@ export function PluginsView({
             <div>
               <h3 {...stylex.props(ui.cardTitle)}>已注册插件实例</h3>
               <p {...stylex.props(ui.cardSubtitle)}>
-                支持 BUILTIN、GraalJS 确定性沙箱、JAVA_SPI 与外部 Webhook。
+                支持原位编辑配置与代码（自动递增版本号并热下发）。
               </p>
             </div>
             <UiBadge tone="neutral" label={`${plugins.length} 个实例`} />
@@ -1143,7 +1658,7 @@ export function PluginsView({
                     <tr>
                       <th {...stylex.props(ui.th)}>名称 / 类型</th>
                       <th {...stylex.props(ui.th)}>挂载阶段</th>
-                      <th {...stylex.props(ui.th)}>优先级 / 容错</th>
+                      <th {...stylex.props(ui.th)}>优先级 / 状态</th>
                       <th {...stylex.props(ui.th)} />
                     </tr>
                   </thead>
@@ -1153,7 +1668,7 @@ export function PluginsView({
                         <td {...stylex.props(ui.td)}>
                           <span {...stylex.props(ui.cellPrimary)}>{pl.name}</span>
                           <span {...stylex.props(ui.cellSub, ui.tdMono)}>
-                            {pl.type} · v{pl.version}
+                            {pl.type} · v{pl.version} · {pl.failMode}
                           </span>
                         </td>
                         <td {...stylex.props(ui.td)}>
@@ -1164,17 +1679,30 @@ export function PluginsView({
                           </div>
                         </td>
                         <td {...stylex.props(ui.td, ui.tdMono)}>
-                          P{pl.priority} · {pl.failMode}
+                          P{pl.priority} ·{' '}
+                          <UiBadge status={pl.enabled === false ? 'disabled' : 'enabled'} />
                         </td>
                         <td {...stylex.props(ui.td, ui.tdActions)}>
                           {canWrite && (
-                            <UiButton
-                              size="sm"
-                              variant="outline"
-                              onClick={() => setDeletingPlugin(pl)}
+                            <div
+                              {...stylex.props(ui.inlineRow)}
+                              style={{ justifyContent: 'flex-end' }}
                             >
-                              卸载
-                            </UiButton>
+                              <UiButton
+                                size="sm"
+                                variant="secondary"
+                                onClick={() => openEditPlugin(pl)}
+                              >
+                                编辑
+                              </UiButton>
+                              <UiButton
+                                size="sm"
+                                variant="outline"
+                                onClick={() => setDeletingPlugin(pl)}
+                              >
+                                卸载
+                              </UiButton>
+                            </div>
                           )}
                         </td>
                       </tr>
@@ -1196,7 +1724,7 @@ export function PluginsView({
             <div>
               <h3 {...stylex.props(ui.cardTitle)}>作用域绑定与采样率（Plugin Bindings）</h3>
               <p {...stylex.props(ui.cardSubtitle)}>
-                支持 GLOBAL / WORKSPACE / PROJECT / ALIAS / API_KEY 五级作用域与比例采样。
+                支持原位调整作用域、优先级、采样率与覆盖配置（configOverride）。
               </p>
             </div>
             <UiBadge tone="neutral" label={`${bindings.length} 条绑定`} />
@@ -1222,7 +1750,9 @@ export function PluginsView({
                             <span {...stylex.props(ui.cellPrimary)}>
                               {pl?.name || b.pluginId}
                             </span>
-                            <span {...stylex.props(ui.cellSub, ui.tdMono)}>P{b.priority}</span>
+                            <span {...stylex.props(ui.cellSub, ui.tdMono)}>
+                              P{b.priority} · {b.enabled === false ? '已暂停' : '启用中'}
+                            </span>
                           </td>
                           <td {...stylex.props(ui.td, ui.tdMono)}>
                             <UiBadge tone="info" label={b.scopeType} />{' '}
@@ -1233,13 +1763,25 @@ export function PluginsView({
                           </td>
                           <td {...stylex.props(ui.td, ui.tdActions)}>
                             {canWrite && (
-                              <UiButton
-                                size="sm"
-                                variant="outline"
-                                onClick={() => handleDeleteBinding(b)}
+                              <div
+                                {...stylex.props(ui.inlineRow)}
+                                style={{ justifyContent: 'flex-end' }}
                               >
-                                解绑
-                              </UiButton>
+                                <UiButton
+                                  size="sm"
+                                  variant="secondary"
+                                  onClick={() => openEditBindingModal(b)}
+                                >
+                                  编辑
+                                </UiButton>
+                                <UiButton
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => handleDeleteBinding(b)}
+                                >
+                                  解绑
+                                </UiButton>
+                              </div>
                             )}
                           </td>
                         </tr>
@@ -1258,11 +1800,17 @@ export function PluginsView({
         </section>
       </div>
 
-      {/* Create / Configure Plugin from Template Modal */}
+      {/* Create / Edit Plugin Modal */}
       <UiDialog
         open={modalOpen}
         onOpenChange={setModalOpen}
-        title={pType === 'BUILTIN' ? '配置并启用内置微内核插件' : '创建自定义微内核插件'}
+        title={
+          editingPlugin
+            ? `编辑插件实例：${editingPlugin.name} (v${editingPlugin.version})`
+            : pType === 'BUILTIN'
+              ? '配置并启用内置微内核插件'
+              : '创建自定义微内核插件'
+        }
         description="保存后将通过 Redis Pub/Sub 秒级热更新同步至所有数据面节点。"
         wide
         footer={
@@ -1270,8 +1818,8 @@ export function PluginsView({
             <UiButton variant="outline" onClick={() => setModalOpen(false)}>
               取消
             </UiButton>
-            <UiButton variant="primary" onClick={handleCreatePluginAndBind}>
-              注册并热加载生效
+            <UiButton variant="primary" onClick={handleSavePlugin}>
+              {editingPlugin ? '保存更新并热下发' : '注册并热加载生效'}
             </UiButton>
           </>
         }
@@ -1280,7 +1828,12 @@ export function PluginsView({
           <div {...stylex.props(ui.formRow)}>
             <Field name="pluginName" {...stylex.props(ui.field)}>
               <FieldLabel {...stylex.props(ui.fieldLabel)}>插件实例标识</FieldLabel>
-              <Input value={pName} onValueChange={setPName} {...stylex.props(ui.input)} />
+              <Input
+                value={pName}
+                onValueChange={setPName}
+                readOnly={!!editingPlugin}
+                {...stylex.props(ui.input)}
+              />
             </Field>
             <Field name="pluginPriority" {...stylex.props(ui.field)}>
               <FieldLabel {...stylex.props(ui.fieldLabel)}>执行优先级（越小越先执行）</FieldLabel>
@@ -1305,32 +1858,36 @@ export function PluginsView({
                 <option value="FAIL_CLOSED">FAIL_CLOSED（鉴权/安全护栏推荐：异常严格阻断）</option>
               </select>
             </div>
-            <div {...stylex.props(ui.field)}>
-              <label {...stylex.props(ui.fieldLabel)}>自动绑定作用域</label>
-              <select
-                value={autoBindScope}
-                onChange={(e) =>
-                  setAutoBindScope(e.target.value as 'PROJECT' | 'GLOBAL' | 'NONE')
-                }
-                {...stylex.props(ui.input)}
-              >
-                <option value="PROJECT">当前项目（{project?.name || 'Project'}）</option>
-                <option value="GLOBAL">工作空间全局（GLOBAL *）</option>
-                <option value="NONE">仅注册插件，暂不绑定</option>
-              </select>
-            </div>
-            <Field name="sampleRate" {...stylex.props(ui.field)}>
-              <FieldLabel {...stylex.props(ui.fieldLabel)}>执行采样率（0.0 ~ 1.0）</FieldLabel>
-              <Input
-                type="number"
-                min="0"
-                max="1"
-                step="0.05"
-                value={sampleRate}
-                onValueChange={setSampleRate}
-                {...stylex.props(ui.input)}
-              />
-            </Field>
+            {!editingPlugin && (
+              <>
+                <div {...stylex.props(ui.field)}>
+                  <label {...stylex.props(ui.fieldLabel)}>自动绑定作用域</label>
+                  <select
+                    value={autoBindScope}
+                    onChange={(e) =>
+                      setAutoBindScope(e.target.value as 'PROJECT' | 'GLOBAL' | 'NONE')
+                    }
+                    {...stylex.props(ui.input)}
+                  >
+                    <option value="PROJECT">当前项目（{project?.name || 'Project'}）</option>
+                    <option value="GLOBAL">工作空间全局（GLOBAL *）</option>
+                    <option value="NONE">仅注册插件，暂不绑定</option>
+                  </select>
+                </div>
+                <Field name="sampleRate" {...stylex.props(ui.field)}>
+                  <FieldLabel {...stylex.props(ui.fieldLabel)}>执行采样率（0.0 ~ 1.0）</FieldLabel>
+                  <Input
+                    type="number"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value={sampleRate}
+                    onValueChange={setSampleRate}
+                    {...stylex.props(ui.input)}
+                  />
+                </Field>
+              </>
+            )}
           </div>
 
           <div {...stylex.props(ui.field)}>
@@ -1374,11 +1931,141 @@ export function PluginsView({
               style={{ fontFamily: 'var(--font-mono)', minHeight: '130px' }}
             />
             <FieldDescription {...stylex.props(ui.fieldHint)}>
-              内置类：{pClassName || 'GraalJS Sandbox'}
+              实现类：{pClassName || 'GraalJS Sandbox'}
             </FieldDescription>
           </div>
 
+          <UiSwitch
+            checked={pEnabled}
+            onChange={setPEnabled}
+            label={pEnabled ? '插件状态：已启用' : '插件状态：已禁用'}
+          />
+
           {formErr && <p {...stylex.props(ui.fieldError)}>{formErr}</p>}
+        </div>
+      </UiDialog>
+
+      {/* Edit Binding Modal */}
+      <UiDialog
+        open={!!editingBinding}
+        onOpenChange={(o) => !o && setEditingBinding(null)}
+        title="编辑插件作用域绑定与采样率"
+        description="可针对特定项目、模型别名或 API Key 覆盖插件默认参数（configOverride）并设置灰度采样率。"
+        wide
+        footer={
+          <>
+            <UiButton variant="outline" onClick={() => setEditingBinding(null)}>
+              取消
+            </UiButton>
+            <UiButton variant="primary" onClick={handleSaveBinding}>
+              保存绑定变更
+            </UiButton>
+          </>
+        }
+      >
+        {editingBinding && (
+          <div {...stylex.props(ui.formGrid)}>
+            <div {...stylex.props(ui.formRow)}>
+              <div {...stylex.props(ui.field)}>
+                <label {...stylex.props(ui.fieldLabel)}>作用域级别 (scopeType)</label>
+                <select
+                  value={bScopeType}
+                  onChange={(e) => setBScopeType(e.target.value)}
+                  {...stylex.props(ui.input)}
+                >
+                  <option value="GLOBAL">GLOBAL (全局)</option>
+                  <option value="WORKSPACE">WORKSPACE (工作空间)</option>
+                  <option value="PROJECT">PROJECT (项目)</option>
+                  <option value="ALIAS">ALIAS (模型别名)</option>
+                  <option value="API_KEY">API_KEY (单密钥)</option>
+                </select>
+              </div>
+              <Field name="bScopeId" {...stylex.props(ui.field)}>
+                <FieldLabel {...stylex.props(ui.fieldLabel)}>作用域目标 ID (scopeId)</FieldLabel>
+                <Input
+                  value={bScopeId}
+                  onValueChange={setBScopeId}
+                  placeholder="* 或具体 Project/Alias/Key ID"
+                  {...stylex.props(ui.input)}
+                />
+              </Field>
+            </div>
+            <div {...stylex.props(ui.formRow)}>
+              <Field name="bPriority" {...stylex.props(ui.field)}>
+                <FieldLabel {...stylex.props(ui.fieldLabel)}>覆盖执行优先级</FieldLabel>
+                <Input
+                  type="number"
+                  value={bPriority}
+                  onValueChange={setBPriority}
+                  {...stylex.props(ui.input)}
+                />
+              </Field>
+              <Field name="bSampleRate" {...stylex.props(ui.field)}>
+                <FieldLabel {...stylex.props(ui.fieldLabel)}>流量采样率 (0.0 ~ 1.0)</FieldLabel>
+                <Input
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={bSampleRate}
+                  onValueChange={setBSampleRate}
+                  {...stylex.props(ui.input)}
+                />
+              </Field>
+            </div>
+            <div {...stylex.props(ui.field)}>
+              <label {...stylex.props(ui.fieldLabel)}>
+                作用域参数覆盖 JSON（configOverride，将与插件基础 config 深度合并）
+              </label>
+              <textarea
+                value={bConfigOverrideJson}
+                onChange={(e) => setBConfigOverrideJson(e.target.value)}
+                {...stylex.props(ui.textarea)}
+                style={{ fontFamily: 'var(--font-mono)', minHeight: '110px' }}
+              />
+            </div>
+            <UiSwitch
+              checked={bEnabled}
+              onChange={setBEnabled}
+              label={bEnabled ? '绑定状态：已启用' : '绑定状态：已暂停'}
+            />
+          </div>
+        )}
+      </UiDialog>
+
+      {/* Dynamic SPI JAR Hot-Loader Dialog */}
+      <UiDialog
+        open={jarModalOpen}
+        onOpenChange={setJarModalOpen}
+        title="JVM 动态 SPI JAR 插件热加载"
+        description="使用隔离 URLClassLoader 扫描指定 JAR 包中的 GatewayPlugin SPI 实现类并即时注册到微内核流水线。"
+        wide
+        footer={
+          <>
+            <UiButton variant="outline" onClick={() => setJarModalOpen(false)}>
+              关闭
+            </UiButton>
+            <UiButton variant="primary" onClick={handleLoadJar}>
+              执行热加载
+            </UiButton>
+          </>
+        }
+      >
+        <div {...stylex.props(ui.formGrid)}>
+          <Field name="jarPath" {...stylex.props(ui.field)}>
+            <FieldLabel {...stylex.props(ui.fieldLabel)}>服务端本地 JAR 文件绝对路径</FieldLabel>
+            <Input
+              value={jarPathInput}
+              onValueChange={setJarPathInput}
+              placeholder="/opt/gateway/plugins/my-custom-plugin.jar"
+              {...stylex.props(ui.input)}
+            />
+          </Field>
+          {jarResult && (
+            <pre {...stylex.props(ui.codeBlock)}>
+              <code>{JSON.stringify(jarResult, null, 2)}</code>
+            </pre>
+          )}
         </div>
       </UiDialog>
 
