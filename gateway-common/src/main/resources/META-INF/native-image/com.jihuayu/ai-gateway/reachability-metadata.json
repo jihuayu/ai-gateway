@@ -1,0 +1,30 @@
+{
+  "foreign": {
+    "downcalls": [
+      { "returnType": "jint", "parameterTypes": ["void*", "void*", "void*"] },
+      { "returnType": "jint", "parameterTypes": ["void*", "void*"] },
+      { "returnType": "jint", "parameterTypes": ["void*"] },
+      { "returnType": "void*", "parameterTypes": ["void*", "void*"] },
+      { "returnType": "void*", "parameterTypes": ["void*"] },
+      { "returnType": "void", "parameterTypes": ["void*", "void*"] },
+      { "returnType": "void", "parameterTypes": ["void*"] },
+      { "returnType": "void", "parameterTypes": [] },
+      {
+        "returnType": "void*",
+        "parameterTypes": ["void*", "void*", "jlong", "jint", "void*", "jlong", "void*", "jlong", "void*"]
+      },
+      {
+        "returnType": "void*",
+        "parameterTypes": ["void*", "jlong", "jint", "void*", "jlong", "void*", "jlong", "void*"]
+      }
+    ],
+    "directUpcalls": [
+      {
+        "class": "com.jihuayu.aigateway.plugin.NativeFfmPluginLoader",
+        "method": "onHostUpcall",
+        "returnType": "jint",
+        "parameterTypes": ["jlong", "void*", "jlong", "void*", "jlong", "void*"]
+      }
+    ]
+  }
+}

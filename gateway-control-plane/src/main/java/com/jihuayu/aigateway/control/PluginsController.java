@@ -6,10 +6,13 @@ import com.jihuayu.aigateway.control.ControlAuthService.SessionInfo;
 import com.jihuayu.aigateway.hot.GatewayException;
 import com.jihuayu.aigateway.hot.HotRuntime;
 import com.jihuayu.aigateway.netty.DataPlaneExecutor;
+import com.jihuayu.aigateway.plugin.DynamicJarPluginLoader;
 import com.jihuayu.aigateway.plugin.ExtProcPlugin;
 import com.jihuayu.aigateway.plugin.GatewayPlugin;
+import com.jihuayu.aigateway.plugin.JarToSharedLibCompiler;
 import com.jihuayu.aigateway.plugin.JsPluginSandbox;
 import com.jihuayu.aigateway.plugin.JsPluginSandbox.JsSandboxSecurityException;
+import com.jihuayu.aigateway.plugin.NativeFfmPluginLoader;
 import com.jihuayu.aigateway.plugin.PluginExecutionContext;
 import com.jihuayu.aigateway.plugin.PluginPipeline;
 import com.jihuayu.aigateway.plugin.PluginResult;
@@ -38,12 +41,12 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * Control Plane Plugin Management API, Scoped Binding Registry, Dynamic JAR Loader & Online Dry-Run Debugger (#36, #41, #42, #37, #51, #52, #53, #54).
+ * Control Plane Plugin Management API, Scoped Binding Registry, Dynamic JAR / Native FFM Loader &amp; Online Dry-Run Debugger (#36, #41, #42, #37, #51, #52, #53, #54).
  */
 @RestController
 public class PluginsController {
 
-    private static final Set<String> VALID_PLUGIN_TYPES = Set.of("BUILTIN", "JAVA_SPI", "JS", "WEBHOOK");
+    private static final Set<String> VALID_PLUGIN_TYPES = Set.of("BUILTIN", "JAVA_SPI", "NATIVE_FFM", "JS", "WEBHOOK");
     private static final Set<String> VALID_FAIL_MODES = Set.of("FAIL_OPEN", "FAIL_CLOSED");
     private static final Set<String> VALID_SCOPE_TYPES = Set.of("GLOBAL", "WORKSPACE", "PROJECT", "ALIAS", "API_KEY");
 
@@ -130,8 +133,11 @@ public class PluginsController {
 
         String sourceCode = body.get("sourceCode") instanceof String s ? s : null;
         String codeSha256 = null;
-        String jarPath = body.get("jarPath") instanceof String s ? s : null;
+        String jarPath = body.get("jarPath") instanceof String s && !s.isBlank()
+            ? s.trim()
+            : (body.get("libPath") instanceof String ls && !ls.isBlank() ? ls.trim() : null);
         String className = body.get("className") instanceof String s ? s : null;
+        boolean compileNative = Boolean.TRUE.equals(body.get("compileNative"));
         String id = UUID.randomUUID().toString();
 
         if ("JS".equals(type)) {
@@ -146,11 +152,33 @@ public class PluginsController {
             } catch (Exception ex) {
                 throw new GatewayException(400, "invalid_js_syntax", "JS 插件编译校验失败: " + ex.getMessage());
             }
-        } else if ("JAVA_SPI".equals(type) && jarPath != null && !jarPath.isBlank()) {
+        } else if ("JAVA_SPI".equals(type) && jarPath != null) {
             try {
-                dataPlaneExecutor.pluginPipeline().jarLoader().loadJar(Path.of(jarPath));
+                DynamicJarPluginLoader loader = dataPlaneExecutor.pluginPipeline().jarLoader();
+                if (compileNative) {
+                    Path compiledLib = JarToSharedLibCompiler.compileJarToSharedLib(Path.of(jarPath), null);
+                    loader.loadNativeLibrary(compiledLib);
+                    jarPath = compiledLib.toString();
+                    type = "NATIVE_FFM";
+                } else {
+                    loader.loadJar(Path.of(jarPath));
+                }
             } catch (Exception ex) {
                 throw new GatewayException(400, "jar_load_failed", ex.getMessage());
+            }
+        } else if ("NATIVE_FFM".equals(type) && jarPath != null) {
+            try {
+                DynamicJarPluginLoader loader = dataPlaneExecutor.pluginPipeline().jarLoader();
+                Path target = Path.of(jarPath);
+                if (jarPath.endsWith(".jar")) {
+                    Path compiledLib = JarToSharedLibCompiler.compileJarToSharedLib(target, null);
+                    loader.loadNativeLibrary(compiledLib);
+                    jarPath = compiledLib.toString();
+                } else {
+                    loader.loadNativeLibrary(target);
+                }
+            } catch (Exception ex) {
+                throw new GatewayException(400, "native_lib_load_failed", ex.getMessage());
             }
         }
 
@@ -337,21 +365,49 @@ public class PluginsController {
         @PathVariable("pluginId") String pluginId
     ) {
         SessionInfo auth = authService.requireWorkspaceRole(req, List.of("admin", "developer"));
-        try (Connection conn = pool.getConnection();
-             PreparedStatement ps = conn.prepareStatement("DELETE FROM plugins WHERE id = ?::uuid AND (workspace_id = ?::uuid OR workspace_id IS NULL)")) {
-            ps.setString(1, pluginId);
-            ps.setString(2, auth.workspaceId());
-            int affected = ps.executeUpdate();
-            if (affected == 0) {
-                throw new GatewayException(404, "not_found", "插件不存在: " + pluginId);
+        String deletedType = null;
+        String deletedJarPath = null;
+        boolean stillReferenced = false;
+        try (Connection conn = pool.getConnection()) {
+            try (PreparedStatement ps = conn.prepareStatement("""
+                DELETE FROM plugins
+                 WHERE id = ?::uuid AND (workspace_id = ?::uuid OR workspace_id IS NULL)
+                RETURNING type, jar_path
+                """)) {
+                ps.setString(1, pluginId);
+                ps.setString(2, auth.workspaceId());
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (!rs.next()) {
+                        throw new GatewayException(404, "not_found", "插件不存在: " + pluginId);
+                    }
+                    deletedType = rs.getString(1);
+                    deletedJarPath = rs.getString(2);
+                }
+            }
+            if (deletedJarPath != null && !deletedJarPath.isBlank()) {
+                try (PreparedStatement checkPs = conn.prepareStatement("SELECT 1 FROM plugins WHERE jar_path = ? LIMIT 1")) {
+                    checkPs.setString(1, deletedJarPath);
+                    try (ResultSet crs = checkPs.executeQuery()) {
+                        stillReferenced = crs.next();
+                    }
+                }
             }
         } catch (GatewayException ge) {
             throw ge;
         } catch (Exception e) {
             throw new GatewayException(500, "internal_error", "删除插件失败: " + e.getMessage());
         }
+
+        boolean runtimeUnloaded = false;
+        if (!stillReferenced && deletedJarPath != null && !deletedJarPath.isBlank()
+            && ("NATIVE_FFM".equals(deletedType) || "JAVA_SPI".equals(deletedType))) {
+            try {
+                runtimeUnloaded = dataPlaneExecutor.pluginPipeline().jarLoader().unloadJar(Path.of(deletedJarPath));
+            } catch (Exception ignored) {}
+        }
+
         hotRuntime.publish();
-        return Map.of("deleted", true, "id", pluginId);
+        return Map.of("deleted", true, "id", pluginId, "runtimeUnloaded", runtimeUnloaded);
     }
 
     @GetMapping("/api/plugins/bindings")
@@ -461,33 +517,154 @@ public class PluginsController {
     }
 
     /**
-     * JVM-mode Dynamic JAR Hot-Loader endpoint (#36).
+     * Dynamic JAR (or compiled {@code --shared} native library) Hot-Loader endpoint (#36).
      */
     @PostMapping("/api/plugins/load-jar")
     public Map<String, Object> loadJarPlugin(
         HttpServletRequest req,
         @RequestBody(required = false) Map<String, Object> body
     ) {
-        SessionInfo auth = authService.requireWorkspaceRole(req, List.of("admin", "developer"));
+        authService.requireWorkspaceRole(req, List.of("admin", "developer"));
         if (body == null || !(body.get("jarPath") instanceof String jarPath) || jarPath.isBlank()) {
             throw new GatewayException(400, "invalid_request", "jarPath 不能为空。");
         }
+        boolean compileNative = Boolean.TRUE.equals(body.get("compileNative"));
+        Path targetPath = Path.of(jarPath.trim());
+        Path outLibPath = (body.get("outputLibPath") instanceof String out && !out.isBlank()) ? Path.of(out.trim()) : null;
         try {
-            List<GatewayPlugin> loaded = dataPlaneExecutor.pluginPipeline().jarLoader().loadJar(Path.of(jarPath.trim()));
-            List<Map<String, Object>> pluginSummaries = new ArrayList<>();
-            for (GatewayPlugin gp : loaded) {
-                pluginSummaries.add(Map.of(
-                    "id", gp.id(),
-                    "name", gp.name(),
-                    "type", gp.type(),
-                    "priority", gp.priority(),
-                    "className", gp.getClass().getName()
-                ));
-            }
-            return Map.of("loadedCount", loaded.size(), "plugins", pluginSummaries);
+            DynamicJarPluginLoader loader = dataPlaneExecutor.pluginPipeline().jarLoader();
+            List<GatewayPlugin> loaded = compileNative
+                ? loader.compileAndLoadJarAsNative(targetPath, outLibPath)
+                : loader.loadJar(targetPath);
+            return Map.of("loadedCount", loaded.size(), "plugins", summarizePlugins(loaded));
         } catch (Exception e) {
             throw new GatewayException(400, "jar_load_failed", e.getMessage());
         }
+    }
+
+    /**
+     * Dynamic JAR Unloader endpoint (#36).
+     */
+    @PostMapping("/api/plugins/unload-jar")
+    public Map<String, Object> unloadJarPlugin(
+        HttpServletRequest req,
+        @RequestBody(required = false) Map<String, Object> body
+    ) {
+        authService.requireWorkspaceRole(req, List.of("admin", "developer"));
+        if (body == null) {
+            throw new GatewayException(400, "invalid_request", "请求体不能为空。");
+        }
+        DynamicJarPluginLoader loader = dataPlaneExecutor.pluginPipeline().jarLoader();
+        boolean unloaded;
+        if (body.get("jarPath") instanceof String jarPath && !jarPath.isBlank()) {
+            unloaded = loader.unloadJar(Path.of(jarPath.trim()));
+        } else if (body.get("pluginId") instanceof String pluginId && !pluginId.isBlank()) {
+            unloaded = loader.unloadPluginById(pluginId.trim());
+        } else {
+            throw new GatewayException(400, "invalid_request", "必须提供 jarPath 或 pluginId。");
+        }
+        return Map.of("unloaded", unloaded);
+    }
+
+    /**
+     * JDK 25 FFM Native Shared-Library ({@code .so}/{@code .dylib}/{@code .dll}) Hot-Loader &amp;
+     * Unmodified {@code .jar} -> {@code --shared} Compiler endpoint (#36).
+     */
+    @PostMapping("/api/plugins/load-native")
+    public Map<String, Object> loadNativePlugin(
+        HttpServletRequest req,
+        @RequestBody(required = false) Map<String, Object> body
+    ) {
+        authService.requireWorkspaceRole(req, List.of("admin", "developer"));
+        if (body == null) {
+            throw new GatewayException(400, "invalid_request", "请求体不能为空。");
+        }
+        DynamicJarPluginLoader loader = dataPlaneExecutor.pluginPipeline().jarLoader();
+        try {
+            if (body.get("libPath") instanceof String libPath && !libPath.isBlank()) {
+                Path target = Path.of(libPath.trim()).toAbsolutePath().normalize();
+                List<GatewayPlugin> loaded = loader.loadNativeLibrary(target);
+                return Map.of(
+                    "loadedCount", loaded.size(),
+                    "libraryPath", target.toString(),
+                    "plugins", summarizePlugins(loaded)
+                );
+            }
+            if (body.get("jarPath") instanceof String jarPath && !jarPath.isBlank()) {
+                Path outLib = (body.get("outputLibPath") instanceof String out && !out.isBlank())
+                    ? Path.of(out.trim())
+                    : null;
+                Path compiled = JarToSharedLibCompiler.compileJarToSharedLib(Path.of(jarPath.trim()), outLib);
+                List<GatewayPlugin> loaded = loader.loadNativeLibrary(compiled);
+                return Map.of(
+                    "loadedCount", loaded.size(),
+                    "libraryPath", compiled.toString(),
+                    "compiledFromJar", Path.of(jarPath.trim()).toAbsolutePath().normalize().toString(),
+                    "plugins", summarizePlugins(loaded)
+                );
+            }
+            throw new GatewayException(400, "invalid_request", "必须提供 libPath (.so/.dylib/.dll) 或 jarPath (.jar)。");
+        } catch (GatewayException ge) {
+            throw ge;
+        } catch (Exception e) {
+            throw new GatewayException(400, "native_lib_load_failed", e.getMessage());
+        }
+    }
+
+    /**
+     * Deterministic FFM Native Shared-Library Unloader endpoint (#36): drains in-flight calls,
+     * tears down the GraalVM Isolate ({@code graal_tear_down_isolate}), and closes {@code Arena.ofShared()}.
+     */
+    @PostMapping("/api/plugins/unload-native")
+    public Map<String, Object> unloadNativePlugin(
+        HttpServletRequest req,
+        @RequestBody(required = false) Map<String, Object> body
+    ) {
+        authService.requireWorkspaceRole(req, List.of("admin", "developer"));
+        if (body == null) {
+            throw new GatewayException(400, "invalid_request", "请求体不能为空。");
+        }
+        DynamicJarPluginLoader loader = dataPlaneExecutor.pluginPipeline().jarLoader();
+        boolean unloaded;
+        if (body.get("libPath") instanceof String libPath && !libPath.isBlank()) {
+            unloaded = loader.unloadNativeLibrary(Path.of(libPath.trim()));
+        } else if (body.get("pluginId") instanceof String pluginId && !pluginId.isBlank()) {
+            unloaded = loader.nativeFfmLoader().unloadPluginById(pluginId.trim());
+        } else {
+            throw new GatewayException(400, "invalid_request", "必须提供 libPath 或 pluginId。");
+        }
+        return Map.of("unloaded", unloaded);
+    }
+
+    /**
+     * Lists all currently mounted FFM native shared libraries and their Isolate/in-flight telemetry.
+     */
+    @GetMapping("/api/plugins/native-loaded")
+    public Map<String, Object> listLoadedNativeLibraries(HttpServletRequest req) {
+        authService.requireWorkspaceRole(req, List.of("admin", "developer", "viewer"));
+        NativeFfmPluginLoader ffm = dataPlaneExecutor.pluginPipeline().jarLoader().nativeFfmLoader();
+        return Map.of(
+            "nativeImageRuntime", DynamicJarPluginLoader.isNativeImage(),
+            "nativeImageCompilerAvailable", JarToSharedLibCompiler.isNativeImageToolAvailable(),
+            "items", ffm.loadedLibrariesSummary()
+        );
+    }
+
+    private List<Map<String, Object>> summarizePlugins(List<GatewayPlugin> loaded) {
+        List<Map<String, Object>> pluginSummaries = new ArrayList<>(loaded.size());
+        for (GatewayPlugin gp : loaded) {
+            String implClass = (gp instanceof NativeFfmPluginLoader.FfmGatewayPluginAdapter ffmAdapter)
+                ? ffmAdapter.implementationClassName()
+                : gp.getClass().getName();
+            pluginSummaries.add(Map.of(
+                "id", gp.id(),
+                "name", gp.name(),
+                "type", gp.type(),
+                "priority", gp.priority(),
+                "className", implClass
+            ));
+        }
+        return pluginSummaries;
     }
 
     /**

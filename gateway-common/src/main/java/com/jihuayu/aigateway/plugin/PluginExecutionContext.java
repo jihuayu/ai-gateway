@@ -117,6 +117,14 @@ public class PluginExecutionContext {
      * Namespace-isolated, quota-governed KV store accessible via {@code ctx.kv()} in Java and {@code ctx.kv} in JS.
      */
     public static final class PluginKvStore {
+        public interface KvBackend {
+            String get(String key);
+            void set(String key, String value, long ttlSeconds);
+            boolean setNx(String key, String value, long ttlSeconds);
+            long incr(String key, long delta, long ttlSeconds);
+            void del(String key);
+        }
+
         private record L1Val(String value, long expiresAtMs) {}
 
         private static final Map<String, L1Val> SHARED_L1 = new ConcurrentHashMap<>();
@@ -126,12 +134,20 @@ public class PluginExecutionContext {
 
         private final StatefulRedisConnection<String, String> redisConn;
         private final String keyPrefix;
+        private final KvBackend customBackend;
         private String activePluginNamespace = "global";
         private int opsCount = 0;
 
         public PluginKvStore(StatefulRedisConnection<String, String> redisConn, String keyPrefix) {
             this.redisConn = redisConn;
             this.keyPrefix = keyPrefix != null ? keyPrefix : "gw:";
+            this.customBackend = null;
+        }
+
+        public PluginKvStore(KvBackend customBackend) {
+            this.redisConn = null;
+            this.keyPrefix = "gw:";
+            this.customBackend = customBackend;
         }
 
         public void setActivePluginNamespace(String pluginId) {
@@ -151,6 +167,9 @@ public class PluginExecutionContext {
         }
 
         public String get(String key) {
+            if (customBackend != null) {
+                return customBackend.get(key);
+            }
             String fullKey = scopedKey(key);
             long now = System.currentTimeMillis();
             L1Val l1 = SHARED_L1.get(fullKey);
@@ -169,6 +188,10 @@ public class PluginExecutionContext {
         }
 
         public void set(String key, String value, long ttlSeconds) {
+            if (customBackend != null) {
+                customBackend.set(key, value, ttlSeconds);
+                return;
+            }
             String fullKey = scopedKey(key);
             String val = value != null ? value : "";
             if (val.length() > MAX_VAL_LEN) {
@@ -184,6 +207,9 @@ public class PluginExecutionContext {
         }
 
         public boolean setNx(String key, String value, long ttlSeconds) {
+            if (customBackend != null) {
+                return customBackend.setNx(key, value, ttlSeconds);
+            }
             String fullKey = scopedKey(key);
             String val = value != null ? value : "1";
             long ttl = Math.max(1L, Math.min(86_400L, ttlSeconds));
@@ -207,6 +233,9 @@ public class PluginExecutionContext {
         }
 
         public long incr(String key, long delta, long ttlSeconds) {
+            if (customBackend != null) {
+                return customBackend.incr(key, delta, ttlSeconds);
+            }
             String fullKey = scopedKey(key);
             long ttl = Math.max(1L, Math.min(86_400L, ttlSeconds));
             long now = System.currentTimeMillis();
@@ -235,6 +264,10 @@ public class PluginExecutionContext {
         }
 
         public void del(String key) {
+            if (customBackend != null) {
+                customBackend.del(key);
+                return;
+            }
             String fullKey = scopedKey(key);
             SHARED_L1.remove(fullKey);
             if (redisConn != null) {

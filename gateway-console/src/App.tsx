@@ -18,12 +18,14 @@ import {
 import { AuthView } from './views/AuthView';
 import { AliasesView, KeysView, OverviewView, ProvidersView } from './views/CatalogViews';
 import { GuideView, RequestsView, SettingsView, UsageView } from './views/OperationsViews';
+import { PluginsView } from './views/PluginsView';
 
 type ViewName =
   | 'overview'
   | 'providers'
   | 'aliases'
   | 'keys'
+  | 'plugins'
   | 'requests'
   | 'usage'
   | 'guide'
@@ -34,6 +36,7 @@ const NAV_ITEMS: { key: ViewName; label: string; icon: string; eyebrow: string }
   { key: 'providers', label: '供应商', icon: '⇄', eyebrow: '工作空间' },
   { key: 'aliases', label: '模型别名', icon: '◇', eyebrow: '项目' },
   { key: 'keys', label: 'API Keys', icon: '⌘', eyebrow: '项目' },
+  { key: 'plugins', label: '插件管理', icon: '❖', eyebrow: '工作空间' },
   { key: 'requests', label: '请求日志', icon: '≡', eyebrow: '项目' },
   { key: 'usage', label: '用量与账单', icon: '◫', eyebrow: '项目' },
   { key: 'guide', label: '接入指南', icon: '→', eyebrow: '项目' },
@@ -443,6 +446,9 @@ export function App() {
                 canWrite={canWrite}
                 refreshTick={refreshTick}
               />
+            )}
+            {view === 'plugins' && (
+              <PluginsView canWrite={canWrite} refreshTick={refreshTick} />
             )}
             {view === 'requests' && (
               <RequestsView

@@ -33,7 +33,7 @@ subprojects {
 
     tasks.withType<Test>().configureEach {
         useJUnitPlatform()
-        jvmArgs("--enable-preview")
+        jvmArgs("--enable-preview", "--enable-native-access=ALL-UNNAMED")
     }
 
     extensions.configure<SpotlessExtension> {

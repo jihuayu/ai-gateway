@@ -26,6 +26,7 @@ import com.jihuayu.aigateway.plugin.MicrokernelRoutingAndPolicyPlugins.PromptDec
 import com.jihuayu.aigateway.plugin.MicrokernelRoutingAndPolicyPlugins.WeightedCircuitBreakerRouterPlugin;
 import io.lettuce.core.api.StatefulRedisConnection;
 import java.net.http.HttpClient;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -245,20 +246,40 @@ public class PluginPipeline implements AutoCloseable {
         };
     }
 
+    private GatewayPlugin lookupRegisteredPlugin(PluginSnapshot ps) {
+        if (ps.className() != null && !ps.className().isBlank()) {
+            GatewayPlugin byClass = jarLoader.getPlugin(ps.className());
+            if (byClass != null) return byClass;
+        }
+        GatewayPlugin byName = jarLoader.getPlugin(ps.name());
+        if (byName != null) return byName;
+        return jarLoader.getPlugin(ps.id());
+    }
+
     private GatewayPlugin resolvePluginInstance(PluginSnapshot ps) {
         if (ps == null) return null;
         String type = ps.type() != null ? ps.type().toUpperCase() : "BUILTIN";
         return switch (type) {
             case "JS" -> jsManager.getOrCompileSnapshotPlugin(ps);
             case "WEBHOOK" -> new ExtProcPlugin(ps.id(), ps.name(), ps.priority(), httpClient, mapper);
-            case "BUILTIN", "JAVA_SPI" -> {
-                if (ps.className() != null && !ps.className().isBlank()) {
-                    GatewayPlugin byClass = jarLoader.getPlugin(ps.className());
-                    if (byClass != null) yield byClass;
+            case "BUILTIN", "JAVA_SPI", "NATIVE_FFM" -> {
+                GatewayPlugin existing = lookupRegisteredPlugin(ps);
+                if (existing != null) yield existing;
+                if (ps.jarPath() != null && !ps.jarPath().isBlank()) {
+                    Path artifactPath = Path.of(ps.jarPath().trim());
+                    if (Files.isRegularFile(artifactPath)) {
+                        try {
+                            if ("NATIVE_FFM".equals(type)
+                                || NativeFfmPluginLoader.isSharedLibraryFileName(artifactPath.getFileName().toString())) {
+                                jarLoader.loadNativeLibrary(artifactPath);
+                            } else {
+                                jarLoader.loadJar(artifactPath);
+                            }
+                            yield lookupRegisteredPlugin(ps);
+                        } catch (Exception ignored) {}
+                    }
                 }
-                GatewayPlugin byName = jarLoader.getPlugin(ps.name());
-                if (byName != null) yield byName;
-                yield jarLoader.getPlugin(ps.id());
+                yield null;
             }
             default -> jarLoader.getPlugin(ps.name());
         };
@@ -359,5 +380,6 @@ public class PluginPipeline implements AutoCloseable {
     @Override
     public void close() {
         jsManager.close();
+        jarLoader.close();
     }
 }
