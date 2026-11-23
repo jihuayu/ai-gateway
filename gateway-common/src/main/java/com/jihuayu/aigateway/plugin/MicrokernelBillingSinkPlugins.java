@@ -104,6 +104,12 @@ public final class MicrokernelBillingSinkPlugins {
             return Collections.unmodifiableList(new ArrayList<>(dlqEvents));
         }
 
+        public int clearDlqEvents() {
+            int count = dlqEvents.size();
+            dlqEvents.clear();
+            return count;
+        }
+
         @Override
         public void onPostSettle(PluginExecutionContext ctx) {
             Map<String, Object> payload = buildBillingEventMap(ctx);

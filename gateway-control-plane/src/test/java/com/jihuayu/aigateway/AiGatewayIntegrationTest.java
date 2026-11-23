@@ -3265,6 +3265,118 @@ public class AiGatewayIntegrationTest {
         }
     }
 
+    @Test
+    @Order(19)
+    @SuppressWarnings("unchecked")
+    void testStage19PhaseP5ManagementConsoleEndpointsVersionsRotationResolveChainMcpProbeAndFinOpsBreakdown() throws Exception {
+        // 1. Test GET /api/aliases/{id}/versions
+        HttpResponse<String> versResp = sendAdmin("GET", "/api/aliases/" + aliasId + "/versions", null, false);
+        assertEquals(200, versResp.statusCode(), versResp.body());
+        Map<String, Object> versJson = mapper.readValue(versResp.body(), Map.class);
+        List<Map<String, Object>> versItems = (List<Map<String, Object>>) versJson.get("items");
+        assertFalse(versItems.isEmpty(), "Must list historical route versions for alias");
+        assertEquals(aliasId, versItems.getFirst().get("alias_id"));
+
+        // 2. Test POST /api/keys/{id}/rotate (zero-downtime key rotation)
+        HttpResponse<String> tempKeyResp = sendAdmin("POST", "/api/keys", Map.of(
+            "project_id", projectId,
+            "name", "p5-rotatable-key",
+            "key_rpm", 120,
+            "key_tpm", 50000,
+            "budget_micros", 5_000_000L,
+            "allowed_models", List.of("support-chat"),
+            "allowed_mcp_tools", List.of("docs-mcp:*")
+        ), true);
+        assertEquals(200, tempKeyResp.statusCode(), tempKeyResp.body());
+        String oldKeyId = String.valueOf(mapper.readValue(tempKeyResp.body(), Map.class).get("id"));
+
+        HttpResponse<String> rotResp = sendAdmin("POST", "/api/keys/" + oldKeyId + "/rotate", Map.of("revoke_old", true), true);
+        assertEquals(200, rotResp.statusCode(), rotResp.body());
+        Map<String, Object> rotJson = mapper.readValue(rotResp.body(), Map.class);
+        assertEquals(oldKeyId, rotJson.get("rotated_from_id"));
+        assertEquals(true, rotJson.get("revoked_old"));
+        assertNotNull(rotJson.get("key"));
+        assertEquals(120, ((Number) rotJson.get("key_rpm")).intValue());
+        assertEquals(50000, ((Number) rotJson.get("key_tpm")).intValue());
+
+        // 3. Test PATCH /api/plugins/bindings/{id} and POST /api/plugins/resolve-chain
+        HttpResponse<String> plResp = sendAdmin("POST", "/api/plugins", Map.of(
+            "name", "p5-exact-cache-stage19",
+            "type", "BUILTIN",
+            "className", "com.jihuayu.aigateway.plugin.ExactCachePlugin",
+            "priority", 10,
+            "stages", List.of("POST_ADMIT_PRE_DISPATCH", "RESPONSE_CONTENT"),
+            "config", Map.of("ttlSeconds", 300)
+        ), true);
+        assertEquals(201, plResp.statusCode(), plResp.body());
+        String p5PluginId = String.valueOf(mapper.readValue(plResp.body(), Map.class).get("id"));
+
+        HttpResponse<String> bdResp = sendAdmin("POST", "/api/plugins/bindings", Map.of(
+            "pluginId", p5PluginId,
+            "scopeType", "PROJECT",
+            "scopeId", projectId,
+            "priority", 10,
+            "sampleRate", 0.5
+        ), true);
+        assertEquals(201, bdResp.statusCode(), bdResp.body());
+        String p5BindingId = String.valueOf(mapper.readValue(bdResp.body(), Map.class).get("id"));
+
+        HttpResponse<String> patchBdResp = sendAdmin("PATCH", "/api/plugins/bindings/" + p5BindingId, Map.of(
+            "priority", 8,
+            "sampleRate", 1.0,
+            "configOverride", Map.of("ttlSeconds", 900)
+        ), true);
+        assertEquals(200, patchBdResp.statusCode(), patchBdResp.body());
+        Map<String, Object> patchBdJson = mapper.readValue(patchBdResp.body(), Map.class);
+        assertEquals(8, ((Number) patchBdJson.get("priority")).intValue());
+        assertEquals(1.0, ((Number) patchBdJson.get("sampleRate")).doubleValue(), 0.001);
+
+        HttpResponse<String> chainResp = sendAdmin("POST", "/api/plugins/resolve-chain", Map.of(
+            "projectId", projectId,
+            "aliasName", "support-chat"
+        ), true);
+        assertEquals(200, chainResp.statusCode(), chainResp.body());
+        Map<String, Object> chainJson = mapper.readValue(chainResp.body(), Map.class);
+        assertTrue(((Number) chainJson.get("totalInvocations")).intValue() >= 2);
+
+        // 4. Test POST /api/mcp-servers/{id}/probe
+        HttpResponse<String> mcpCreateResp = sendAdmin("POST", "/api/mcp-servers", Map.of(
+            "alias", "p5-probe-mcp",
+            "transport", "streamable_http",
+            "endpointUrl", "http://127.0.0.1:" + upstreamPort + "/mcp",
+            "allowedTools", List.of("search_kb", "list_tickets")
+        ), true);
+        assertEquals(201, mcpCreateResp.statusCode(), mcpCreateResp.body());
+        String mcpId = String.valueOf(mapper.readValue(mcpCreateResp.body(), Map.class).get("id"));
+
+        HttpResponse<String> probeResp = sendAdmin("POST", "/api/mcp-servers/" + mcpId + "/probe", Map.of(), true);
+        assertEquals(200, probeResp.statusCode(), probeResp.body());
+        Map<String, Object> probeJson = mapper.readValue(probeResp.body(), Map.class);
+        assertEquals("ok", probeJson.get("status"));
+        assertEquals("p5-probe-mcp", probeJson.get("alias"));
+
+        // 5. Test POST /api/telemetry/circuit-breakers/reset & GET /api/billing/dlq & GET /api/usage/breakdown
+        HttpResponse<String> cbResetResp = sendAdmin("POST", "/api/telemetry/circuit-breakers/reset", Map.of(), true);
+        assertEquals(200, cbResetResp.statusCode(), cbResetResp.body());
+        assertEquals(true, mapper.readValue(cbResetResp.body(), Map.class).get("reset"));
+
+        HttpResponse<String> dlqResp = sendAdmin("GET", "/api/billing/dlq", null, false);
+        assertEquals(200, dlqResp.statusCode(), dlqResp.body());
+        assertNotNull(mapper.readValue(dlqResp.body(), Map.class).get("items"));
+
+        HttpResponse<String> bdUsageResp = sendAdmin("GET", "/api/usage/breakdown?project_id=" + projectId, null, false);
+        assertEquals(200, bdUsageResp.statusCode(), bdUsageResp.body());
+        Map<String, Object> bdUsageJson = mapper.readValue(bdUsageResp.body(), Map.class);
+        assertNotNull(bdUsageJson.get("by_model"));
+        assertNotNull(bdUsageJson.get("by_key"));
+        assertNotNull(bdUsageJson.get("token_summary"));
+
+        // Cleanup P5 test resources
+        sendAdmin("DELETE", "/api/plugins/bindings/" + p5BindingId, null, true);
+        sendAdmin("DELETE", "/api/plugins/" + p5PluginId, null, true);
+        sendAdmin("DELETE", "/api/mcp-servers/" + mcpId, null, true);
+    }
+
     private HttpResponse<String> sendAdmin(String method, String path, Object body, boolean includeCsrf) throws Exception {
         HttpRequest.Builder b = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + adminPort + path));

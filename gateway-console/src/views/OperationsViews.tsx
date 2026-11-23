@@ -351,6 +351,7 @@ export function UsageView({
   refreshTick: number;
 }) {
   const [u, setU] = useState<any>({});
+  const [breakdown, setBreakdown] = useState<any>({ by_model: [], by_key: [], token_summary: {} });
   const [budgetInput, setBudgetInput] = useState('');
 
   async function reload() {
@@ -358,8 +359,12 @@ export function UsageView({
     const b = rangeBounds(range);
     const qs = `project_id=${encodeURIComponent(project.id)}&from=${encodeURIComponent(b.from)}&to=${encodeURIComponent(b.to)}`;
     try {
-      const data = await api(`/api/usage?${qs}`);
+      const [data, bdRes] = await Promise.all([
+        api(`/api/usage?${qs}`),
+        getSafe(`/api/usage/breakdown?${qs}`),
+      ]);
       setU(data || {});
+      if (bdRes.ok) setBreakdown(bdRes.data || {});
       const lim = data?.project?.budget_micros ?? project?.budget_micros;
       setBudgetInput(microsToUsd(lim));
     } catch (e: any) {
@@ -535,6 +540,103 @@ export function UsageView({
         </section>
       </div>
 
+      <div {...stylex.props(ui.grid2)}>
+        <section {...stylex.props(ui.card)}>
+          <div {...stylex.props(ui.cardHeader)}>
+            <div>
+              <h3 {...stylex.props(ui.cardTitle)}>FinOps 按模型别名成本与 TTFT 拆解</h3>
+              <p {...stylex.props(ui.cardSubtitle)}>
+                包含缓存命中 Token（Cached Input）、推理 Token（Reasoning）与平均首字延迟。
+              </p>
+            </div>
+            <UiBadge
+              tone="info"
+              label={`缓存命中率 ${fmtPct(breakdown?.token_summary?.cache_hit_ratio ?? 0)}`}
+            />
+          </div>
+          <div {...stylex.props(ui.cardBodyFlush)}>
+            {arr(breakdown?.by_model).length ? (
+              <div {...stylex.props(ui.tableWrap)}>
+                <table {...stylex.props(ui.table)}>
+                  <thead>
+                    <tr>
+                      <th {...stylex.props(ui.th)}>模型别名</th>
+                      <th {...stylex.props(ui.th, ui.thNum)}>请求数</th>
+                      <th {...stylex.props(ui.th, ui.thNum)}>入 / 出 / 缓存 / 推理 Token</th>
+                      <th {...stylex.props(ui.th, ui.thNum)}>实结费用</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {arr(breakdown?.by_model).map((m: any) => (
+                      <tr key={m.model}>
+                        <td {...stylex.props(ui.td)}>
+                          <span {...stylex.props(ui.cellPrimary)}>{m.model}</span>
+                          <span {...stylex.props(ui.cellSub)}>
+                            平均 TTFT: {m.avg_ttft_ms ? fmtDuration(m.avg_ttft_ms) : '—'}
+                          </span>
+                        </td>
+                        <td {...stylex.props(ui.td, ui.tdNum)}>{fmtInt(m.requests)}</td>
+                        <td {...stylex.props(ui.td, ui.tdNum)}>
+                          {fmtInt(m.input_tokens)} / {fmtInt(m.output_tokens)} /{' '}
+                          {fmtInt(m.cached_input_tokens)} / {fmtInt(m.reasoning_tokens)}
+                        </td>
+                        <td {...stylex.props(ui.td, ui.tdNum)}>{fmtMoney(m.actual_micros)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <EmptyBox title="暂无模型维度拆解数据" description="发起调用后自动按模型汇总。" />
+            )}
+          </div>
+        </section>
+
+        <section {...stylex.props(ui.card)}>
+          <div {...stylex.props(ui.cardHeader)}>
+            <div>
+              <h3 {...stylex.props(ui.cardTitle)}>FinOps 按 API Key 成本归因拆解</h3>
+              <p {...stylex.props(ui.cardSubtitle)}>
+                追踪各业务服务或团队密钥的独立微美元消耗。
+              </p>
+            </div>
+          </div>
+          <div {...stylex.props(ui.cardBodyFlush)}>
+            {arr(breakdown?.by_key).length ? (
+              <div {...stylex.props(ui.tableWrap)}>
+                <table {...stylex.props(ui.table)}>
+                  <thead>
+                    <tr>
+                      <th {...stylex.props(ui.th)}>密钥名称 / 前缀</th>
+                      <th {...stylex.props(ui.th, ui.thNum)}>请求数</th>
+                      <th {...stylex.props(ui.th, ui.thNum)}>输入 / 输出 Token</th>
+                      <th {...stylex.props(ui.th, ui.thNum)}>实结费用</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {arr(breakdown?.by_key).map((k: any) => (
+                      <tr key={k.key_id}>
+                        <td {...stylex.props(ui.td)}>
+                          <span {...stylex.props(ui.cellPrimary)}>{k.key_name}</span>
+                          <span {...stylex.props(ui.cellSub, ui.tdMono)}>{k.key_prefix}…</span>
+                        </td>
+                        <td {...stylex.props(ui.td, ui.tdNum)}>{fmtInt(k.requests)}</td>
+                        <td {...stylex.props(ui.td, ui.tdNum)}>
+                          {fmtInt(k.input_tokens)} / {fmtInt(k.output_tokens)}
+                        </td>
+                        <td {...stylex.props(ui.td, ui.tdNum)}>{fmtMoney(k.actual_micros)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <EmptyBox title="暂无密钥维度拆解数据" description="发起调用后自动按密钥汇总。" />
+            )}
+          </div>
+        </section>
+      </div>
+
       <section {...stylex.props(ui.card)}>
         <div {...stylex.props(ui.cardHeader)}>
           <div>
@@ -606,9 +708,15 @@ export function GuideView({
 }) {
   const [aliases, setAliases] = useState<any[]>([]);
   const [protoTab, setProtoTab] = useState<'openai' | 'anthropic' | 'embeddings'>('openai');
+  const [testMode, setTestMode] = useState<
+    'chat' | 'anthropic' | 'embeddings' | 'rerank' | 'images' | 'systemone'
+  >('chat');
   const [testModel, setTestModel] = useState('');
   const [testMaxTokens, setTestMaxTokens] = useState('128');
   const [testPrompt, setTestPrompt] = useState('用一句话解释为什么企业级 AI 网关需要整数微美元预留账本。');
+  const [testDocsInput, setTestDocsInput] = useState(
+    'Unrelated cooking recipe\nRedis Lua 3-phase micro-USD billing ledger',
+  );
   const [testOut, setTestOut] = useState<any | null>(null);
   const [agentSnap, setAgentSnap] = useState<any[] | null>(null);
 
@@ -658,25 +766,43 @@ export function GuideView({
     if (!modelName || !testPrompt.trim()) return;
     const started = performance.now();
     try {
+      const docs = testDocsInput
+        .split('\n')
+        .map((d) => d.trim())
+        .filter(Boolean);
       const r = await api('/api/test', {
         method: 'POST',
         body: {
           project_id: project.id,
+          mode: testMode,
           model: modelName,
+          prompt: testPrompt.trim(),
+          query: testPrompt.trim(),
+          documents: docs,
+          state: testPrompt.trim(),
           messages: [{ role: 'user', content: testPrompt.trim() }],
           max_tokens: Number(testMaxTokens) || 128,
         },
       });
       const elapsed = performance.now() - started;
+      const content =
+        r?.choices?.[0]?.message?.content ??
+        r?.content?.[0]?.text ??
+        (r?.results
+          ? JSON.stringify(r.results, null, 2)
+          : r?.answers
+            ? JSON.stringify(r.answers, null, 2)
+            : JSON.stringify(r, null, 2));
       setTestOut({
         ok: true,
         elapsed,
         requestId: r?.request_id || getLastRequestId() || '—',
-        content: r?.choices?.[0]?.message?.content ?? r?.response ?? JSON.stringify(r),
+        content,
+        raw: r,
         usage: r?.usage || {},
         model: r?.model || modelName,
       });
-      notify('受控测试请求已完成', 'success');
+      notify(`多模态受控测试 (${testMode}) 已完成`, 'success');
     } catch (e: any) {
       setTestOut({
         ok: false,
@@ -796,6 +922,21 @@ export function GuideView({
               <>
                 <div {...stylex.props(ui.formRow)}>
                   <div {...stylex.props(ui.field)}>
+                    <label {...stylex.props(ui.fieldLabel)}>测试端点模式（6 大多模态协议）</label>
+                    <select
+                      value={testMode}
+                      onChange={(e) => setTestMode(e.target.value as any)}
+                      {...stylex.props(ui.input)}
+                    >
+                      <option value="chat">OpenAI Chat (/v1/chat/completions)</option>
+                      <option value="anthropic">Anthropic Messages (/v1/messages)</option>
+                      <option value="embeddings">Vector Embeddings (/v1/embeddings)</option>
+                      <option value="rerank">Cross-Protocol Rerank (/v1/rerank)</option>
+                      <option value="images">Image Generation (/v1/images/generations)</option>
+                      <option value="systemone">TypeSafe Jev System One (/v1/systemone)</option>
+                    </select>
+                  </div>
+                  <div {...stylex.props(ui.field)}>
                     <label {...stylex.props(ui.fieldLabel)}>已发布模型别名</label>
                     <select
                       value={testModel}
@@ -822,13 +963,31 @@ export function GuideView({
                   </Field>
                 </div>
                 <div {...stylex.props(ui.field)}>
-                  <label {...stylex.props(ui.fieldLabel)}>测试提示词</label>
+                  <label {...stylex.props(ui.fieldLabel)}>
+                    {testMode === 'rerank'
+                      ? '检索查询词 (Query)'
+                      : testMode === 'systemone'
+                        ? '待评估状态文本 (State)'
+                        : '测试提示词 (Prompt)'}
+                  </label>
                   <textarea
                     value={testPrompt}
                     onChange={(e) => setTestPrompt(e.target.value)}
                     {...stylex.props(ui.textarea)}
                   />
                 </div>
+                {testMode === 'rerank' && (
+                  <div {...stylex.props(ui.field)}>
+                    <label {...stylex.props(ui.fieldLabel)}>
+                      待重排候选文档列表（每行一篇文档）
+                    </label>
+                    <textarea
+                      value={testDocsInput}
+                      onChange={(e) => setTestDocsInput(e.target.value)}
+                      {...stylex.props(ui.textarea)}
+                    />
+                  </div>
+                )}
                 <UiButton variant="primary" onClick={runTestCall}>
                   发送受控测试请求
                 </UiButton>
@@ -931,6 +1090,7 @@ export function SettingsView({
   const [projName, setProjName] = useState('');
   const [projBudget, setProjBudget] = useState('');
   const [projRpm, setProjRpm] = useState('');
+  const [projTpm, setProjTpm] = useState('');
   const [projConcurrency, setProjConcurrency] = useState('');
   const [projMaxOut, setProjMaxOut] = useState('');
   const [retentionDays, setRetentionDays] = useState('');
@@ -961,6 +1121,7 @@ export function SettingsView({
     setProjName(cur.name || '');
     setProjBudget(microsToUsd(cur.budget_micros ?? cur.budgetMicros));
     setProjRpm(cur.rpm != null ? String(cur.rpm) : '');
+    setProjTpm(cur.tpm != null ? String(cur.tpm) : '');
     setProjConcurrency(cur.concurrency != null ? String(cur.concurrency) : '');
     setProjMaxOut(
       cur.max_output_tokens != null
@@ -996,6 +1157,7 @@ export function SettingsView({
           budget_micros: bMicros,
           budgetMicros: bMicros,
           rpm: intOrNull(projRpm),
+          tpm: intOrNull(projTpm),
           concurrency: intOrNull(projConcurrency),
           max_output_tokens: intOrNull(projMaxOut),
           maxOutputTokens: intOrNull(projMaxOut),
@@ -1123,6 +1285,17 @@ export function SettingsView({
                       min="1"
                       value={projRpm}
                       onValueChange={setProjRpm}
+                      placeholder="默认"
+                      {...stylex.props(ui.input)}
+                    />
+                  </Field>
+                  <Field name="projTpm" {...stylex.props(ui.field)}>
+                    <FieldLabel {...stylex.props(ui.fieldLabel)}>项目 TPM 上限 (Tokens/min)</FieldLabel>
+                    <Input
+                      type="number"
+                      min="1"
+                      value={projTpm}
+                      onValueChange={setProjTpm}
                       placeholder="默认"
                       {...stylex.props(ui.input)}
                     />
