@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Standalone Oracle GraalVM 25 Native Image Dockerfile for AI Gateway Netty Data-Plane Cluster Node
+# Standalone Oracle GraalVM 25.5 (25i5) Native Image Dockerfile for AI Gateway Netty Data-Plane Cluster Node
 # Build command:
 #   docker build -f Dockerfile.gateway-native -t ai-gateway-netty:native .
 
-FROM container-registry.oracle.com/graalvm/native-image:25 AS builder
+FROM container-registry.oracle.com/graalvm/native-image:25i5 AS builder
 WORKDIR /workspace
 
 COPY gradlew settings.gradle.kts build.gradle.kts ./

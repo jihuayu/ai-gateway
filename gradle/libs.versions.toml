@@ -1,6 +1,6 @@
 [versions]
 java = "25"
-graalvm = "25.0.4"
+graalvm = "25.5.5.0.3"
 spring-boot = "4.2.0"
 spring-modulith = "2.2.0"
 spring-ai = "2.1.0"

@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Control Plane & Full-Stack AI Gateway Dockerfile (Spring Boot 4.2 + Spring Modulith + jOOQ + Flyway on Oracle GraalVM 25)
+# Control Plane & Full-Stack AI Gateway Dockerfile (Spring Boot 4.2 + Spring Modulith + jOOQ + Flyway on Oracle GraalVM 25.5 / 25i5)
 # Build command:
 #   docker build -f Dockerfile -t ghcr.io/jihuayu/ai-gateway:latest .
 
-FROM container-registry.oracle.com/graalvm/jdk:25 AS builder
+FROM container-registry.oracle.com/graalvm/jdk:25i5 AS builder
 WORKDIR /workspace
 
 COPY gradlew settings.gradle.kts build.gradle.kts ./
@@ -28,7 +28,7 @@ COPY gateway-control-plane ./gateway-control-plane
 
 RUN chmod +x ./gradlew && ./gradlew :gateway-control-plane:bootJar -x test --no-daemon
 
-FROM container-registry.oracle.com/graalvm/jdk:25
+FROM container-registry.oracle.com/graalvm/jdk:25i5
 WORKDIR /app
 
 COPY --from=builder /workspace/gateway-control-plane/build/libs/gateway-control-plane-0.5.0.jar /app/ai-gateway.jar
