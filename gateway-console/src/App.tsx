@@ -7,40 +7,66 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@ui-sdk/react/select';
+import { Field, FieldLabel } from '@ui-sdk/react/field';
+import { Input } from '@ui-sdk/react/input';
 import { ui } from './styles/ui';
-import { api, arr, roleName, setCsrfToken, setUnauthorizedHandler } from './api/client';
 import {
+  api,
+  arr,
+  roleName,
+  setCsrfToken,
+  setUnauthorizedHandler,
+  usdToMicros,
+} from './api/client';
+import {
+  UiBadge,
   UiButton,
   UiConfirmDialog,
+  UiDialog,
   UiToastRegion,
   notify,
 } from './components/Primitives';
 import { AuthView } from './views/AuthView';
 import { AliasesView, KeysView, OverviewView, ProvidersView } from './views/CatalogViews';
+import { McpView } from './views/McpViews';
+import { PluginsView, TelemetryView } from './views/MicrokernelViews';
 import { GuideView, RequestsView, SettingsView, UsageView } from './views/OperationsViews';
-import { PluginsView } from './views/PluginsView';
 
 type ViewName =
   | 'overview'
-  | 'providers'
   | 'aliases'
   | 'keys'
-  | 'plugins'
+  | 'guide'
   | 'requests'
   | 'usage'
-  | 'guide'
-  | 'settings';
+  | 'settings'
+  | 'providers'
+  | 'mcp'
+  | 'plugins'
+  | 'telemetry';
 
-const NAV_ITEMS: { key: ViewName; label: string; icon: string; eyebrow: string }[] = [
-  { key: 'overview', label: '概览', icon: '▦', eyebrow: '项目' },
-  { key: 'providers', label: '供应商', icon: '⇄', eyebrow: '工作空间' },
-  { key: 'aliases', label: '模型别名', icon: '◇', eyebrow: '项目' },
-  { key: 'keys', label: 'API Keys', icon: '⌘', eyebrow: '项目' },
-  { key: 'plugins', label: '插件管理', icon: '❖', eyebrow: '工作空间' },
-  { key: 'requests', label: '请求日志', icon: '≡', eyebrow: '项目' },
-  { key: 'usage', label: '用量与账单', icon: '◫', eyebrow: '项目' },
-  { key: 'guide', label: '接入指南', icon: '→', eyebrow: '项目' },
-  { key: 'settings', label: '设置与审计', icon: '⚙', eyebrow: '项目' },
+interface NavItem {
+  key: ViewName;
+  label: string;
+  icon: string;
+  eyebrow: string;
+  scope: 'project' | 'workspace';
+}
+
+const NAV_ITEMS: NavItem[] = [
+  // 1. Project Scope Workbench
+  { key: 'overview', label: '项目指挥舱', icon: '▦', eyebrow: '项目工作台', scope: 'project' },
+  { key: 'aliases', label: '智能路由与别名', icon: '◇', eyebrow: '项目工作台', scope: 'project' },
+  { key: 'keys', label: 'API Keys 与 ACL', icon: '⌘', eyebrow: '项目工作台', scope: 'project' },
+  { key: 'guide', label: '多模态联调台', icon: '→', eyebrow: '项目工作台', scope: 'project' },
+  { key: 'requests', label: '请求追踪日志', icon: '≡', eyebrow: '项目工作台', scope: 'project' },
+  { key: 'usage', label: 'FinOps 账本', icon: '◫', eyebrow: '项目工作台', scope: 'project' },
+  { key: 'settings', label: '项目配额与审计', icon: '⚙', eyebrow: '项目工作台', scope: 'project' },
+  // 2. Workspace & Cluster Infrastructure Scope
+  { key: 'providers', label: '多模态供应商', icon: '⇄', eyebrow: '平台基础设施', scope: 'workspace' },
+  { key: 'mcp', label: 'MCP 工具网关', icon: '⊞', eyebrow: '平台基础设施', scope: 'workspace' },
+  { key: 'plugins', label: '微内核插件中心', icon: '❖', eyebrow: '平台基础设施', scope: 'workspace' },
+  { key: 'telemetry', label: '内核健康与遥测', icon: '◉', eyebrow: '平台基础设施', scope: 'workspace' },
 ];
 
 function parseHashRoute(): {
@@ -83,6 +109,15 @@ export function App() {
   const [inviteToken, setInviteToken] = useState<string>(initialRoute.inviteToken);
   const [refreshTick, setRefreshTick] = useState(0);
   const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
+
+  // Create New Project Dialog (Phase P5-A)
+  const [newProjOpen, setNewProjOpen] = useState(false);
+  const [npName, setNpName] = useState('');
+  const [npBudgetUsd, setNpBudgetUsd] = useState('');
+  const [npRpm, setNpRpm] = useState('600');
+  const [npTpm, setNpTpm] = useState('500000');
+  const [npConcurrency, setNpConcurrency] = useState('50');
+  const [npErr, setNpErr] = useState('');
 
   function applySessionPayload(raw: any) {
     const s =
@@ -224,6 +259,40 @@ export function App() {
     syncUrl(view, nextPid, range);
   }
 
+  async function handleCreateProject() {
+    setNpErr('');
+    if (!npName.trim()) {
+      setNpErr('请输入新项目名称。');
+      return;
+    }
+    const bMicros = npBudgetUsd.trim() ? usdToMicros(npBudgetUsd) : null;
+    const intOrNull = (s: string) => (s.trim() ? Number(s) : null);
+    try {
+      const created = await api('/api/projects', {
+        method: 'POST',
+        body: {
+          name: npName.trim(),
+          budget_micros: bMicros,
+          rpm: intOrNull(npRpm),
+          tpm: intOrNull(npTpm),
+          concurrency: intOrNull(npConcurrency),
+        },
+      });
+      const nextProj = {
+        id: created.id,
+        name: created.name,
+        role: 'admin',
+        budget_micros: created.budget_micros,
+      };
+      setProjects((prev) => [...prev, nextProj]);
+      handleProjectChange(created.id);
+      setNewProjOpen(false);
+      notify(`新项目“${created.name}”已创建并切换为当前项目`, 'success');
+    } catch (e: any) {
+      setNpErr(e?.message || '创建项目失败');
+    }
+  }
+
   async function doLogout() {
     try {
       await api('/api/logout', { method: 'POST' });
@@ -243,6 +312,8 @@ export function App() {
   const isAdmin = currentRole === 'admin';
   const canWrite = ['admin', 'developer'].includes(currentRole);
   const currentNav = NAV_ITEMS.find((n) => n.key === view) || NAV_ITEMS[0];
+  const projectNavs = NAV_ITEMS.filter((n) => n.scope === 'project');
+  const workspaceNavs = NAV_ITEMS.filter((n) => n.scope === 'workspace');
 
   if (booting) {
     return (
@@ -316,12 +387,52 @@ export function App() {
           <div {...stylex.props(ui.workspaceBox)}>
             <span {...stylex.props(ui.workspaceLabel)}>工作空间</span>
             <span {...stylex.props(ui.workspaceName)}>
-              {user?.workspaceName || user?.workspace_name || '当前部署'}
+              {user?.workspaceName || user?.workspace_name || '当前企业部署'}
             </span>
           </div>
 
-          <nav {...stylex.props(ui.navGroup)} aria-label="业务功能">
-            {NAV_ITEMS.map((item) => {
+          <nav {...stylex.props(ui.navGroup)} aria-label="双层作用域导航">
+            <div
+              style={{
+                fontSize: '11px',
+                fontWeight: 600,
+                color: 'var(--fg-muted)',
+                padding: '6px 10px 4px',
+                letterSpacing: '0.04em',
+              }}
+            >
+              项目工作台 · PROJECT
+            </div>
+            {projectNavs.map((item) => {
+              const active = item.key === view;
+              return (
+                <button
+                  key={item.key}
+                  type="button"
+                  onClick={() => handleNavigate(item.key)}
+                  aria-current={active ? 'page' : undefined}
+                  {...stylex.props(ui.navButton, active && ui.navButtonActive)}
+                >
+                  <span {...stylex.props(ui.navIcon)} aria-hidden="true">
+                    {item.icon}
+                  </span>
+                  <span>{item.label}</span>
+                </button>
+              );
+            })}
+
+            <div
+              style={{
+                fontSize: '11px',
+                fontWeight: 600,
+                color: 'var(--fg-muted)',
+                padding: '14px 10px 4px',
+                letterSpacing: '0.04em',
+              }}
+            >
+              平台基础设施 · WORKSPACE
+            </div>
+            {workspaceNavs.map((item) => {
               const active = item.key === view;
               return (
                 <button
@@ -366,7 +477,10 @@ export function App() {
         <div {...stylex.props(ui.mainShell)}>
           <header {...stylex.props(ui.topbar)}>
             <div {...stylex.props(ui.topbarLeft)}>
-              <span {...stylex.props(ui.eyebrow)}>{currentNav.eyebrow}</span>
+              <UiBadge
+                tone={currentNav.scope === 'workspace' ? 'info' : 'neutral'}
+                label={currentNav.eyebrow}
+              />
               <h1 {...stylex.props(ui.topbarTitle)}>{currentNav.label}</h1>
             </div>
 
@@ -407,6 +521,20 @@ export function App() {
                       ))}
                     </SelectContent>
                   </Select>
+                  {isAdmin && (
+                    <UiButton
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        setNpName('');
+                        setNpBudgetUsd('');
+                        setNpErr('');
+                        setNewProjOpen(true);
+                      }}
+                    >
+                      + 新建项目
+                    </UiButton>
+                  )}
                 </div>
               )}
               <UiButton
@@ -432,6 +560,9 @@ export function App() {
             {view === 'providers' && (
               <ProvidersView isAdmin={isAdmin} refreshTick={refreshTick} />
             )}
+            {view === 'mcp' && (
+              <McpView canWrite={canWrite} refreshTick={refreshTick} />
+            )}
             {view === 'aliases' && (
               <AliasesView
                 project={currentProject}
@@ -448,7 +579,18 @@ export function App() {
               />
             )}
             {view === 'plugins' && (
-              <PluginsView canWrite={canWrite} refreshTick={refreshTick} />
+              <PluginsView
+                project={currentProject}
+                canWrite={canWrite}
+                refreshTick={refreshTick}
+              />
+            )}
+            {view === 'telemetry' && (
+              <TelemetryView
+                canWrite={canWrite}
+                onNavigate={handleNavigate}
+                refreshTick={refreshTick}
+              />
             )}
             {view === 'requests' && (
               <RequestsView
@@ -493,11 +635,93 @@ export function App() {
           </main>
 
           <footer {...stylex.props(ui.footer)}>
-            <span>AI Gateway 控制台 · React 19 + @ui-sdk/react + StyleX</span>
-            <span>当前项目：{currentProject?.name || '无'}</span>
+            <span>AI Gateway 企业级微内核管理平台 v0.5.0 · React 19 + @ui-sdk/react + StyleX</span>
+            <span>
+              作用域：{currentNav.eyebrow} · 当前项目：{currentProject?.name || '无'}
+            </span>
           </footer>
         </div>
       </div>
+
+      {/* Create New Project Dialog */}
+      <UiDialog
+        open={newProjOpen}
+        onOpenChange={setNewProjOpen}
+        title="新建业务项目（Project）"
+        description="每个项目拥有独立的模型别名命名空间、API Keys、微美元月度预算及 RPM / TPM / 并发租约配额。"
+        wide
+        footer={
+          <>
+            <UiButton variant="outline" onClick={() => setNewProjOpen(false)}>
+              取消
+            </UiButton>
+            <UiButton variant="primary" onClick={handleCreateProject}>
+              创建项目
+            </UiButton>
+          </>
+        }
+      >
+        <div {...stylex.props(ui.formGrid)}>
+          <div {...stylex.props(ui.formRow)}>
+            <Field name="npName" {...stylex.props(ui.field)}>
+              <FieldLabel {...stylex.props(ui.fieldLabel)}>项目名称</FieldLabel>
+              <Input
+                value={npName}
+                onValueChange={setNpName}
+                placeholder="例如：客服智能体生产环境"
+                {...stylex.props(ui.input)}
+              />
+            </Field>
+            <Field name="npBudget" {...stylex.props(ui.field)}>
+              <FieldLabel {...stylex.props(ui.fieldLabel)}>
+                UTC 月度预算上限（USD，可选）
+              </FieldLabel>
+              <Input
+                type="number"
+                min="0"
+                step="0.01"
+                value={npBudgetUsd}
+                onValueChange={setNpBudgetUsd}
+                placeholder="留空不设硬上限"
+                {...stylex.props(ui.input)}
+              />
+            </Field>
+          </div>
+          <div {...stylex.props(ui.formRow)}>
+            <Field name="npRpm" {...stylex.props(ui.field)}>
+              <FieldLabel {...stylex.props(ui.fieldLabel)}>项目 RPM 上限</FieldLabel>
+              <Input
+                type="number"
+                min="1"
+                value={npRpm}
+                onValueChange={setNpRpm}
+                {...stylex.props(ui.input)}
+              />
+            </Field>
+            <Field name="npTpm" {...stylex.props(ui.field)}>
+              <FieldLabel {...stylex.props(ui.fieldLabel)}>项目 TPM 上限 (Tokens/min)</FieldLabel>
+              <Input
+                type="number"
+                min="1"
+                value={npTpm}
+                onValueChange={setNpTpm}
+                {...stylex.props(ui.input)}
+              />
+            </Field>
+            <Field name="npConcurrency" {...stylex.props(ui.field)}>
+              <FieldLabel {...stylex.props(ui.fieldLabel)}>最大并发请求租约</FieldLabel>
+              <Input
+                type="number"
+                min="1"
+                value={npConcurrency}
+                onValueChange={setNpConcurrency}
+                {...stylex.props(ui.input)}
+              />
+            </Field>
+          </div>
+          {npErr && <p {...stylex.props(ui.fieldError)}>{npErr}</p>}
+        </div>
+      </UiDialog>
 
       <UiConfirmDialog
         open={logoutConfirmOpen}

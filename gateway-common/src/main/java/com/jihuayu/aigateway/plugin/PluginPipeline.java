@@ -14,7 +14,12 @@ import com.jihuayu.aigateway.plugin.MicrokernelAuthAndRateLimitPlugins.JwtOidcAu
 import com.jihuayu.aigateway.plugin.MicrokernelAuthAndRateLimitPlugins.SpendVelocityCircuitPlugin;
 import com.jihuayu.aigateway.plugin.MicrokernelBillingSinkPlugins.CostAttributionTagPlugin;
 import com.jihuayu.aigateway.plugin.MicrokernelBillingSinkPlugins.RedisStreamBillingSinkPlugin;
+import com.jihuayu.aigateway.hot.GatewayTelemetry;
 import com.jihuayu.aigateway.plugin.MicrokernelBillingSinkPlugins.WebhookBillingSinkPlugin;
+import com.jihuayu.aigateway.plugin.MicrokernelObservabilityPlugins.LangfuseLlmOpsSinkPlugin;
+import com.jihuayu.aigateway.plugin.MicrokernelObservabilityPlugins.OpenTelemetryGenAiTracingPlugin;
+import com.jihuayu.aigateway.plugin.MicrokernelObservabilityPlugins.PrometheusMetricsPlugin;
+import com.jihuayu.aigateway.plugin.MicrokernelObservabilityPlugins.StructuredAccessLogPlugin;
 import com.jihuayu.aigateway.plugin.MicrokernelRoutingAndPolicyPlugins.CanaryHeaderRouterPlugin;
 import com.jihuayu.aigateway.plugin.MicrokernelRoutingAndPolicyPlugins.JevCalibratedGuardrailPlugin;
 import com.jihuayu.aigateway.plugin.MicrokernelRoutingAndPolicyPlugins.JevSemanticRouterPlugin;
@@ -77,6 +82,10 @@ public class PluginPipeline implements AutoCloseable {
     private final CostAttributionTagPlugin costAttributionTagPlugin;
     private final WebhookBillingSinkPlugin webhookBillingSinkPlugin;
     private final RedisStreamBillingSinkPlugin redisStreamBillingSinkPlugin;
+    private final PrometheusMetricsPlugin prometheusMetricsPlugin;
+    private final OpenTelemetryGenAiTracingPlugin openTelemetryGenAiTracingPlugin;
+    private final LangfuseLlmOpsSinkPlugin langfuseLlmOpsSinkPlugin;
+    private final StructuredAccessLogPlugin structuredAccessLogPlugin;
 
     private final HttpClient httpClient;
     private final ObjectMapper mapper;
@@ -118,6 +127,10 @@ public class PluginPipeline implements AutoCloseable {
         this.costAttributionTagPlugin = new CostAttributionTagPlugin();
         this.webhookBillingSinkPlugin = new WebhookBillingSinkPlugin(httpClient);
         this.redisStreamBillingSinkPlugin = new RedisStreamBillingSinkPlugin(redisConn, this.keyPrefix);
+        this.prometheusMetricsPlugin = new PrometheusMetricsPlugin();
+        this.openTelemetryGenAiTracingPlugin = new OpenTelemetryGenAiTracingPlugin(httpClient, this.mapper);
+        this.langfuseLlmOpsSinkPlugin = new LangfuseLlmOpsSinkPlugin(httpClient, this.mapper);
+        this.structuredAccessLogPlugin = new StructuredAccessLogPlugin(httpClient, this.mapper);
 
         for (GatewayPlugin builtIn : List.of(
             piiGuardrailPlugin, exactCachePlugin, semanticCachePlugin, defaultExtProcPlugin,
@@ -126,7 +139,8 @@ public class PluginPipeline implements AutoCloseable {
             weightedCircuitBreakerRouterPlugin, leastTtftRouterPlugin, prefixCacheAffinityRouterPlugin,
             canaryHeaderRouterPlugin, jevSemanticRouterPlugin, jevCalibratedGuardrailPlugin,
             modelCapabilityPolicyPlugin, promptDecoratorTrimmerPlugin, mcpToolArgumentPolicyPlugin,
-            costAttributionTagPlugin, webhookBillingSinkPlugin, redisStreamBillingSinkPlugin
+            costAttributionTagPlugin, webhookBillingSinkPlugin, redisStreamBillingSinkPlugin,
+            prometheusMetricsPlugin, openTelemetryGenAiTracingPlugin, langfuseLlmOpsSinkPlugin, structuredAccessLogPlugin
         )) {
             this.jarLoader.registerPlugin(builtIn);
         }
@@ -348,6 +362,7 @@ public class PluginPipeline implements AutoCloseable {
                 case PluginResult.ShortCircuit sc -> "SHORT_CIRCUIT:" + sc.httpStatus();
             };
             ctx.recordTrace(plugin.id(), plugin.name(), plugin.type(), stage, outcomeName, durationMicros, statements, "OK");
+            GatewayTelemetry.global().recordPluginExecution(plugin.name(), stage.name(), outcomeName);
             return result;
         } catch (JsSandboxFuelExhaustedException fuelEx) {
             long durationMicros = Math.max(1L, (System.nanoTime() - startNanos) / 1000L);

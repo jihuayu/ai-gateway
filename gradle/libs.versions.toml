@@ -1,11 +1,11 @@
 [versions]
 java = "25"
+graalvm = "25.0.4"
 spring-boot = "4.2.0"
 spring-modulith = "2.2.0"
 spring-ai = "2.1.0"
 spotless = "8.12.0"
 graalvm-native = "1.1.19"
-graalvm-sdk = "25.0.4"
 bouncycastle = "1.80"
 jimmer = "0.12.5"
 testcontainers = "1.21.3"
@@ -39,7 +39,6 @@ kafka-clients = { module = "org.apache.kafka:kafka-clients" }
 
 jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind" }
 jackson-datatype-jsr310 = { module = "com.fasterxml.jackson.datatype:jackson-datatype-jsr310" }
-graalvm-nativeimage-sdk = { module = "org.graalvm.sdk:nativeimage", version.ref = "graalvm-sdk" }
 bouncycastle-prov = { module = "org.bouncycastle:bcprov-jdk18on", version.ref = "bouncycastle" }
 jimmer-sql = { module = "org.babyfish.jimmer:jimmer-sql", version.ref = "jimmer" }
 

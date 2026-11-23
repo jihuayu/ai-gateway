@@ -31,7 +31,7 @@ RUN chmod +x ./gradlew && ./gradlew :gateway-control-plane:bootJar -x test --no-
 FROM container-registry.oracle.com/graalvm/jdk:25
 WORKDIR /app
 
-COPY --from=builder /workspace/gateway-control-plane/build/libs/gateway-control-plane-0.2.0.jar /app/ai-gateway.jar
+COPY --from=builder /workspace/gateway-control-plane/build/libs/gateway-control-plane-0.5.0.jar /app/ai-gateway.jar
 
 ENV HOST=0.0.0.0 \
     ADMIN_PORT=3000 \
@@ -45,4 +45,4 @@ ENV HOST=0.0.0.0 \
 
 EXPOSE 3000 3001
 
-ENTRYPOINT ["java", "--enable-preview", "-jar", "/app/ai-gateway.jar"]
+ENTRYPOINT ["java", "--enable-preview", "--enable-native-access=ALL-UNNAMED", "-jar", "/app/ai-gateway.jar"]

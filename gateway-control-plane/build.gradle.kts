@@ -7,7 +7,7 @@ springBoot {
 }
 
 tasks.withType<org.springframework.boot.gradle.tasks.run.BootRun>().configureEach {
-    jvmArgs("--enable-preview")
+    jvmArgs("--enable-preview", "--enable-native-access=ALL-UNNAMED")
 }
 
 dependencies {

@@ -3053,6 +3053,393 @@ public class AiGatewayIntegrationTest {
         }
     }
 
+    @Test
+    @Order(18)
+    @SuppressWarnings("unchecked")
+    void testStage18MicrokernelObservabilityPluginsAndIsomorphicCtxTelemetry() throws Exception {
+        int nettyPort = nettyServer.getBoundPort();
+
+        // Start a local mock OTLP Collector + Langfuse Ingestion + AccessLog HTTP Sink
+        List<String> otlpPayloads = java.util.Collections.synchronizedList(new ArrayList<>());
+        List<String> langfusePayloads = java.util.Collections.synchronizedList(new ArrayList<>());
+        List<String> langfuseAuthHeaders = java.util.Collections.synchronizedList(new ArrayList<>());
+        List<String> accessLogPayloads = java.util.Collections.synchronizedList(new ArrayList<>());
+
+        HttpServer obsMockServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        obsMockServer.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
+        obsMockServer.createContext("/v1/traces", ex -> {
+            otlpPayloads.add(new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            ex.sendResponseHeaders(200, 2);
+            ex.getResponseBody().write("{}".getBytes(StandardCharsets.UTF_8));
+            ex.close();
+        });
+        obsMockServer.createContext("/api/public/ingestion", ex -> {
+            String auth = ex.getRequestHeaders().getFirst("Authorization");
+            if (auth != null) langfuseAuthHeaders.add(auth);
+            langfusePayloads.add(new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            ex.sendResponseHeaders(200, 2);
+            ex.getResponseBody().write("{}".getBytes(StandardCharsets.UTF_8));
+            ex.close();
+        });
+        obsMockServer.createContext("/logs", ex -> {
+            accessLogPayloads.add(new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            ex.sendResponseHeaders(200, 2);
+            ex.getResponseBody().write("{}".getBytes(StandardCharsets.UTF_8));
+            ex.close();
+        });
+        obsMockServer.start();
+        int obsPort = obsMockServer.getAddress().getPort();
+
+        try {
+            // 1. Register Java SPI plugin exercising ctx.telemetry() (incr, gauge, observe, setSpanAttr, addSpanEvent)
+            dataPlaneExecutor.pluginPipeline().jarLoader().registerPlugin(new com.jihuayu.aigateway.plugin.GatewayPlugin() {
+                @Override public String id() { return "java:obs-telemetry-probe"; }
+                @Override public String name() { return "obs-telemetry-probe"; }
+                @Override public String type() { return "JAVA_SPI"; }
+                @Override public int priority() { return 12; }
+                @Override
+                public com.jihuayu.aigateway.plugin.PluginResult onPreAdmit(com.jihuayu.aigateway.plugin.PluginExecutionContext ctx) {
+                    ctx.telemetry().incr("java_guard_checks", 1L, Map.of("tier", "enterprise"));
+                    ctx.telemetry().gauge("java_active_tenants", 7.0, Map.of("region", "sg"));
+                    ctx.telemetry().observe("java_prompt_chars", ctx.extractPromptText().length(), Map.of("model", ctx.modelAlias()));
+                    ctx.telemetry().setSpanAttr("java.custom.verified", true);
+                    ctx.telemetry().addSpanEvent("java.policy.checked", Map.of("rule", "strict-v1"));
+                    return com.jihuayu.aigateway.plugin.PluginResult.Continue.INSTANCE;
+                }
+            });
+
+            List<String> obsBindings = new ArrayList<>();
+
+            // Bind Java telemetry probe
+            String jPid = String.valueOf(mapper.readValue(sendAdmin("POST", "/api/plugins", Map.of(
+                "name", "obs-telemetry-probe", "type", "JAVA_SPI", "className", "java:obs-telemetry-probe",
+                "priority", 12, "stages", List.of("PRE_ADMIT")
+            ), true).body(), Map.class).get("id"));
+            obsBindings.add(String.valueOf(mapper.readValue(sendAdmin("POST", "/api/plugins/bindings", Map.of(
+                "pluginId", jPid, "scopeType", "PROJECT", "scopeId", projectId, "priority", 12
+            ), true).body(), Map.class).get("id")));
+
+            // 2. Bind JS plugin exercising ctx.telemetry.*
+            String jsCode = "function onPreAdmit(ctx) { " +
+                "ctx.telemetry.incr('js_custom_hits', 2, { env: 'prod' }); " +
+                "ctx.telemetry.observe('js_score_dist', 0.95, { kind: 'safety' }); " +
+                "ctx.telemetry.setSpanAttr('js.plugin.tag', 'verified-js'); " +
+                "ctx.telemetry.addSpanEvent('js.evaluated', { score: 95 }); " +
+                "ctx.setResponseHeader('x-js-trace-id', ctx.telemetry.traceId()); " +
+                "return { action: 'CONTINUE' }; }";
+            String jsPid = String.valueOf(mapper.readValue(sendAdmin("POST", "/api/plugins", Map.of(
+                "name", "js-telemetry-probe", "type", "JS", "priority", 14,
+                "stages", List.of("PRE_ADMIT"), "sourceCode", jsCode, "maxStatements", 2000
+            ), true).body(), Map.class).get("id"));
+            obsBindings.add(String.valueOf(mapper.readValue(sendAdmin("POST", "/api/plugins/bindings", Map.of(
+                "pluginId", jsPid, "scopeType", "PROJECT", "scopeId", projectId, "priority", 14
+            ), true).body(), Map.class).get("id")));
+
+            // 3. Bind all 4 Built-in Microkernel Observability Plugins
+            String promPid = String.valueOf(mapper.readValue(sendAdmin("POST", "/api/plugins", Map.of(
+                "name", "builtin:obs-prometheus-metrics", "type", "BUILTIN",
+                "className", "com.jihuayu.aigateway.plugin.MicrokernelObservabilityPlugins$PrometheusMetricsPlugin",
+                "priority", 40, "stages", List.of("POST_SETTLE"),
+                "config", Map.of("includeProjectLabel", true, "includeAttributionLabels", List.of("department"))
+            ), true).body(), Map.class).get("id"));
+            obsBindings.add(String.valueOf(mapper.readValue(sendAdmin("POST", "/api/plugins/bindings", Map.of(
+                "pluginId", promPid, "scopeType", "PROJECT", "scopeId", projectId, "priority", 40
+            ), true).body(), Map.class).get("id")));
+
+            String otelPid = String.valueOf(mapper.readValue(sendAdmin("POST", "/api/plugins", Map.of(
+                "name", "builtin:obs-otel-genai", "type", "BUILTIN",
+                "className", "com.jihuayu.aigateway.plugin.MicrokernelObservabilityPlugins$OpenTelemetryGenAiTracingPlugin",
+                "priority", 42, "stages", List.of("REQUEST_RECEIVED", "POST_SETTLE"),
+                "config", Map.of(
+                    "otlpEndpoint", "http://127.0.0.1:" + obsPort + "/v1/traces",
+                    "serviceName", "ai-gateway-prod",
+                    "capturePrompt", true
+                )
+            ), true).body(), Map.class).get("id"));
+            obsBindings.add(String.valueOf(mapper.readValue(sendAdmin("POST", "/api/plugins/bindings", Map.of(
+                "pluginId", otelPid, "scopeType", "PROJECT", "scopeId", projectId, "priority", 42
+            ), true).body(), Map.class).get("id")));
+
+            String lfPid = String.valueOf(mapper.readValue(sendAdmin("POST", "/api/plugins", Map.of(
+                "name", "builtin:obs-langfuse-sink", "type", "BUILTIN",
+                "className", "com.jihuayu.aigateway.plugin.MicrokernelObservabilityPlugins$LangfuseLlmOpsSinkPlugin",
+                "priority", 45, "stages", List.of("POST_SETTLE"),
+                "config", Map.of(
+                    "endpointUrl", "http://127.0.0.1:" + obsPort + "/api/public/ingestion",
+                    "publicKey", "pk-lf-test",
+                    "secretKey", "sk-lf-test",
+                    "captureInputOutput", true
+                )
+            ), true).body(), Map.class).get("id"));
+            obsBindings.add(String.valueOf(mapper.readValue(sendAdmin("POST", "/api/plugins/bindings", Map.of(
+                "pluginId", lfPid, "scopeType", "PROJECT", "scopeId", projectId, "priority", 45
+            ), true).body(), Map.class).get("id")));
+
+            String logPid = String.valueOf(mapper.readValue(sendAdmin("POST", "/api/plugins", Map.of(
+                "name", "builtin:obs-access-log", "type", "BUILTIN",
+                "className", "com.jihuayu.aigateway.plugin.MicrokernelObservabilityPlugins$StructuredAccessLogPlugin",
+                "priority", 48, "stages", List.of("POST_SETTLE"),
+                "config", Map.of(
+                    "slowThresholdMs", 0,
+                    "errorsOnly", false,
+                    "httpSinkUrl", "http://127.0.0.1:" + obsPort + "/logs",
+                    "includeHeaders", List.of("x-custom-client")
+                )
+            ), true).body(), Map.class).get("id"));
+            obsBindings.add(String.valueOf(mapper.readValue(sendAdmin("POST", "/api/plugins/bindings", Map.of(
+                "pluginId", logPid, "scopeType", "PROJECT", "scopeId", projectId, "priority", 48
+            ), true).body(), Map.class).get("id")));
+
+            // Send chat request with explicit W3C traceparent header
+            String incomingTraceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+            String traceparentIn = "00-" + incomingTraceId + "-00f067aa0ba902b7-01";
+            HttpResponse<String> chatResp = httpClient.send(
+                HttpRequest.newBuilder()
+                    .uri(URI.create("http://127.0.0.1:" + nettyPort + "/v1/chat/completions"))
+                    .header("Authorization", "Bearer " + activeKeyPlain)
+                    .header("traceparent", traceparentIn)
+                    .header("x-custom-client", "cli-v4")
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString("{\"model\":\"support-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello Microkernel Observability\"}],\"max_tokens\":16}"))
+                    .build(),
+                HttpResponse.BodyHandlers.ofString()
+            );
+            assertEquals(200, chatResp.statusCode(), chatResp.body());
+            assertEquals(incomingTraceId, chatResp.headers().firstValue("x-trace-id").orElse(""));
+            assertEquals(incomingTraceId, chatResp.headers().firstValue("x-js-trace-id").orElse(""));
+
+            // Wait up to 1s for async OTLP / Langfuse / AccessLog HTTP exports
+            for (int w = 0; w < 50 && (otlpPayloads.isEmpty() || langfusePayloads.isEmpty() || accessLogPayloads.isEmpty()); w++) {
+                Thread.sleep(20);
+            }
+
+            // Verify OTLP HTTP JSON payload contains merged Java & JS custom span attributes & events
+            assertFalse(otlpPayloads.isEmpty(), "OTLP Collector must receive exported resourceSpans");
+            assertTrue(otlpPayloads.getFirst().contains(incomingTraceId));
+            assertTrue(otlpPayloads.getFirst().contains("java.custom.verified"));
+            assertTrue(otlpPayloads.getFirst().contains("verified-js"));
+            assertTrue(otlpPayloads.getFirst().contains("java.policy.checked"));
+            assertTrue(otlpPayloads.getFirst().contains("js.evaluated"));
+
+            // Verify Langfuse batch ingestion received trace-create + generation-create with Basic Auth
+            assertFalse(langfusePayloads.isEmpty(), "Langfuse sink must receive ingestion batch");
+            assertTrue(langfuseAuthHeaders.getFirst().startsWith("Basic "));
+            assertTrue(langfusePayloads.getFirst().contains("trace-create"));
+            assertTrue(langfusePayloads.getFirst().contains("generation-create"));
+
+            // Verify StructuredAccessLogPlugin HTTP sink & /api/telemetry/access-logs
+            assertFalse(accessLogPayloads.isEmpty(), "Structured access log sink must receive JSON log");
+            assertTrue(accessLogPayloads.getFirst().contains("cli-v4"));
+            HttpResponse<String> logsApi = sendAdmin("GET", "/api/telemetry/access-logs", null, false);
+            assertEquals(200, logsApi.statusCode());
+            assertTrue(logsApi.body().contains(incomingTraceId));
+
+            // Verify /api/telemetry/runtime JSON endpoint
+            HttpResponse<String> rtApi = sendAdmin("GET", "/api/telemetry/runtime", null, false);
+            assertEquals(200, rtApi.statusCode());
+            assertTrue(rtApi.body().contains("caffeineAuthHits"));
+
+            // Verify Prometheus /metrics exposes Layer 1 Kernel Probes + Histograms + Java/JS ctx.telemetry custom metrics
+            HttpResponse<String> promResp = httpClient.send(
+                HttpRequest.newBuilder().uri(URI.create("http://127.0.0.1:" + nettyPort + "/metrics")).GET().build(),
+                HttpResponse.BodyHandlers.ofString()
+            );
+            assertEquals(200, promResp.statusCode());
+            String metricsBody = promResp.body();
+            assertTrue(metricsBody.contains("ai_gateway_request_latency_ms_bucket{le=\"50\"}"), "Must expose latency histogram buckets");
+            assertTrue(metricsBody.contains("ai_gateway_caffeine_hits_total{cache=\"auth\"}"), "Must expose Caffeine L1 kernel probe");
+            assertTrue(metricsBody.contains("ai_gateway_mpsc_commands_total"), "Must expose MPSC batch channel probe");
+            assertTrue(metricsBody.contains("ai_gateway_ha_state"), "Must expose Distributed HA state gauge");
+            assertTrue(metricsBody.contains("ai_gateway_hedge_triggers_total"), "Must expose Peak-EWMA hedge counter");
+            assertTrue(metricsBody.contains("ai_gateway_plugin_executions_total{"), "Must expose per-plugin execution counter");
+            assertTrue(metricsBody.contains("ai_gateway_plugin_metric_java_guard_checks_total{tier=\"enterprise\"}"), "Must expose Java ctx.telemetry.incr metric");
+            assertTrue(metricsBody.contains("ai_gateway_plugin_metric_java_active_tenants{region=\"sg\"} 7"), "Must expose Java ctx.telemetry.gauge metric");
+            assertTrue(metricsBody.contains("ai_gateway_plugin_metric_js_custom_hits_total{env=\"prod\"} 2"), "Must expose JS ctx.telemetry.incr metric");
+            assertTrue(metricsBody.contains("ai_gateway_plugin_metric_js_score_dist_bucket{"), "Must expose JS ctx.telemetry.observe histogram");
+
+            for (String bid : obsBindings) {
+                sendAdmin("DELETE", "/api/plugins/bindings/" + bid, null, true);
+            }
+        } finally {
+            obsMockServer.stop(0);
+        }
+    }
+
+    @Test
+    @Order(19)
+    @SuppressWarnings("unchecked")
+    void testStage19PhaseP5ManagementConsoleEndpointsVersionsRotationResolveChainMcpProbeAndFinOpsBreakdown() throws Exception {
+        // 1. Test GET /api/aliases/{id}/versions
+        HttpResponse<String> versResp = sendAdmin("GET", "/api/aliases/" + aliasId + "/versions", null, false);
+        assertEquals(200, versResp.statusCode(), versResp.body());
+        Map<String, Object> versJson = mapper.readValue(versResp.body(), Map.class);
+        List<Map<String, Object>> versItems = (List<Map<String, Object>>) versJson.get("items");
+        assertFalse(versItems.isEmpty(), "Must list historical route versions for alias");
+        assertEquals(aliasId, versItems.getFirst().get("alias_id"));
+
+        // 2. Test POST /api/keys/{id}/rotate (zero-downtime key rotation)
+        HttpResponse<String> tempKeyResp = sendAdmin("POST", "/api/keys", Map.of(
+            "project_id", projectId,
+            "name", "p5-rotatable-key",
+            "key_rpm", 120,
+            "key_tpm", 50000,
+            "budget_micros", 5_000_000L,
+            "allowed_models", List.of("support-chat"),
+            "allowed_mcp_tools", List.of("docs-mcp:*")
+        ), true);
+        assertEquals(200, tempKeyResp.statusCode(), tempKeyResp.body());
+        String oldKeyId = String.valueOf(mapper.readValue(tempKeyResp.body(), Map.class).get("id"));
+
+        HttpResponse<String> rotResp = sendAdmin("POST", "/api/keys/" + oldKeyId + "/rotate", Map.of("revoke_old", true), true);
+        assertEquals(200, rotResp.statusCode(), rotResp.body());
+        Map<String, Object> rotJson = mapper.readValue(rotResp.body(), Map.class);
+        assertEquals(oldKeyId, rotJson.get("rotated_from_id"));
+        assertEquals(true, rotJson.get("revoked_old"));
+        assertNotNull(rotJson.get("key"));
+        assertEquals(120, ((Number) rotJson.get("key_rpm")).intValue());
+        assertEquals(50000, ((Number) rotJson.get("key_tpm")).intValue());
+
+        // 3. Test PATCH /api/plugins/bindings/{id} and POST /api/plugins/resolve-chain
+        HttpResponse<String> plResp = sendAdmin("POST", "/api/plugins", Map.of(
+            "name", "p5-exact-cache-stage19",
+            "type", "BUILTIN",
+            "className", "com.jihuayu.aigateway.plugin.ExactCachePlugin",
+            "priority", 10,
+            "stages", List.of("POST_ADMIT_PRE_DISPATCH", "RESPONSE_CONTENT"),
+            "config", Map.of("ttlSeconds", 300)
+        ), true);
+        assertEquals(201, plResp.statusCode(), plResp.body());
+        String p5PluginId = String.valueOf(mapper.readValue(plResp.body(), Map.class).get("id"));
+
+        HttpResponse<String> bdResp = sendAdmin("POST", "/api/plugins/bindings", Map.of(
+            "pluginId", p5PluginId,
+            "scopeType", "PROJECT",
+            "scopeId", projectId,
+            "priority", 10,
+            "sampleRate", 0.5
+        ), true);
+        assertEquals(201, bdResp.statusCode(), bdResp.body());
+        String p5BindingId = String.valueOf(mapper.readValue(bdResp.body(), Map.class).get("id"));
+
+        HttpResponse<String> patchBdResp = sendAdmin("PATCH", "/api/plugins/bindings/" + p5BindingId, Map.of(
+            "priority", 8,
+            "sampleRate", 1.0,
+            "configOverride", Map.of("ttlSeconds", 900)
+        ), true);
+        assertEquals(200, patchBdResp.statusCode(), patchBdResp.body());
+        Map<String, Object> patchBdJson = mapper.readValue(patchBdResp.body(), Map.class);
+        assertEquals(8, ((Number) patchBdJson.get("priority")).intValue());
+        assertEquals(1.0, ((Number) patchBdJson.get("sampleRate")).doubleValue(), 0.001);
+
+        HttpResponse<String> chainResp = sendAdmin("POST", "/api/plugins/resolve-chain", Map.of(
+            "projectId", projectId,
+            "aliasName", "support-chat"
+        ), true);
+        assertEquals(200, chainResp.statusCode(), chainResp.body());
+        Map<String, Object> chainJson = mapper.readValue(chainResp.body(), Map.class);
+        assertTrue(((Number) chainJson.get("totalInvocations")).intValue() >= 2);
+
+        // 4. Test POST /api/mcp-servers/{id}/probe
+        HttpResponse<String> mcpCreateResp = sendAdmin("POST", "/api/mcp-servers", Map.of(
+            "alias", "p5-probe-mcp",
+            "transport", "streamable_http",
+            "endpointUrl", "http://127.0.0.1:" + upstreamPort + "/mcp",
+            "allowedTools", List.of("search_kb", "list_tickets")
+        ), true);
+        assertEquals(201, mcpCreateResp.statusCode(), mcpCreateResp.body());
+        String mcpId = String.valueOf(mapper.readValue(mcpCreateResp.body(), Map.class).get("id"));
+
+        HttpResponse<String> probeResp = sendAdmin("POST", "/api/mcp-servers/" + mcpId + "/probe", Map.of(), true);
+        assertEquals(200, probeResp.statusCode(), probeResp.body());
+        Map<String, Object> probeJson = mapper.readValue(probeResp.body(), Map.class);
+        assertEquals("ok", probeJson.get("status"));
+        assertEquals("p5-probe-mcp", probeJson.get("alias"));
+
+        // 5. Test POST /api/telemetry/circuit-breakers/reset & GET /api/billing/dlq & GET /api/usage/breakdown
+        HttpResponse<String> cbResetResp = sendAdmin("POST", "/api/telemetry/circuit-breakers/reset", Map.of(), true);
+        assertEquals(200, cbResetResp.statusCode(), cbResetResp.body());
+        assertEquals(true, mapper.readValue(cbResetResp.body(), Map.class).get("reset"));
+
+        HttpResponse<String> dlqResp = sendAdmin("GET", "/api/billing/dlq", null, false);
+        assertEquals(200, dlqResp.statusCode(), dlqResp.body());
+        assertNotNull(mapper.readValue(dlqResp.body(), Map.class).get("items"));
+
+        HttpResponse<String> bdUsageResp = sendAdmin("GET", "/api/usage/breakdown?project_id=" + projectId, null, false);
+        assertEquals(200, bdUsageResp.statusCode(), bdUsageResp.body());
+        Map<String, Object> bdUsageJson = mapper.readValue(bdUsageResp.body(), Map.class);
+        assertNotNull(bdUsageJson.get("by_model"));
+        assertNotNull(bdUsageJson.get("by_key"));
+        assertNotNull(bdUsageJson.get("token_summary"));
+
+        // Cleanup P5 test resources
+        sendAdmin("DELETE", "/api/plugins/bindings/" + p5BindingId, null, true);
+        sendAdmin("DELETE", "/api/plugins/" + p5PluginId, null, true);
+        sendAdmin("DELETE", "/api/mcp-servers/" + mcpId, null, true);
+    }
+
+    @Test
+    @Order(20)
+    @SuppressWarnings("unchecked")
+    void testStage20PhaseP5ClusterNodeHeartbeatAggregationAndUnifiedRequestGanttWaterfallTrace() throws Exception {
+        // 1. Simulate a peer replica node heartbeat in Redis and verify GET /api/cluster/nodes aggregation
+        String hashKey = hotKeys.prefix() + "cluster:nodes";
+        redisConn.sync().hset(hashKey, "dp-peer-replica-2", mapper.writeValueAsString(Map.of(
+            "nodeId", "dp-peer-replica-2",
+            "role", "data-plane-netty",
+            "status", "ONLINE",
+            "haStateCode", 0,
+            "uptimeSeconds", 120,
+            "lastHeartbeatAt", Instant.now().toString(),
+            "lastHeartbeatEpochMs", System.currentTimeMillis(),
+            "snapshot", Map.of(
+                "pooledUpstreamDispatched", 42,
+                "caffeineAuthHits", 500,
+                "caffeineResponseHits", 120,
+                "mpscCommandsSubmitted", 88,
+                "hedgeTriggers", 3,
+                "hedgeSecondaryWins", 3
+            )
+        )));
+
+        HttpResponse<String> clusterResp = sendAdmin("GET", "/api/cluster/nodes", null, false);
+        assertEquals(200, clusterResp.statusCode(), clusterResp.body());
+        Map<String, Object> clusterJson = mapper.readValue(clusterResp.body(), Map.class);
+        assertNotNull(clusterJson.get("localNodeId"));
+        Map<String, Object> summary = (Map<String, Object>) clusterJson.get("summary");
+        assertTrue(((Number) summary.get("totalNodes")).intValue() >= 2, "Cluster registry must aggregate local node + peer replica");
+        assertTrue(((Number) summary.get("totalCaffeineAuthHits")).longValue() >= 500L);
+        List<Map<String, Object>> nodeItems = (List<Map<String, Object>>) clusterJson.get("items");
+        assertTrue(nodeItems.stream().anyMatch(n -> "dp-peer-replica-2".equals(n.get("nodeId"))));
+
+        // 2. Fetch most recent request and verify GET /api/requests/{id} synthesizes unified Gantt waterfall bars
+        HttpResponse<String> reqListResp = sendAdmin("GET", "/api/requests?project_id=" + projectId + "&limit=5", null, false);
+        assertEquals(200, reqListResp.statusCode(), reqListResp.body());
+        List<Map<String, Object>> reqItems = (List<Map<String, Object>>) mapper.readValue(reqListResp.body(), Map.class).get("items");
+        assertFalse(reqItems.isEmpty(), "Project must have recorded requests");
+        String targetReqId = String.valueOf(reqItems.getFirst().get("request_id"));
+
+        HttpResponse<String> reqDetailResp = sendAdmin("GET", "/api/requests/" + targetReqId, null, false);
+        assertEquals(200, reqDetailResp.statusCode(), reqDetailResp.body());
+        Map<String, Object> detailJson = mapper.readValue(reqDetailResp.body(), Map.class);
+        List<Map<String, Object>> waterfall = (List<Map<String, Object>>) detailJson.get("waterfall");
+        assertNotNull(waterfall, "Request detail must include synthesized Gantt waterfall bars");
+        assertTrue(waterfall.size() >= 2, "Waterfall must include admit stage and settle stage");
+        assertEquals("STAGE_1_4_ADMIT", waterfall.getFirst().get("stage"));
+        assertEquals("STAGE_8_POST_SETTLE", waterfall.getLast().get("stage"));
+
+        // 3. Verify Billing DLQ Replay endpoint & Native FFM Loaded inspection endpoint
+        HttpResponse<String> replayResp = sendAdmin("POST", "/api/billing/dlq/replay", Map.of(), true);
+        assertEquals(200, replayResp.statusCode(), replayResp.body());
+        Map<String, Object> replayJson = mapper.readValue(replayResp.body(), Map.class);
+        assertNotNull(replayJson.get("attempted"));
+        assertNotNull(replayJson.get("remainingDlqCount"));
+
+        HttpResponse<String> nativeLoadedResp = sendAdmin("GET", "/api/plugins/native-loaded", null, false);
+        assertEquals(200, nativeLoadedResp.statusCode(), nativeLoadedResp.body());
+        Map<String, Object> nativeLoadedJson = mapper.readValue(nativeLoadedResp.body(), Map.class);
+        assertNotNull(nativeLoadedJson.get("items"));
+    }
+
     private HttpResponse<String> sendAdmin(String method, String path, Object body, boolean includeCsrf) throws Exception {
         HttpRequest.Builder b = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + adminPort + path));

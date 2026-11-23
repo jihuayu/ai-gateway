@@ -252,6 +252,83 @@ public class QueriesController {
                 }
             }
             row.put("attempts", attempts);
+
+            // Synthesize unified Gantt Waterfall Trace combining request lifecycle, hedged attempts & OTel GenAiSpan
+            com.jihuayu.aigateway.hot.GatewayTelemetry.GenAiSpan matchedSpan = null;
+            for (var sp : com.jihuayu.aigateway.hot.GatewayTelemetry.global().recentSpans()) {
+                if (id.equals(sp.requestId())) {
+                    matchedSpan = sp;
+                    break;
+                }
+            }
+            if (matchedSpan != null) {
+                row.put("otel_span", matchedSpan);
+                row.put("trace_id", matchedSpan.traceId());
+            }
+
+            long reqCreatedMs = row.get("created_at") instanceof String cs ? Instant.parse(cs).toEpochMilli() : System.currentTimeMillis();
+            long reqUpdatedMs = row.get("updated_at") instanceof String us ? Instant.parse(us).toEpochMilli() : reqCreatedMs + 10L;
+            long totalDurationMs = Math.max(1L, matchedSpan != null && matchedSpan.durationMs() > 0 ? matchedSpan.durationMs() : (reqUpdatedMs - reqCreatedMs));
+            row.put("duration_ms", totalDurationMs);
+
+            List<Map<String, Object>> waterfall = new ArrayList<>();
+            long firstAttemptStartMs = reqCreatedMs;
+            if (!attempts.isEmpty() && attempts.getFirst().get("started_at") instanceof String sa) {
+                firstAttemptStartMs = Instant.parse(sa).toEpochMilli();
+            }
+            long preAdmitDur = Math.max(1L, Math.min(totalDurationMs, Math.max(1L, firstAttemptStartMs - reqCreatedMs)));
+            waterfall.add(Map.of(
+                "stage", "STAGE_1_4_ADMIT",
+                "label", "Stage 1~4 · 鉴权、近端缓存与 Redis Lua 配额预留",
+                "category", "kernel",
+                "start_offset_ms", 0L,
+                "duration_ms", preAdmitDur,
+                "status", "completed"
+            ));
+
+            for (int i = 0; i < attempts.size(); i++) {
+                Map<String, Object> att = attempts.get(i);
+                long aStart = att.get("started_at") instanceof String sa ? Instant.parse(sa).toEpochMilli() : firstAttemptStartMs;
+                long aEnd = att.get("finished_at") instanceof String fa ? Instant.parse(fa).toEpochMilli() : (aStart + Math.max(1L, totalDurationMs - preAdmitDur));
+                long offset = Math.max(0L, Math.min(totalDurationMs - 1L, aStart - reqCreatedMs));
+                long dur = Math.max(1L, aEnd - aStart);
+                boolean isHedgeOrBackup = i >= 1;
+                Map<String, Object> bar = new LinkedHashMap<>();
+                bar.put("stage", "STAGE_5_7_ATTEMPT_" + (i + 1));
+                bar.put("label", (isHedgeOrBackup ? "Stage 5~7 · 对冲/备节点抢答 Attempt #" : "Stage 5~7 · 主节点上游调用 Attempt #") + (i + 1));
+                bar.put("category", isHedgeOrBackup ? "hedge" : "upstream");
+                bar.put("start_offset_ms", offset);
+                bar.put("duration_ms", dur);
+                bar.put("ttft_ms", att.get("ttft_ms") != null ? att.get("ttft_ms") : row.get("ttft_ms"));
+                bar.put("status", att.getOrDefault("status", "completed"));
+                bar.put("target_id", att.getOrDefault("target_id", ""));
+                waterfall.add(bar);
+            }
+
+            if (matchedSpan != null && matchedSpan.events() != null) {
+                for (var ev : matchedSpan.events()) {
+                    long evOffset = Math.max(0L, Math.min(totalDurationMs, ev.timestampEpochMs() - matchedSpan.startEpochMs()));
+                    waterfall.add(Map.of(
+                        "stage", "OTEL_EVENT",
+                        "label", "Plugin Span Event · " + ev.name(),
+                        "category", "plugin",
+                        "start_offset_ms", evOffset,
+                        "duration_ms", 1L,
+                        "status", "completed"
+                    ));
+                }
+            }
+
+            waterfall.add(Map.of(
+                "stage", "STAGE_8_POST_SETTLE",
+                "label", "Stage 8 · 微美元精确结算与 OTLP / Langfuse 异步下沉",
+                "category", "settle",
+                "start_offset_ms", Math.max(0L, totalDurationMs - 1L),
+                "duration_ms", 1L,
+                "status", String.valueOf(row.getOrDefault("status", "completed"))
+            ));
+
+            row.put("waterfall", waterfall);
             return row;
         } catch (GatewayException ge) {
             throw ge;
@@ -422,6 +499,124 @@ public class QueriesController {
         }
     }
 
+
+    @GetMapping("/api/usage/breakdown")
+    public Map<String, Object> getUsageBreakdown(
+        HttpServletRequest req,
+        @RequestParam(value = "project_id", required = false) String p1,
+        @RequestParam(value = "projectId", required = false) String p2,
+        @RequestParam(value = "from", required = false) String fromStr,
+        @RequestParam(value = "to", required = false) String toStr
+    ) {
+        String projectId = resolveProjectId(p1, p2);
+        authService.requireProject(req, projectId, false);
+        TimeRange range = parseRange(fromStr, toStr);
+
+        try (Connection conn = pool.getConnection()) {
+            List<Map<String, Object>> byModel = new ArrayList<>();
+            try (PreparedStatement ps = conn.prepareStatement("""
+                SELECT COALESCE(alias_name, 'unknown') AS model,
+                       count(*)::int AS requests,
+                       count(*) FILTER(WHERE lower(status) IN('completed','success','succeeded'))::int AS successful_requests,
+                       COALESCE(sum(input_tokens), 0)::bigint AS input_tokens,
+                       COALESCE(sum(output_tokens), 0)::bigint AS output_tokens,
+                       COALESCE(sum(cached_input_tokens), 0)::bigint AS cached_input_tokens,
+                       COALESCE(sum(reasoning_tokens), 0)::bigint AS reasoning_tokens,
+                       COALESCE(sum(actual_micros), 0)::bigint AS actual_micros,
+                       COALESCE(avg(ttft_ms) FILTER(WHERE ttft_ms IS NOT NULL), 0)::double precision AS avg_ttft_ms
+                  FROM requests
+                 WHERE project_id = ?::uuid AND created_at >= ? AND created_at < ?
+                 GROUP BY COALESCE(alias_name, 'unknown')
+                 ORDER BY actual_micros DESC, requests DESC
+                """)) {
+                ps.setString(1, projectId);
+                ps.setTimestamp(2, Timestamp.from(range.from()));
+                ps.setTimestamp(3, Timestamp.from(range.to()));
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        Map<String, Object> row = new LinkedHashMap<>();
+                        row.put("model", rs.getString(1));
+                        row.put("requests", rs.getInt(2));
+                        row.put("successful_requests", rs.getInt(3));
+                        row.put("input_tokens", rs.getLong(4));
+                        row.put("output_tokens", rs.getLong(5));
+                        row.put("cached_input_tokens", rs.getLong(6));
+                        row.put("reasoning_tokens", rs.getLong(7));
+                        row.put("actual_micros", rs.getLong(8));
+                        row.put("avg_ttft_ms", Math.round(rs.getDouble(9)));
+                        byModel.add(row);
+                    }
+                }
+            }
+
+            List<Map<String, Object>> byKey = new ArrayList<>();
+            try (PreparedStatement ps = conn.prepareStatement("""
+                SELECT COALESCE(r.key_id::text, 'unknown') AS key_id,
+                       COALESCE(k.name, '临时或已删除密钥') AS key_name,
+                       COALESCE(k.prefix, 'sk-') AS key_prefix,
+                       count(*)::int AS requests,
+                       COALESCE(sum(r.input_tokens), 0)::bigint AS input_tokens,
+                       COALESCE(sum(r.output_tokens), 0)::bigint AS output_tokens,
+                       COALESCE(sum(r.cached_input_tokens), 0)::bigint AS cached_input_tokens,
+                       COALESCE(sum(r.reasoning_tokens), 0)::bigint AS reasoning_tokens,
+                       COALESCE(sum(r.actual_micros), 0)::bigint AS actual_micros
+                  FROM requests r
+                  LEFT JOIN api_keys k ON k.id = r.key_id
+                 WHERE r.project_id = ?::uuid AND r.created_at >= ? AND r.created_at < ?
+                 GROUP BY r.key_id, k.name, k.prefix
+                 ORDER BY actual_micros DESC, requests DESC
+                """)) {
+                ps.setString(1, projectId);
+                ps.setTimestamp(2, Timestamp.from(range.from()));
+                ps.setTimestamp(3, Timestamp.from(range.to()));
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        Map<String, Object> row = new LinkedHashMap<>();
+                        row.put("key_id", rs.getString(1));
+                        row.put("key_name", rs.getString(2));
+                        row.put("key_prefix", rs.getString(3));
+                        row.put("requests", rs.getInt(4));
+                        row.put("input_tokens", rs.getLong(5));
+                        row.put("output_tokens", rs.getLong(6));
+                        row.put("cached_input_tokens", rs.getLong(7));
+                        row.put("reasoning_tokens", rs.getLong(8));
+                        row.put("actual_micros", rs.getLong(9));
+                        byKey.add(row);
+                    }
+                }
+            }
+
+            long totalIn = 0L, totalOut = 0L, totalCached = 0L, totalReasoning = 0L, totalActual = 0L;
+            for (Map<String, Object> m : byModel) {
+                totalIn += ((Number) m.get("input_tokens")).longValue();
+                totalOut += ((Number) m.get("output_tokens")).longValue();
+                totalCached += ((Number) m.get("cached_input_tokens")).longValue();
+                totalReasoning += ((Number) m.get("reasoning_tokens")).longValue();
+                totalActual += ((Number) m.get("actual_micros")).longValue();
+            }
+
+            Map<String, Object> tokenSummary = new LinkedHashMap<>();
+            tokenSummary.put("input_tokens", totalIn);
+            tokenSummary.put("output_tokens", totalOut);
+            tokenSummary.put("cached_input_tokens", totalCached);
+            tokenSummary.put("reasoning_tokens", totalReasoning);
+            tokenSummary.put("actual_micros", totalActual);
+            tokenSummary.put("cache_hit_ratio", totalIn > 0 ? (double) totalCached / (double) totalIn : 0.0);
+
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("project_id", projectId);
+            out.put("from", range.from().toString());
+            out.put("to", range.to().toString());
+            out.put("by_model", byModel);
+            out.put("by_key", byKey);
+            out.put("token_summary", tokenSummary);
+            return out;
+        } catch (GatewayException ge) {
+            throw ge;
+        } catch (Exception e) {
+            throw new GatewayException(500, "internal_error", "Failed to load usage breakdown");
+        }
+    }
 
     @GetMapping("/api/usage/export")
     public ResponseEntity<String> exportUsage(
@@ -633,7 +828,40 @@ public class QueriesController {
                 @Override public void finishSse() {}
             };
 
-            dataPlane.handleChat("Bearer " + secret, mapper.writeValueAsBytes(chatPayload), requestId, captureSender);
+            String mode = body.get("mode") instanceof String m && !m.isBlank() ? m.trim().toLowerCase() : "chat";
+            if ("anthropic".equals(mode)) {
+                dataPlane.handleAnthropicMessages("Bearer " + secret, secret, mapper.writeValueAsBytes(chatPayload), requestId, captureSender);
+            } else if ("embeddings".equals(mode)) {
+                Map<String, Object> embPayload = new LinkedHashMap<>();
+                embPayload.put("model", model);
+                embPayload.put("input", body.get("input") != null ? body.get("input") : List.of(body.getOrDefault("prompt", "AI Gateway micro-USD hot ledger")));
+                dataPlane.handleEmbeddings("Bearer " + secret, mapper.writeValueAsBytes(embPayload), requestId, captureSender);
+            } else if ("rerank".equals(mode)) {
+                Map<String, Object> rrPayload = new LinkedHashMap<>();
+                rrPayload.put("model", model);
+                rrPayload.put("query", body.get("query") instanceof String q && !q.isBlank() ? q : String.valueOf(body.getOrDefault("prompt", "AI gateway billing")));
+                rrPayload.put("documents", body.get("documents") instanceof List<?> dl && !dl.isEmpty() ? dl : List.of("Unrelated cooking recipe", "Redis Lua 3-phase micro-USD billing ledger"));
+                if (body.get("top_n") instanceof Number tn) rrPayload.put("top_n", tn.intValue());
+                dataPlane.handleRerank("Bearer " + secret, mapper.writeValueAsBytes(rrPayload), requestId, captureSender);
+            } else if ("images".equals(mode)) {
+                Map<String, Object> imgPayload = new LinkedHashMap<>();
+                imgPayload.put("model", model);
+                imgPayload.put("prompt", body.get("prompt") instanceof String p && !p.isBlank() ? p : "Futuristic neon skyline");
+                imgPayload.put("n", 1);
+                imgPayload.put("size", body.get("size") instanceof String sz ? sz : "1024x1024");
+                dataPlane.handleImageGenerations("Bearer " + secret, mapper.writeValueAsBytes(imgPayload), requestId, captureSender);
+            } else if ("systemone".equals(mode)) {
+                Map<String, Object> sysPayload = new LinkedHashMap<>();
+                sysPayload.put("model", model);
+                sysPayload.put("state", body.get("state") instanceof String st && !st.isBlank() ? st : String.valueOf(body.getOrDefault("prompt", "I was charged twice this month. Please refund.")));
+                sysPayload.put("questions", body.get("questions") instanceof Map<?, ?> qm && !qm.isEmpty() ? qm : Map.of(
+                    "billing", Map.of("type", "noul", "instructions", "Is this message about billing?"),
+                    "urgency", Map.of("type", "score", "instructions", "Rate urgency from 0 to 3")
+                ));
+                dataPlane.handleSystemOne("Bearer " + secret, Map.of(), mapper.writeValueAsBytes(sysPayload), requestId, captureSender);
+            } else {
+                dataPlane.handleChat("Bearer " + secret, mapper.writeValueAsBytes(chatPayload), requestId, captureSender);
+            }
 
             Map<String, Object> parsed;
             try {

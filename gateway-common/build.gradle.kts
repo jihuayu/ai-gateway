@@ -2,6 +2,15 @@ plugins {
     `java-library`
 }
 
+tasks.withType<JavaCompile>().configureEach {
+    options.compilerArgs.addAll(
+        listOf(
+            "--add-modules",
+            "org.graalvm.nativeimage,org.graalvm.word"
+        )
+    )
+}
+
 dependencies {
     api(platform(libs.spring.boot.dependencies))
 
@@ -11,9 +20,6 @@ dependencies {
     // Jackson JSON
     api(libs.jackson.databind)
     api(libs.jackson.datatype.jsr310)
-
-    // GraalVM Native Image C API (@CEntryPoint / IsolateThread) for --shared JAR plugin bridge
-    api(libs.graalvm.nativeimage.sdk)
 
     // Official Spring AI Core Model Metadata (Usage, ChatOptions, RateLimit, ChatResponseMetadata)
     api(libs.spring.ai.model) {
