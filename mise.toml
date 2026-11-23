@@ -1,11 +1,11 @@
 # mise-en-place configuration for AI Gateway (https://mise.jdx.dev)
 [tools]
-java = "graalvm-25"
+java = "graalvm-25.0.4"
 gradle = "9.1.0"
 node = "22"
 
 [env]
-JAVA_OPTS = "--enable-preview"
+JAVA_OPTS = "--enable-preview --enable-native-access=ALL-UNNAMED"
 
 [tasks.build]
 description = "Build all gateway modules (:gateway-common, :gateway-data-plane, :gateway-control-plane)"

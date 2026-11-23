@@ -388,6 +388,17 @@ public class McpController {
         return Map.of("cleared", cleared);
     }
 
+    @PostMapping("/api/billing/dlq/replay")
+    public Map<String, Object> replayBillingDlq(
+        HttpServletRequest req,
+        @RequestBody(required = false) Map<String, Object> body
+    ) {
+        authService.requireWorkspaceRole(req, List.of("admin", "developer"));
+        String overrideUrl = body != null && body.get("webhookUrl") instanceof String s && !s.isBlank() ? s.trim() : null;
+        String overrideSecret = body != null && body.get("signingSecret") instanceof String s && !s.isBlank() ? s.trim() : null;
+        return dataPlaneExecutor.pluginPipeline().webhookBillingSinkPlugin().replayDlqEvents(overrideUrl, overrideSecret);
+    }
+
     @GetMapping("/api/cluster/nodes")
     public Map<String, Object> listClusterNodes(HttpServletRequest req) {
         authService.requireWorkspaceRole(req, List.of("admin", "developer", "viewer"));

@@ -2,18 +2,23 @@ package com.jihuayu.aigateway.plugin;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jihuayu.aigateway.plugin.PluginExecutionContext.SettledBillingEvent;
+import com.jihuayu.aigateway.security.SecurityUtils;
 import io.lettuce.core.api.StatefulRedisConnection;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedDeque;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 /**
  * Built-in FinOps Cost Attribution & Billing Sink Plugins (#54).
@@ -84,6 +89,8 @@ public final class MicrokernelBillingSinkPlugins {
         private final HttpClient httpClient;
         private final ConcurrentLinkedDeque<Map<String, Object>> exportedEvents = new ConcurrentLinkedDeque<>();
         private final ConcurrentLinkedDeque<Map<String, Object>> dlqEvents = new ConcurrentLinkedDeque<>();
+        private volatile String lastWebhookUrl = "";
+        private volatile String lastSigningSecret = "default-billing-secret";
 
         public WebhookBillingSinkPlugin(HttpClient httpClient) {
             this.httpClient = httpClient != null
@@ -110,6 +117,79 @@ public final class MicrokernelBillingSinkPlugins {
             return count;
         }
 
+        public Map<String, Object> replayDlqEvents(String overrideWebhookUrl, String overrideSecret) {
+            List<Map<String, Object>> snapshot = new ArrayList<>(dlqEvents);
+            dlqEvents.clear();
+            int attempted = snapshot.size();
+            int succeeded = 0;
+            int failed = 0;
+            for (Map<String, Object> item : snapshot) {
+                Map<String, Object> cleanPayload = new LinkedHashMap<>(item);
+                String itemUrl = cleanPayload.remove("dlqWebhookUrl") instanceof String s ? s : lastWebhookUrl;
+                cleanPayload.remove("dlqReason");
+                String targetUrl = (overrideWebhookUrl != null && !overrideWebhookUrl.isBlank()) ? overrideWebhookUrl.trim() : itemUrl;
+                String secret = (overrideSecret != null && !overrideSecret.isBlank()) ? overrideSecret.trim() : lastSigningSecret;
+                if (targetUrl == null || targetUrl.isBlank()) {
+                    Map<String, Object> retryFail = new LinkedHashMap<>(cleanPayload);
+                    retryFail.put("dlqReason", "missing_webhook_url");
+                    dlqEvents.addLast(retryFail);
+                    failed++;
+                    continue;
+                }
+                try {
+                    String jsonBody = MAPPER.writeValueAsString(cleanPayload);
+                    String sig = computeHmacSha256(secret, jsonBody);
+                    HttpRequest req = HttpRequest.newBuilder()
+                        .uri(URI.create(targetUrl))
+                        .timeout(Duration.ofMillis(2000L))
+                        .header("Content-Type", "application/json")
+                        .header("X-Gateway-Billing-Signature", "sha256=" + sig)
+                        .header("X-Gateway-Billing-Replay", "true")
+                        .header("User-Agent", "Mozilla/5.0 (compatible; Google-Agent; +https://developers.google.com/crawling/docs/crawlers-fetchers/google-agent)")
+                        .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
+                        .build();
+                    HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+                    if (resp.statusCode() >= 400) {
+                        Map<String, Object> retryFail = new LinkedHashMap<>(cleanPayload);
+                        retryFail.put("dlqWebhookUrl", targetUrl);
+                        retryFail.put("dlqReason", "HTTP " + resp.statusCode());
+                        dlqEvents.addLast(retryFail);
+                        failed++;
+                    } else {
+                        exportedEvents.addFirst(cleanPayload);
+                        while (exportedEvents.size() > 256) exportedEvents.pollLast();
+                        succeeded++;
+                    }
+                } catch (Exception e) {
+                    Map<String, Object> retryFail = new LinkedHashMap<>(cleanPayload);
+                    retryFail.put("dlqWebhookUrl", targetUrl);
+                    retryFail.put("dlqReason", e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
+                    dlqEvents.addLast(retryFail);
+                    failed++;
+                }
+            }
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("attempted", attempted);
+            out.put("succeeded", succeeded);
+            out.put("failed", failed);
+            out.put("remainingDlqCount", dlqEvents.size());
+            return out;
+        }
+
+        private static String computeHmacSha256(String secret, String message) {
+            try {
+                Mac mac = Mac.getInstance("HmacSHA256");
+                mac.init(new SecretKeySpec(
+                    (secret != null ? secret : "").getBytes(StandardCharsets.UTF_8),
+                    "HmacSHA256"
+                ));
+                byte[] digest = mac.doFinal((message != null ? message : "").getBytes(StandardCharsets.UTF_8));
+                return HexFormat.of().formatHex(digest);
+            } catch (Exception e) {
+                return SecurityUtils.hashKey((secret != null ? secret : "") + ":" + (message != null ? message : ""));
+            }
+        }
+
         @Override
         public void onPostSettle(PluginExecutionContext ctx) {
             Map<String, Object> payload = buildBillingEventMap(ctx);
@@ -123,6 +203,8 @@ public final class MicrokernelBillingSinkPlugins {
             }
             String secret = cfg.get("signingSecret") instanceof String s ? s : "default-billing-secret";
             long timeoutMs = cfg.get("timeoutMs") instanceof Number n ? Math.max(100L, n.longValue()) : 1500L;
+            this.lastWebhookUrl = webhookUrl;
+            this.lastSigningSecret = secret;
 
             try {
                 String jsonBody = MAPPER.writeValueAsString(payload);
@@ -137,15 +219,16 @@ public final class MicrokernelBillingSinkPlugins {
                     .build();
                 HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
                 if (resp.statusCode() >= 400) {
-                    recordDlq(ctx, payload, "HTTP " + resp.statusCode());
+                    recordDlq(ctx, payload, webhookUrl, "HTTP " + resp.statusCode());
                 }
             } catch (Exception e) {
-                recordDlq(ctx, payload, e.getMessage());
+                recordDlq(ctx, payload, webhookUrl, e.getMessage());
             }
         }
 
-        private void recordDlq(PluginExecutionContext ctx, Map<String, Object> payload, String error) {
+        private void recordDlq(PluginExecutionContext ctx, Map<String, Object> payload, String webhookUrl, String error) {
             Map<String, Object> dlqEntry = new LinkedHashMap<>(payload);
+            dlqEntry.put("dlqWebhookUrl", webhookUrl);
             dlqEntry.put("dlqReason", error);
             dlqEvents.addFirst(dlqEntry);
             while (dlqEvents.size() > 128) dlqEvents.pollLast();

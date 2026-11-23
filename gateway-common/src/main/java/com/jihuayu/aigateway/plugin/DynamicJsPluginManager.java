@@ -16,15 +16,16 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Stream;
 
 /**
- * Dual-Channel Dynamic Runtime JS Plugin Manager (#41).
+ * Dual-Channel Dynamic Runtime Plugin Manager (#41, #36).
  *
- * <p>Supports runtime dynamic loading and hot-swapping of {@code .js} plugins without gateway restart:
+ * <p>Supports runtime dynamic loading, hot-swapping, and deterministic unloading of plugins without gateway restart:
  * <ul>
  *   <li><b>Channel A (Control Plane / Redis Snapshot Hot Push)</b>: Compiles and caches {@link CompiledJsPlugin}
  *       instances keyed by {@code (pluginId, codeSha256)} with Copy-on-Write atomic replacement.</li>
- *   <li><b>Channel B (Local {@code PLUGINS_DIR/*.js} & {@code *.jar} Directory Hot Watcher)</b>:
- *       Monitors a local plugin directory for newly added, modified, or deleted {@code .js} (and {@code .jar})
- *       files and atomically hot-swaps them in memory.</li>
+ *   <li><b>Channel B (Local {@code PLUGINS_DIR} Directory Hot Watcher)</b>:
+ *       Monitors a local plugin directory for newly added, modified, or deleted {@code .js},
+ *       {@code .so}/{@code .dylib}/{@code .dll} (JDK 25 FFM shared libraries), and {@code .jar}
+ *       files and atomically hot-swaps or unloads them in memory.</li>
  * </ul>
  */
 public class DynamicJsPluginManager implements AutoCloseable {
@@ -32,6 +33,7 @@ public class DynamicJsPluginManager implements AutoCloseable {
     private final Map<String, CompiledJsPlugin> snapshotJsPlugins = new ConcurrentHashMap<>();
     private final Map<String, CompiledJsPlugin> directoryJsPlugins = new ConcurrentHashMap<>();
     private final Map<Path, Long> directoryModifiedTimes = new ConcurrentHashMap<>();
+    private final Map<Path, List<String>> directoryBinaryPluginIds = new ConcurrentHashMap<>();
     private final DynamicJarPluginLoader jarLoader;
 
     private volatile Path watchedDirectory;
@@ -86,8 +88,8 @@ public class DynamicJsPluginManager implements AutoCloseable {
     }
 
     /**
-     * Channel B: Scans a local directory for {@code *.js} (and {@code *.jar} in JVM mode) plugins
-     * and atomically hot-reloads any created, modified, or deleted files.
+     * Channel B: Scans a local directory for {@code *.js}, {@code *.so}/{@code *.dylib}/{@code *.dll} (FFM),
+     * and {@code *.jar} plugins and atomically hot-reloads any created, modified, or deleted files.
      */
     public synchronized List<String> scanDirectoryOnce(Path dir) {
         if (dir == null || !Files.isDirectory(dir)) {
@@ -95,9 +97,15 @@ public class DynamicJsPluginManager implements AutoCloseable {
         }
         List<String> activeIds = new ArrayList<>();
         Set<Path> seenPaths = ConcurrentHashMap.newKeySet();
+        List<Path> files;
         try (Stream<Path> stream = Files.list(dir)) {
-            for (Path file : stream.toList()) {
-                if (!Files.isRegularFile(file)) continue;
+            files = stream.filter(Files::isRegularFile).toList();
+        } catch (Exception e) {
+            return List.of();
+        }
+
+        for (Path file : files) {
+            try {
                 Path normalized = file.toAbsolutePath().normalize();
                 String fileName = normalized.getFileName().toString();
                 if (fileName.endsWith(".js")) {
@@ -120,28 +128,53 @@ public class DynamicJsPluginManager implements AutoCloseable {
                         directoryModifiedTimes.put(normalized, mtime);
                     }
                     activeIds.add(pluginId);
-                } else if (fileName.endsWith(".jar") && jarLoader != null && !DynamicJarPluginLoader.isNativeImage()) {
+                } else if (NativeFfmPluginLoader.isSharedLibraryFileName(fileName) && jarLoader != null) {
                     seenPaths.add(normalized);
                     long mtime = Files.getLastModifiedTime(normalized).toMillis();
-                    if (jarLoader.isJarModified(normalized, mtime)) {
-                        List<GatewayPlugin> loaded = jarLoader.loadJar(normalized);
-                        for (GatewayPlugin gp : loaded) {
-                            activeIds.add(gp.id());
-                        }
+                    Long prevMtime = directoryModifiedTimes.get(normalized);
+                    if (prevMtime == null || prevMtime != mtime || jarLoader.isNativeLibraryModified(normalized, mtime)) {
+                        List<GatewayPlugin> loaded = jarLoader.loadNativeLibrary(normalized);
+                        List<String> ids = loaded.stream().map(GatewayPlugin::id).toList();
+                        directoryBinaryPluginIds.put(normalized, ids);
                         directoryModifiedTimes.put(normalized, mtime);
                     }
+                    activeIds.addAll(directoryBinaryPluginIds.getOrDefault(normalized, List.of()));
+                } else if (fileName.endsWith(".jar") && jarLoader != null) {
+                    Path companion = jarLoader.findCompanionSharedLibrary(normalized);
+                    if (companion != null && companion.getParent() != null
+                        && companion.getParent().equals(normalized.getParent())) {
+                        continue;
+                    }
+                    if (DynamicJarPluginLoader.isNativeImage()
+                        && companion == null
+                        && !JarToSharedLibCompiler.isNativeImageToolAvailable()) {
+                        continue;
+                    }
+                    seenPaths.add(normalized);
+                    long mtime = Files.getLastModifiedTime(normalized).toMillis();
+                    Long prevMtime = directoryModifiedTimes.get(normalized);
+                    if (prevMtime == null || prevMtime != mtime || jarLoader.isJarModified(normalized, mtime)) {
+                        List<GatewayPlugin> loaded = jarLoader.loadJar(normalized);
+                        List<String> ids = loaded.stream().map(GatewayPlugin::id).toList();
+                        directoryBinaryPluginIds.put(normalized, ids);
+                        directoryModifiedTimes.put(normalized, mtime);
+                    }
+                    activeIds.addAll(directoryBinaryPluginIds.getOrDefault(normalized, List.of()));
                 }
-            }
-        } catch (Exception ignored) {}
+            } catch (Exception ignored) {}
+        }
 
-        // Remove any deleted .js or .jar files from active maps
+        // Remove and deterministically unload any deleted .js, .so/.dylib/.dll, or .jar files
         for (Path prevPath : new ArrayList<>(directoryModifiedTimes.keySet())) {
             if (!seenPaths.contains(prevPath)) {
                 directoryModifiedTimes.remove(prevPath);
+                directoryBinaryPluginIds.remove(prevPath);
                 String fn = prevPath.getFileName().toString();
                 if (fn.endsWith(".js")) {
                     String pid = "dir-js:" + fn.substring(0, fn.length() - 3);
                     directoryJsPlugins.remove(pid);
+                } else if (NativeFfmPluginLoader.isSharedLibraryFileName(fn) && jarLoader != null) {
+                    jarLoader.unloadNativeLibrary(prevPath);
                 } else if (fn.endsWith(".jar") && jarLoader != null) {
                     jarLoader.unloadJar(prevPath);
                 }

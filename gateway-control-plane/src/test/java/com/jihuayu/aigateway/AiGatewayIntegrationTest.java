@@ -3426,6 +3426,18 @@ public class AiGatewayIntegrationTest {
         assertTrue(waterfall.size() >= 2, "Waterfall must include admit stage and settle stage");
         assertEquals("STAGE_1_4_ADMIT", waterfall.getFirst().get("stage"));
         assertEquals("STAGE_8_POST_SETTLE", waterfall.getLast().get("stage"));
+
+        // 3. Verify Billing DLQ Replay endpoint & Native FFM Loaded inspection endpoint
+        HttpResponse<String> replayResp = sendAdmin("POST", "/api/billing/dlq/replay", Map.of(), true);
+        assertEquals(200, replayResp.statusCode(), replayResp.body());
+        Map<String, Object> replayJson = mapper.readValue(replayResp.body(), Map.class);
+        assertNotNull(replayJson.get("attempted"));
+        assertNotNull(replayJson.get("remainingDlqCount"));
+
+        HttpResponse<String> nativeLoadedResp = sendAdmin("GET", "/api/plugins/native-loaded", null, false);
+        assertEquals(200, nativeLoadedResp.statusCode(), nativeLoadedResp.body());
+        Map<String, Object> nativeLoadedJson = mapper.readValue(nativeLoadedResp.body(), Map.class);
+        assertNotNull(nativeLoadedJson.get("items"));
     }
 
     private HttpResponse<String> sendAdmin(String method, String path, Object body, boolean includeCsrf) throws Exception {

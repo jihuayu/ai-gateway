@@ -6,7 +6,7 @@ plugins {
 
 application {
     mainClass.set("com.jihuayu.aigateway.netty.NettyGatewayMain")
-    applicationDefaultJvmArgs = listOf("--enable-preview")
+    applicationDefaultJvmArgs = listOf("--enable-preview", "--enable-native-access=ALL-UNNAMED")
 }
 
 dependencies {
@@ -32,6 +32,7 @@ graalvmNative {
             buildArgs.addAll(
                 "-Ob",
                 "--enable-preview",
+                "--enable-native-access=ALL-UNNAMED",
                 "--enable-url-protocols=http,https",
                 "-H:+ReportExceptionStackTraces",
                 "--initialize-at-run-time=io.netty",

@@ -54,6 +54,60 @@
     "allDeclaredFields": true
   },
   {
+    "name": "com.jihuayu.aigateway.hot.HotContract$PluginSnapshot",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.jihuayu.aigateway.hot.HotContract$PluginBindingSnapshot",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.jihuayu.aigateway.plugin.PluginExecutionContext$SettledBillingEvent",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.jihuayu.aigateway.plugin.FfmPluginProtocol$ManifestEntry",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.jihuayu.aigateway.plugin.FfmPluginProtocol$ManifestPayload",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.jihuayu.aigateway.plugin.FfmPluginProtocol$ContextRequestEnvelope",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.jihuayu.aigateway.plugin.FfmPluginProtocol$ContextResponseEnvelope",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.jihuayu.aigateway.plugin.FfmPluginProtocol$HostUpcallRequest",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.jihuayu.aigateway.plugin.FfmPluginProtocol$HostUpcallResponse",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true
+  },
+  {
     "name": "com.jihuayu.aigateway.netty.DataPlaneExecutor$PriceEntry",
     "allDeclaredConstructors": true,
     "allDeclaredMethods": true,

@@ -573,6 +573,19 @@ export function TelemetryView({
     }
   }
 
+  async function handleReplayDlq() {
+    try {
+      const res = await api('/api/billing/dlq/replay', { method: 'POST', body: {} });
+      notify(
+        `死信重放完成：尝试 ${fmtInt(res?.attempted ?? 0)} 条，成功 ${fmtInt(res?.succeeded ?? 0)} 条，剩余 ${fmtInt(res?.remainingDlqCount ?? 0)} 条`,
+        (res?.failed ?? 0) > 0 ? 'info' : 'success',
+      );
+      await reload();
+    } catch (e: any) {
+      notify(e?.message || '重放死信队列失败', 'error');
+    }
+  }
+
   useEffect(() => {
     reload();
   }, [refreshTick]);
@@ -1044,9 +1057,14 @@ export function TelemetryView({
                   当 `builtin:billing-webhook-sink` 推送外部 ERP / Lago 计费接收端返回 HTTP 4xx/5xx 或超时时，事件将自动暂存至死信队列。
                 </span>
                 {dlqItems.length > 0 && canWrite !== false && (
-                  <UiButton size="sm" variant="outline" onClick={handleClearDlq}>
-                    清空已核对死信
-                  </UiButton>
+                  <div {...stylex.props(ui.inlineRow)}>
+                    <UiButton size="sm" variant="secondary" onClick={handleReplayDlq}>
+                      一键重放投递
+                    </UiButton>
+                    <UiButton size="sm" variant="outline" onClick={handleClearDlq}>
+                      清空已核对死信
+                    </UiButton>
+                  </div>
                 )}
               </div>
               {dlqItems.length ? (
@@ -1267,10 +1285,25 @@ export function PluginsView({
   const [bConfigOverrideJson, setBConfigOverrideJson] = useState('{}');
   const [bEnabled, setBEnabled] = useState(true);
 
-  // Dynamic JAR Hot-Loader Modal
+  // Dynamic JAR & JDK 25 Native FFM Shared-Library Hot-Loader State
   const [jarModalOpen, setJarModalOpen] = useState(false);
   const [jarPathInput, setJarPathInput] = useState('/opt/gateway/plugins/custom-plugin.jar');
   const [jarResult, setJarResult] = useState<any | null>(null);
+
+  const [nativeState, setNativeState] = useState<{
+    nativeImageRuntime: boolean;
+    nativeImageCompilerAvailable: boolean;
+    items: any[];
+  }>({
+    nativeImageRuntime: false,
+    nativeImageCompilerAvailable: false,
+    items: [],
+  });
+  const [nativeModalOpen, setNativeModalOpen] = useState(false);
+  const [nativeLoadMode, setNativeLoadMode] = useState<'lib' | 'jar'>('lib');
+  const [nativePathInput, setNativePathInput] = useState('/opt/gateway/plugins/libext_plugin.so');
+  const [nativeOutputLibInput, setNativeOutputLibInput] = useState('');
+  const [nativeResult, setNativeResult] = useState<any | null>(null);
 
   // Dry-run modal
   const [dryRunOpen, setDryRunOpen] = useState(false);
@@ -1283,12 +1316,20 @@ export function PluginsView({
   const [deletingPlugin, setDeletingPlugin] = useState<any | null>(null);
 
   async function reload() {
-    const [plRes, bdRes] = await Promise.all([
+    const [plRes, bdRes, natRes] = await Promise.all([
       getSafe('/api/plugins'),
       getSafe('/api/plugins/bindings'),
+      getSafe('/api/plugins/native-loaded'),
     ]);
     if (plRes.ok) setPlugins(items(plRes.data));
     if (bdRes.ok) setBindings(items(bdRes.data));
+    if (natRes.ok && natRes.data) {
+      setNativeState({
+        nativeImageRuntime: Boolean(natRes.data.nativeImageRuntime),
+        nativeImageCompilerAvailable: Boolean(natRes.data.nativeImageCompilerAvailable),
+        items: items(natRes.data),
+      });
+    }
     runResolveChain();
   }
 
@@ -1499,6 +1540,41 @@ export function PluginsView({
     }
   }
 
+  async function handleLoadNative() {
+    if (!nativePathInput.trim()) return;
+    try {
+      const payload =
+        nativeLoadMode === 'lib'
+          ? { libPath: nativePathInput.trim() }
+          : {
+              jarPath: nativePathInput.trim(),
+              ...(nativeOutputLibInput.trim() ? { outputLibPath: nativeOutputLibInput.trim() } : {}),
+            };
+      const res = await api('/api/plugins/load-native', {
+        method: 'POST',
+        body: payload,
+      });
+      setNativeResult(res);
+      notify(`成功挂载 Native FFM 动态库（导出 ${fmtInt(res?.loadedCount ?? 0)} 个插件）`, 'success');
+      await reload();
+    } catch (e: any) {
+      setNativeResult({ error: e?.message || '加载 Native FFM 动态库失败' });
+    }
+  }
+
+  async function handleUnloadNativeLib(libraryPath: string) {
+    try {
+      await api('/api/plugins/unload-native', {
+        method: 'POST',
+        body: { libPath: libraryPath },
+      });
+      notify(`已确定性卸载动态库 ${libraryPath} 并释放 Arena/Isolate 内存`, 'success');
+      await reload();
+    } catch (e: any) {
+      notify(e?.message || '卸载动态库失败', 'error');
+    }
+  }
+
   async function handleDeletePlugin(pl: any) {
     try {
       const related = bindings.filter((b) => b.pluginId === pl.id);
@@ -1552,10 +1628,13 @@ export function PluginsView({
     <>
       <PageHeader
         title="8 阶段微内核插件与流水线编排中心"
-        description="基于同构 PluginExecutionContext（ctx.kv / ctx.crypto / ctx.telemetry）管理 24 个企业内置插件模板、8 阶段生效泳道预演、GraalJS 确定性沙箱与 JVM 动态 JAR 热加载。"
+        description="基于同构 PluginExecutionContext（ctx.kv / ctx.crypto / ctx.telemetry）管理 25 个企业内置插件模板、8 阶段生效泳道预演、GraalJS 确定性沙箱、JVM 动态 SPI JAR 与 JDK 25 FFM 原生动态共享库（.so/.dylib/.dll）热插拔。"
         actions={
           canWrite ? (
             <>
+              <UiButton variant="outline" onClick={() => setNativeModalOpen(true)}>
+                热加载 Native FFM (.so)
+              </UiButton>
               <UiButton variant="outline" onClick={() => setJarModalOpen(true)}>
                 热加载 SPI JAR
               </UiButton>
@@ -1571,6 +1650,84 @@ export function PluginsView({
           )
         }
       />
+
+      {/* JDK 25 FFM Native Shared-Library Runtime Panel */}
+      <section {...stylex.props(ui.card)}>
+        <div {...stylex.props(ui.cardHeader)}>
+          <div>
+            <h3 {...stylex.props(ui.cardTitle)}>
+              JDK 25 FFM 原生动态共享库运行时（Native Shared-Library Hot-Plug & Arena Unloader）
+            </h3>
+            <p {...stylex.props(ui.cardSubtitle)}>
+              基于 java.lang.foreign.Arena.ofShared() 与 SymbolLookup.libraryLookup() 实现 .so / .dylib / .dll 原生插件及 GraalVM --shared 编译产物的零停机挂载、Isolate 销毁与 dlclose 确定性内存回收。
+            </p>
+          </div>
+          <div {...stylex.props(ui.inlineRow)}>
+            <UiBadge
+              tone={nativeState.nativeImageRuntime ? 'success' : 'info'}
+              label={nativeState.nativeImageRuntime ? '宿主: GraalVM Native Image' : '宿主: OpenJDK 25 JVM'}
+            />
+            <UiBadge
+              tone={nativeState.nativeImageCompilerAvailable ? 'success' : 'neutral'}
+              label={
+                nativeState.nativeImageCompilerAvailable
+                  ? 'native-image --shared 编译器就绪'
+                  : '预编译 .so/.dylib/.dll 模式'
+              }
+            />
+            <UiBadge tone="info" label={`已挂载动态库: ${nativeState.items.length}`} />
+          </div>
+        </div>
+        {nativeState.items.length > 0 && (
+          <div {...stylex.props(ui.cardBodyFlush)}>
+            <div {...stylex.props(ui.tableWrap)}>
+              <table {...stylex.props(ui.table)}>
+                <thead>
+                  <tr>
+                    <th {...stylex.props(ui.th)}>共享库路径 (libraryPath)</th>
+                    <th {...stylex.props(ui.th)}>ABI 桥接协议</th>
+                    <th {...stylex.props(ui.th)}>导出插件 ID</th>
+                    <th {...stylex.props(ui.th, ui.thNum)}>在途调用</th>
+                    <th {...stylex.props(ui.th)} />
+                  </tr>
+                </thead>
+                <tbody>
+                  {nativeState.items.map((lib: any) => (
+                    <tr key={lib.libraryPath}>
+                      <td {...stylex.props(ui.td, ui.tdMono)}>{lib.libraryPath}</td>
+                      <td {...stylex.props(ui.td)}>
+                        <UiBadge
+                          tone={lib.abiMode === 'GRAAL_ISOLATE' ? 'info' : 'neutral'}
+                          label={lib.abiMode || 'PLAIN_C'}
+                        />
+                      </td>
+                      <td {...stylex.props(ui.td)}>
+                        <div {...stylex.props(ui.inlineRow)}>
+                          {arr(lib.pluginIds).map((pid: string) => (
+                            <UiBadge key={pid} tone="success" label={pid} />
+                          ))}
+                        </div>
+                      </td>
+                      <td {...stylex.props(ui.td, ui.tdNum)}>{fmtInt(lib.inFlightCalls ?? 0)}</td>
+                      <td {...stylex.props(ui.td, ui.tdActions)}>
+                        {canWrite && (
+                          <UiButton
+                            size="sm"
+                            variant="outline"
+                            onClick={() => handleUnloadNativeLib(lib.libraryPath)}
+                          >
+                            卸载并释放 Arena
+                          </UiButton>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </section>
 
       {/* 8-Stage Effective Pipeline Swimlane Simulator */}
       <section {...stylex.props(ui.card)}>
@@ -2186,6 +2343,82 @@ export function PluginsView({
           {jarResult && (
             <pre {...stylex.props(ui.codeBlock)}>
               <code>{JSON.stringify(jarResult, null, 2)}</code>
+            </pre>
+          )}
+        </div>
+      </UiDialog>
+
+      {/* JDK 25 FFM Native Shared-Library Hot-Loader Dialog */}
+      <UiDialog
+        open={nativeModalOpen}
+        onOpenChange={setNativeModalOpen}
+        title="JDK 25 FFM 原生动态共享库 (.so / .dylib / .dll) 热加载"
+        description="直接通过 FFM Arena.ofShared() 挂载预编译 C/Rust/GraalVM 共享库，或调用 native-image --shared 将标准 GatewayPlugin JAR 即时编译为原生动态库挂载。"
+        wide
+        footer={
+          <>
+            <UiButton variant="outline" onClick={() => setNativeModalOpen(false)}>
+              关闭
+            </UiButton>
+            <UiButton variant="primary" onClick={handleLoadNative}>
+              挂载原生动态库
+            </UiButton>
+          </>
+        }
+      >
+        <div {...stylex.props(ui.formGrid)}>
+          <div {...stylex.props(ui.field)}>
+            <label {...stylex.props(ui.fieldLabel)}>加载模式</label>
+            <select
+              value={nativeLoadMode}
+              onChange={(e) => {
+                const m = e.target.value as 'lib' | 'jar';
+                setNativeLoadMode(m);
+                setNativePathInput(
+                  m === 'lib'
+                    ? '/opt/gateway/plugins/libext_plugin.so'
+                    : '/opt/gateway/plugins/ext-plugin.jar',
+                );
+              }}
+              {...stylex.props(ui.input)}
+            >
+              <option value="lib">直接挂载预编译共享库（.so / .dylib / .dll）</option>
+              <option value="jar">从标准 GatewayPlugin JAR 编译为 GraalVM --shared 动态库并挂载</option>
+            </select>
+          </div>
+          <Field name="nativePath" {...stylex.props(ui.field)}>
+            <FieldLabel {...stylex.props(ui.fieldLabel)}>
+              {nativeLoadMode === 'lib'
+                ? '服务端共享库绝对路径 (libPath)'
+                : '服务端待编译插件 JAR 绝对路径 (jarPath)'}
+            </FieldLabel>
+            <Input
+              value={nativePathInput}
+              onValueChange={setNativePathInput}
+              placeholder={
+                nativeLoadMode === 'lib'
+                  ? '/opt/gateway/plugins/libext_plugin.so'
+                  : '/opt/gateway/plugins/ext-plugin.jar'
+              }
+              {...stylex.props(ui.input)}
+            />
+          </Field>
+          {nativeLoadMode === 'jar' && (
+            <Field name="nativeOutPath" {...stylex.props(ui.field)}>
+              <FieldLabel {...stylex.props(ui.fieldLabel)}>
+                产物共享库输出路径（outputLibPath，可选）
+              </FieldLabel>
+              <Input
+                value={nativeOutputLibInput}
+                onValueChange={setNativeOutputLibInput}
+                placeholder="留空则默认在同目录生成 lib<name>.so/.dylib"
+                {...stylex.props(ui.input)}
+              />
+            </Field>
+          )}
+          {nativeResult && (
+            <pre {...stylex.props(ui.codeBlock)}>
+              <code>{JSON.stringify(nativeResult, null, 2)}</code>
             </pre>
           )}
         </div>

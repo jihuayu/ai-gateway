@@ -1,6 +1,6 @@
 // AI Gateway API client, CSRF/Session state & micro-USD formatters.
 
-export const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
+export const API_BASE = ((import.meta as any).env?.VITE_API_BASE_URL || '').replace(/\/$/, '');
 
 const numFmt = new Intl.NumberFormat('zh-CN');
 const dateFmt = new Intl.DateTimeFormat('zh-CN', {

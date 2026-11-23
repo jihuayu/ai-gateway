@@ -8,7 +8,7 @@ plugins {
 
 allprojects {
     group = "com.jihuayu"
-    version = "0.2.0"
+    version = "0.5.0"
 
     repositories {
         mavenCentral()
@@ -20,6 +20,8 @@ subprojects {
     apply(plugin = "com.diffplug.spotless")
 
     extensions.configure<JavaPluginExtension> {
+        sourceCompatibility = JavaVersion.VERSION_25
+        targetCompatibility = JavaVersion.VERSION_25
         toolchain {
             languageVersion.set(JavaLanguageVersion.of(25))
         }
@@ -27,13 +29,17 @@ subprojects {
 
     tasks.withType<JavaCompile>().configureEach {
         options.encoding = "UTF-8"
-        options.release.set(25)
-        options.compilerArgs.add("--enable-preview")
+        options.compilerArgs.addAll(
+            listOf(
+                "--enable-preview",
+                "-Xlint:-options"
+            )
+        )
     }
 
     tasks.withType<Test>().configureEach {
         useJUnitPlatform()
-        jvmArgs("--enable-preview")
+        jvmArgs("--enable-preview", "--enable-native-access=ALL-UNNAMED")
     }
 
     extensions.configure<SpotlessExtension> {
